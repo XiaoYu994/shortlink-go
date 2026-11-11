@@ -5,109 +5,36 @@
 ## 快速开始
 
 ```bash
-cp .env.example .env                # 配置 DATABASE_URL
-make run                            # 启动服务，默认 :8080
-curl -i localhost:8080/healthz      # 应返回 200 和 ok
-make test                           # 跑测试（带 -race）
-make lint                           # golangci-lint 完整静态检查
-make help                           # 查看全部命令
+# 先按 docs/runbook.md 准备 .env 和 DATABASE_URL
+make run
+curl -i localhost:8080/healthz
 ```
 
-服务启动需要 `DATABASE_URL`，没有配置会直接报错退出。
-
-需要数据库和 Redis 时（阶段 3 起）：
+创建短链：
 
 ```bash
-cp .env.example .env
-make up        # 启动 PostgreSQL 和 Redis，首次启动自动建表
-make psql      # 进数据库看看
-make down      # 停止
+curl -i -X POST localhost:8080/api/v1/links \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}'
 ```
 
-如果本机 5432 端口已经被其他 PostgreSQL 占用，可以复用已有实例：把 `.env` 里的
-`DATABASE_URL` 指向它，然后手动执行 `migrations/001_create_links.sql`。表名按
-PostgreSQL 习惯使用 `links`，共用数据库时确认它没有被其他项目占用。
+响应里的 `code` 拼到 `/r/{code}` 就是短链：
 
-集成测试会清空 `links` 表，`DATABASE_URL` 只能指向开发库。
-
-## HTTP 接口
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/healthz` | 健康检查，运维端点，不版本化 |
-| `POST` | `/api/v1/links` | 创建短链，管理 API 带版本前缀 |
-| `GET` | `/r/{code}` | 302 跳转到原始 URL，公开短链地址，不版本化 |
-
-管理 API 有不兼容改动时新增 `/api/v2`，`v1` 按计划保留一段时间。
-短链是已经发出去的永久地址，不能跟着 API 版本失效，所以跳转路径固定为 `/r/{code}`。
-短码都在 `/r/` 命名空间下，和 `/healthz`、`/api/...` 天然隔离。
-
-## 目录结构
-
-```txt
-shortlink/
-├── cmd/server/main.go      # 程序入口，只做组装和启动
-├── internal/
-│   ├── httpapi/            # handler、路由、中间件
-│   ├── link/               # 短链核心：结构体、业务错误、校验
-│   ├── idgen/              # 随机短码与 Base62 编解码
-│   ├── memorystore/        # 内存存储（测试和本地开发）
-│   ├── config/             # 配置加载
-│   └── postgres/           # PostgreSQL 存储实现
-├── migrations/             # 建表 SQL
-├── docker-compose.yml      # 本地的 PostgreSQL 和 Redis
-├── AGENTS.md               # 协作方式和代码约定（活文档）
-└── Makefile
+```bash
+curl -i localhost:8080/r/AbC123xy
 ```
 
-每个包的包注释写在这个包的第一个文件里（`link/link.go`、`idgen/base62.go` 等），
-说明了这个包做什么、对应哪一课。包名和依赖方向：`httpapi` 依赖 `link`，
-`memorystore` 和 `postgres` 依赖 `link`、`idgen`，`link` 不依赖它们；
-`main` 负责把它们组装起来。
+## 文档
 
-代码约定和 AI 协作方式见 [AGENTS.md](AGENTS.md)。
+| 文档 | 内容 |
+| --- | --- |
+| [docs/README.md](docs/README.md) | 文档索引 |
+| [docs/architecture.md](docs/architecture.md) | 架构、目录、依赖方向、请求流程 |
+| [docs/api.md](docs/api.md) | HTTP API 契约和示例 |
+| [docs/runbook.md](docs/runbook.md) | 本地启动、数据库、排错 |
+| [docs/roadmap.md](docs/roadmap.md) | 学习路线和进度 |
+| [docs/adr/README.md](docs/adr/README.md) | 架构决策记录 |
 
-## 路线图
+## 代码约定
 
-按顺序做，每个阶段结束时 `make check` 都应该通过。
-
-### 阶段 1：Base62（第 2、6 课）
-
-- [x] `internal/idgen`：`EncodeBase62`、`DecodeBase62`
-- [x] 表驱动测试，包含非法字符和溢出
-
-### 阶段 2：内存版服务（第 3、4、6 课）
-
-- [x] `internal/link`：`Link`、`NewLink`、`ErrNotFound`、`ValidationError`、URL 校验
-- [x] 内存版 Store（map 加 `sync.RWMutex`），放在 `internal/memorystore`
-- [x] `httpapi`：`POST /api/v1/links` 和 `GET /r/{code}`，在 `Server` 里定义 `LinkStore` 接口
-- [x] 用 httptest 测试：创建成功、非法 URL 返回 400、不存在的短码返回 404、跳转返回 302
-- [x] 限制请求体大小；短码统一放在 `/r/` 下，和 `/healthz`、`/api` 路由天然隔离
-
-### 阶段 3：PostgreSQL（第 7 课）
-
-- [x] `go get github.com/jackc/pgx/v5`
-- [x] `internal/postgres`：`Store` 实现 `LinkStore`
-- [x] 错误处理：`sql.ErrNoRows` 转 `link.ErrNotFound`，`23505` 触发短码重试
-- [x] 集成测试（没有 `DATABASE_URL` 时 `t.Skip`）
-- [x] 短码改为随机生成（8 位 Base62），id 仅作内部主键
-- [x] 表名按 PostgreSQL 习惯使用 `links`
-- [x] 连接池参数从 `.env` 读取（`DB_MAX_OPEN_CONNS` 等）
-
-### 阶段 4：配置、日志、中间件、优雅退出（第 8 课）
-
-- [ ] `internal/config`：`LoadConfig` 和测试
-- [ ] logging、recoverer 中间件和 `chain`，各自有测试
-- [ ] `signal.NotifyContext` 加 `Shutdown`，手动验证：请求处理到一半时按 Ctrl+C
-
-### 阶段 5：Redis 缓存与点击统计（第 9、10 课）
-
-- [ ] `go get github.com/redis/go-redis/v9`
-- [ ] `CachedStore`：命中、负缓存、singleflight、Redis 故障降级
-- [ ] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
-- [ ] 用泛型的 `doTyped` 去掉类型断言
-
-### 阶段 6：一个 SaaS 功能
-
-- [ ] 多租户加 API Key 鉴权（中间件加 context 传值）
-- [ ] 拆分 `cmd/redirector` 和 `cmd/console`
+见 [AGENTS.md](AGENTS.md)。

@@ -1,0 +1,71 @@
+# HTTP API
+
+## 路由
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/healthz` | 健康检查，返回 `ok` |
+| `POST` | `/api/v1/links` | 创建短链 |
+| `GET` | `/r/{code}` | 302 跳转到原始 URL |
+
+管理 API 带版本前缀 `/api/v1`；跳转路径 `/r/{code}` 不加版本，因为短链是永久地址。`/healthz` 是运维端点，不版本化。
+
+## 创建短链
+
+```bash
+curl -i -X POST localhost:8080/api/v1/links \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/path?q=1"}'
+```
+
+成功：
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json; charset=utf-8
+Location: /r/AbC123xy
+
+{"code":"AbC123xy","url":"https://example.com/path?q=1"}
+```
+
+规则：
+
+- 请求体最多 4KB。
+- `url` 必填，最多 2048 字节。
+- 只允许 `http` / `https` 绝对 URL。
+- URL 内部不能有空白；空格需要百分号编码。
+- 请求体必须恰好是一个 JSON 值，尾部多余内容返回 400。
+
+错误格式：
+
+```json
+{"error":"invalid JSON body"}
+```
+
+| 状态码 | 场景 |
+| --- | --- |
+| 400 | JSON 或 URL 不合法 |
+| 413 | 请求体超过 4KB |
+| 500 | 存储或内部错误 |
+
+## 跳转
+
+```bash
+curl -i localhost:8080/r/AbC123xy
+```
+
+成功返回 302，`Location` 是原始 URL。短码不存在返回 404，存储错误返回 500，错误体都是 JSON。
+
+## 健康检查
+
+```bash
+curl -i localhost:8080/healthz
+```
+
+返回 200 和 `ok`。它是 liveness 探针，故意不访问数据库。
+
+## 版本策略
+
+- `/api/v1` 出现不兼容改动时新增 `/api/v2`，v1 按计划保留。
+- `/r/{code}` 不随 API 版本变化；已经发出去的短链必须一直可用。
+- 短码大小写敏感。
