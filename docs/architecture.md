@@ -12,7 +12,7 @@ shortlink/
 ├── internal/
 │   ├── httpapi/         # handler、路由、中间件；定义 LinkStore 接口
 │   ├── link/            # 领域模型：Link、NewLink、错误、URL 校验
-│   ├── idgen/           # 随机短码生成、Base62 编解码
+│   ├── idgen/           # 随机短码生成
 │   ├── memorystore/     # 内存存储，仅测试和本地开发
 │   ├── postgres/        # PostgreSQL 存储，生产使用
 │   └── config/          # 配置加载（第 8 课）
