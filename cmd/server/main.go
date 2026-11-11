@@ -7,14 +7,17 @@ Command server 是短链接服务的入口。
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"shortlink/internal/httpapi"
-	"shortlink/internal/link"
+	"shortlink/internal/postgres"
 )
 
 func main() {
@@ -34,8 +37,26 @@ func run() error {
 		addr = ":8080"
 	}
 
-	store := link.NewMemoryStore()
-	srv := httpapi.NewServer(logger, store)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return errors.New("DATABASE_URL is required")
+	}
+
+	pool, err := loadPoolConfig()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	db, err := postgres.Open(ctx, dsn, pool)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("connect postgres: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	logger.Info("connected to postgres")
+
+	srv := httpapi.NewServer(logger, postgres.NewStore(db))
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -53,4 +74,56 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// loadPoolConfig 从环境变量读取连接池参数，未配置时使用默认值。
+func loadPoolConfig() (postgres.PoolConfig, error) {
+	cfg := postgres.DefaultPoolConfig()
+	var err error
+	if cfg.MaxOpenConns, err = envInt("DB_MAX_OPEN_CONNS", cfg.MaxOpenConns); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxIdleConns, err = envInt("DB_MAX_IDLE_CONNS", cfg.MaxIdleConns); err != nil {
+		return cfg, err
+	}
+	if cfg.ConnMaxLifetime, err = envDuration("DB_CONN_MAX_LIFETIME", cfg.ConnMaxLifetime); err != nil {
+		return cfg, err
+	}
+	if cfg.ConnMaxIdleTime, err = envDuration("DB_CONN_MAX_IDLE_TIME", cfg.ConnMaxIdleTime); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxOpenConns <= 0 {
+		return cfg, errors.New("DB_MAX_OPEN_CONNS must be positive")
+	}
+	if cfg.MaxIdleConns < 0 || cfg.MaxIdleConns > cfg.MaxOpenConns {
+		return cfg, errors.New("DB_MAX_IDLE_CONNS must be between 0 and DB_MAX_OPEN_CONNS")
+	}
+	if cfg.ConnMaxLifetime < 0 || cfg.ConnMaxIdleTime < 0 {
+		return cfg, errors.New("connection lifetimes must not be negative")
+	}
+	return cfg, nil
+}
+
+func envInt(name string, def int) (int, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return n, nil
+}
+
+func envDuration(name string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return d, nil
 }

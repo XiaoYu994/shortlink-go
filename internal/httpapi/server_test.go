@@ -10,12 +10,14 @@ import (
 	"strings"
 	"testing"
 
+	"shortlink/internal/idgen"
 	"shortlink/internal/link"
+	"shortlink/internal/memorystore"
 )
 
 // newTestServer 返回一个不输出日志、使用内存存储的 Server，供各个测试复用。
 func newTestServer() *Server {
-	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), link.NewMemoryStore())
+	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New())
 }
 
 /*
@@ -53,14 +55,14 @@ func TestCreateAndRedirect(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Code != "1" {
-		t.Errorf("code = %q, want %q", resp.Code, "1")
+	if len(resp.Code) != idgen.CodeLength {
+		t.Errorf("code length = %d, want %d", len(resp.Code), idgen.CodeLength)
 	}
 	if resp.URL != "https://example.com/path?q=1" {
 		t.Errorf("url = %q, want %q", resp.URL, "https://example.com/path?q=1")
 	}
-	if got := rec.Header().Get("Location"); got != "/r/1" {
-		t.Errorf("Location = %q, want %q", got, "/r/1")
+	if got, want := rec.Header().Get("Location"), "/r/"+resp.Code; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/r/"+resp.Code, nil)

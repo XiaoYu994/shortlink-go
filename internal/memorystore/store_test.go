@@ -1,17 +1,20 @@
-package link
+package memorystore
 
 import (
 	"context"
 	"errors"
 	"sync"
 	"testing"
+
+	"shortlink/internal/idgen"
+	"shortlink/internal/link"
 )
 
-func TestMemoryStoreCreateAndGetByCode(t *testing.T) {
-	store := NewMemoryStore()
+func TestStoreCreateAndGetByCode(t *testing.T) {
+	store := New()
 	ctx := context.Background()
 
-	l, err := NewLink("https://example.com")
+	l, err := link.NewLink("https://example.com")
 	if err != nil {
 		t.Fatalf("NewLink returned error: %v", err)
 	}
@@ -22,8 +25,8 @@ func TestMemoryStoreCreateAndGetByCode(t *testing.T) {
 	if l.ID != 1 {
 		t.Errorf("ID = %d, want 1", l.ID)
 	}
-	if l.Code != "1" {
-		t.Errorf("Code = %q, want %q", l.Code, "1")
+	if len(l.Code) != idgen.CodeLength {
+		t.Errorf("Code length = %d, want %d", len(l.Code), idgen.CodeLength)
 	}
 	if l.CreatedAt.IsZero() {
 		t.Error("CreatedAt is zero")
@@ -38,20 +41,20 @@ func TestMemoryStoreCreateAndGetByCode(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreGetByCodeNotFound(t *testing.T) {
-	store := NewMemoryStore()
+func TestStoreGetByCodeNotFound(t *testing.T) {
+	store := New()
 
 	_, err := store.GetByCode(context.Background(), "missing")
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetByCode error = %v, want ErrNotFound", err)
+	if !errors.Is(err, link.ErrNotFound) {
+		t.Errorf("GetByCode error = %v, want link.ErrNotFound", err)
 	}
 }
 
-func TestMemoryStoreGetByCodeReturnsCopy(t *testing.T) {
-	store := NewMemoryStore()
+func TestStoreGetByCodeReturnsCopy(t *testing.T) {
+	store := New()
 	ctx := context.Background()
 
-	l, err := NewLink("https://example.com")
+	l, err := link.NewLink("https://example.com")
 	if err != nil {
 		t.Fatalf("NewLink returned error: %v", err)
 	}
@@ -74,8 +77,8 @@ func TestMemoryStoreGetByCodeReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreConcurrentCreate(t *testing.T) {
-	store := NewMemoryStore()
+func TestStoreConcurrentCreate(t *testing.T) {
+	store := New()
 	ctx := context.Background()
 	const n = 100
 
@@ -84,7 +87,7 @@ func TestMemoryStoreConcurrentCreate(t *testing.T) {
 	errs := make([]error, n)
 	for i := range n {
 		wg.Go(func() {
-			l, err := NewLink("https://example.com")
+			l, err := link.NewLink("https://example.com")
 			if err != nil {
 				errs[i] = err
 				return
@@ -116,12 +119,12 @@ func TestMemoryStoreConcurrentCreate(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreContextCanceled(t *testing.T) {
-	store := NewMemoryStore()
+func TestStoreContextCanceled(t *testing.T) {
+	store := New()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	l, err := NewLink("https://example.com")
+	l, err := link.NewLink("https://example.com")
 	if err != nil {
 		t.Fatalf("NewLink returned error: %v", err)
 	}

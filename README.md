@@ -5,12 +5,15 @@
 ## 快速开始
 
 ```bash
+cp .env.example .env                # 配置 DATABASE_URL
 make run                            # 启动服务，默认 :8080
 curl -i localhost:8080/healthz      # 应返回 200 和 ok
 make test                           # 跑测试（带 -race）
 make lint                           # golangci-lint 完整静态检查
 make help                           # 查看全部命令
 ```
+
+服务启动需要 `DATABASE_URL`，没有配置会直接报错退出。
 
 需要数据库和 Redis 时（阶段 3 起）：
 
@@ -20,6 +23,12 @@ make up        # 启动 PostgreSQL 和 Redis，首次启动自动建表
 make psql      # 进数据库看看
 make down      # 停止
 ```
+
+如果本机 5432 端口已经被其他 PostgreSQL 占用，可以复用已有实例：把 `.env` 里的
+`DATABASE_URL` 指向它，然后手动执行 `migrations/001_create_links.sql`。表名按
+PostgreSQL 习惯使用 `links`，共用数据库时确认它没有被其他项目占用。
+
+集成测试会清空 `links` 表，`DATABASE_URL` 只能指向开发库。
 
 ## HTTP 接口
 
@@ -41,7 +50,8 @@ shortlink/
 ├── internal/
 │   ├── httpapi/            # handler、路由、中间件
 │   ├── link/               # 短链核心：结构体、业务错误、校验
-│   ├── idgen/              # Base62 短码
+│   ├── idgen/              # 随机短码与 Base62 编解码
+│   ├── memorystore/        # 内存存储（测试和本地开发）
 │   ├── config/             # 配置加载
 │   └── postgres/           # PostgreSQL 存储实现
 ├── migrations/             # 建表 SQL
@@ -52,7 +62,8 @@ shortlink/
 
 每个包的包注释写在这个包的第一个文件里（`link/link.go`、`idgen/base62.go` 等），
 说明了这个包做什么、对应哪一课。包名和依赖方向：`httpapi` 依赖 `link`，
-`postgres` 依赖 `link`，`link` 不依赖它们；`main` 负责把它们组装起来。
+`memorystore` 和 `postgres` 依赖 `link`、`idgen`，`link` 不依赖它们；
+`main` 负责把它们组装起来。
 
 代码约定和 AI 协作方式见 [AGENTS.md](AGENTS.md)。
 
@@ -68,17 +79,20 @@ shortlink/
 ### 阶段 2：内存版服务（第 3、4、6 课）
 
 - [x] `internal/link`：`Link`、`NewLink`、`ErrNotFound`、`ValidationError`、URL 校验
-- [x] 内存版 Store（map 加 `sync.RWMutex`）
+- [x] 内存版 Store（map 加 `sync.RWMutex`），放在 `internal/memorystore`
 - [x] `httpapi`：`POST /api/v1/links` 和 `GET /r/{code}`，在 `Server` 里定义 `LinkStore` 接口
 - [x] 用 httptest 测试：创建成功、非法 URL 返回 400、不存在的短码返回 404、跳转返回 302
 - [x] 限制请求体大小；短码统一放在 `/r/` 下，和 `/healthz`、`/api` 路由天然隔离
 
 ### 阶段 3：PostgreSQL（第 7 课）
 
-- [ ] `go get github.com/jackc/pgx/v5`
-- [ ] `internal/postgres`：`PostgresStore` 实现 `LinkStore`
-- [ ] 错误转换：`sql.ErrNoRows`、唯一约束冲突
-- [ ] 集成测试（没有 `DATABASE_URL` 时 `t.Skip`）
+- [x] `go get github.com/jackc/pgx/v5`
+- [x] `internal/postgres`：`Store` 实现 `LinkStore`
+- [x] 错误处理：`sql.ErrNoRows` 转 `link.ErrNotFound`，`23505` 触发短码重试
+- [x] 集成测试（没有 `DATABASE_URL` 时 `t.Skip`）
+- [x] 短码改为随机生成（8 位 Base62），id 仅作内部主键
+- [x] 表名按 PostgreSQL 习惯使用 `links`
+- [x] 连接池参数从 `.env` 读取（`DB_MAX_OPEN_CONNS` 等）
 
 ### 阶段 4：配置、日志、中间件、优雅退出（第 8 课）
 

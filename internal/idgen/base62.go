@@ -1,9 +1,10 @@
 /*
-Package idgen 负责短码的生成与解析：用 Base62 把自增 ID 编码成短字符串（第 2、6 课）。
+Package idgen 负责短码的生成与解析：随机生成公开短码，用 Base62 编解码 ID（第 2、6、7 课）。
 
 字母表是 0-9A-Za-z，共 62 个字符，大小写敏感。编码和解码共用同一个字母表；
 一旦有数据产生，字母表的顺序就不能再改，否则旧短码会全部解析错。
 
+GenerateCode 用 crypto/rand 生成随机短码，短码对外公开，不能被预测。
 EncodeBase62 只接受非负的 int64，负数属于调用方的程序错误，直接 panic。
 DecodeBase62 把短码当作不可信输入，校验非法字符和 int64 溢出；
 错误可以用 errors.Is 判断 ErrInvalidCode 或 ErrOverflow。
@@ -11,6 +12,7 @@ DecodeBase62 把短码当作不可信输入，校验非法字符和 int64 溢出
 package idgen
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"math"
@@ -22,6 +24,12 @@ const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 
 // base 是 alphabet 的长度，显式写成 int64：len 的结果是 int，不转换的话和 int64 混算会类型不匹配。
 const base int64 = int64(len(alphabet))
+
+// CodeLength 是随机短码的长度；8 位 Base62 约有 2.18e14 种组合。
+const CodeLength = 8
+
+// maxUnbiasedByte 是拒绝采样的上界：256 % 62 = 8，248 及以上的字节会造成取模偏差。
+const maxUnbiasedByte = 248
 
 var (
 	// ErrInvalidCode 表示短码为空、包含字母表之外的字符，或不是 ASCII。
@@ -38,11 +46,38 @@ var decodeTable = func() (t [256]int8) {
 	for i := range t {
 		t[i] = -1
 	}
-	for i := 0; i < len(alphabet); i++ {
+	for i := range len(alphabet) {
 		t[alphabet[i]] = int8(i)
 	}
 	return t
 }()
+
+/*
+GenerateCode 生成 CodeLength 位随机短码，字符来自 Base62 字母表。
+它用 crypto/rand 而不是 math/rand：短码对外公开，不能被预测。
+*/
+func GenerateCode() (string, error) {
+	code := make([]byte, CodeLength)
+	buf := make([]byte, CodeLength)
+	pos := len(buf)
+	for i := range code {
+		for {
+			if pos == len(buf) {
+				if _, err := rand.Read(buf); err != nil {
+					return "", fmt.Errorf("idgen: generate code: %w", err)
+				}
+				pos = 0
+			}
+			b := buf[pos]
+			pos++
+			if b < maxUnbiasedByte {
+				code[i] = alphabet[b%byte(base)]
+				break
+			}
+		}
+	}
+	return string(code), nil
+}
 
 /*
 EncodeBase62 把非负整数 n 编码成 Base62 字符串，0 编码为 "0"。
