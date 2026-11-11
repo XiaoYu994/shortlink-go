@@ -21,14 +21,14 @@ func (s *Server) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	l, err := s.store.GetByCode(r.Context(), code)
 	if err != nil {
 		if errors.Is(err, link.ErrNotFound) {
-			s.writeError(w, http.StatusNotFound, "link not found")
+			s.writeError(r.Context(), w, http.StatusNotFound, "link not found")
 			return
 		}
 		if s.clientGone(r) {
 			return
 		}
-		s.logger.Error("get link", "code", code, "err", err)
-		s.writeError(w, http.StatusInternalServerError, "internal error")
+		s.logger.ErrorContext(r.Context(), "get link", "code", code, "err", err)
+		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

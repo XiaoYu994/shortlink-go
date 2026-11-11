@@ -24,6 +24,7 @@ curl -i -X POST localhost:8080/api/v1/links \
 HTTP/1.1 201 Created
 Content-Type: application/json; charset=utf-8
 Location: /r/AbC123xy
+X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 
 {"code":"AbC123xy","url":"https://example.com/path?q=1"}
 ```
@@ -63,6 +64,10 @@ curl -i localhost:8080/healthz
 ```
 
 返回 200 和 `ok`。它是 liveness 探针，故意不访问数据库。
+
+## 请求编号
+
+经过路由的响应都带 `X-Request-ID`。调用方可以沿用自己的编号，但只接受长度不超过 128、由字母、数字、`.`、`_`、`-` 组成的值；其他值由服务端改成 32 位十六进制编号。同一次请求的访问日志和错误日志都有同一个 `request_id`。
 
 ## 版本策略
 

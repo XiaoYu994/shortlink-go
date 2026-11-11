@@ -42,29 +42,29 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			s.writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			s.writeError(r.Context(), w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
-		s.logger.Error("read request body", "err", err)
-		s.writeError(w, http.StatusBadRequest, "read request body")
+		s.logger.ErrorContext(r.Context(), "read request body", "err", err)
+		s.writeError(r.Context(), w, http.StatusBadRequest, "read request body")
 		return
 	}
 
 	// Unmarshal 要求整个输入恰好是一个 JSON 值，尾部多一个字符也会报错。
 	var req createLinkRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid JSON body")
+		s.writeError(r.Context(), w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
 	l, err := link.NewLink(req.URL)
 	if err != nil {
 		if verr, ok := errors.AsType[*link.ValidationError](err); ok {
-			s.writeError(w, http.StatusBadRequest, verr.Error())
+			s.writeError(r.Context(), w, http.StatusBadRequest, verr.Error())
 			return
 		}
-		s.logger.Error("new link", "err", err)
-		s.writeError(w, http.StatusInternalServerError, "internal error")
+		s.logger.ErrorContext(r.Context(), "new link", "err", err)
+		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -72,11 +72,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		if s.clientGone(r) {
 			return
 		}
-		s.logger.Error("create link", "err", err)
-		s.writeError(w, http.StatusInternalServerError, "internal error")
+		s.logger.ErrorContext(r.Context(), "create link", "err", err)
+		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	w.Header().Set("Location", redirectPrefix+l.Code)
-	s.writeJSON(w, http.StatusCreated, createLinkResponse{Code: l.Code, URL: l.URL})
+	s.writeJSON(r.Context(), w, http.StatusCreated, createLinkResponse{Code: l.Code, URL: l.URL})
 }

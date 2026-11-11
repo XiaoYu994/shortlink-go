@@ -41,6 +41,9 @@ idgen       -> 标准库
 
 ```txt
 POST /api/v1/links
+  -> requestID
+  -> logging
+  -> recoverer
   -> handleCreate
   -> 读取并限制请求体
   -> json.Unmarshal
@@ -53,10 +56,15 @@ POST /api/v1/links
 
 ```txt
 GET /r/{code}
+  -> requestID
+  -> logging
+  -> recoverer
   -> handleRedirect
   -> store.GetByCode
   -> 302 Location: 原始 URL
 ```
+
+`chain` 里靠前的中间件在外层。`requestID` 确定编号，写入响应头 `X-Request-ID` 和请求 context。`logging` 记录方法、路径、状态码和耗时；`recoverer` 把 handler 的 panic 写成 500。带 context 的日志会自动加上 `request_id`。`http.ErrAbortHandler` 会继续抛出，那是 `net/http` 用来中止当前连接的哨兵。
 
 ## 存储
 
@@ -78,6 +86,6 @@ GET /r/{code}
 
 ## 尚未实现
 
-- 日志/恢复中间件、优雅退出（第 8 课）
+- 优雅退出（第 8 课）
 - Redis 缓存、点击统计（第 9、10 课）
 - 多租户、鉴权（阶段 6）

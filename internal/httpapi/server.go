@@ -25,9 +25,15 @@ type Server struct {
 	store  LinkStore
 }
 
-// NewServer 组装 handler 依赖；store 由 main 注入，测试可以换成别的实现。
+/*
+NewServer 组装 handler 依赖；store 由 main 注入，测试可以换成别的实现。
+logger 包上一层 requestIDHandler：带请求 context 的日志会自动写上 request_id。
+*/
 func NewServer(logger *slog.Logger, store LinkStore) *Server {
-	return &Server{logger: logger, store: store}
+	return &Server{
+		logger: slog.New(requestIDHandler{Handler: logger.Handler()}),
+		store:  store,
+	}
 }
 
 type errorResponse struct {
@@ -37,17 +43,20 @@ type errorResponse struct {
 // clientGone 报告请求是否因客户端断开而被取消，这时响应已经没人接收，handler 直接返回，不要记成服务端错误。
 func (s *Server) clientGone(r *http.Request) bool {
 	if r.Context().Err() == context.Canceled {
-		s.logger.Debug("request canceled by client", "path", r.URL.Path)
+		s.logger.DebugContext(r.Context(), "request canceled by client", "path", r.URL.Path)
 		return true
 	}
 	return false
 }
 
-func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
-	// 先编码到内存，成功后再写响应。直接 Encoder.Encode 会在状态码已经发出后才可能失败，客户端只能收到半截 body。
+func (s *Server) writeJSON(ctx context.Context, w http.ResponseWriter, status int, v any) {
+	/*
+		先编码到内存，成功后再写响应。直接 Encoder.Encode 会在状态码已经发出后才可能失败，客户端只能收到半截 body。
+		ctx 只负责把 request_id 带进日志，不用它取消已经开始的写出。
+	*/
 	data, err := json.Marshal(v)
 	if err != nil {
-		s.logger.Error("marshal JSON response", "err", err)
+		s.logger.ErrorContext(ctx, "marshal JSON response", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -55,10 +64,10 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := w.Write(data); err != nil {
-		s.logger.Error("write JSON response", "err", err)
+		s.logger.ErrorContext(ctx, "write JSON response", "err", err)
 	}
 }
 
-func (s *Server) writeError(w http.ResponseWriter, status int, msg string) {
-	s.writeJSON(w, status, errorResponse{Error: msg})
+func (s *Server) writeError(ctx context.Context, w http.ResponseWriter, status int, msg string) {
+	s.writeJSON(ctx, w, status, errorResponse{Error: msg})
 }
