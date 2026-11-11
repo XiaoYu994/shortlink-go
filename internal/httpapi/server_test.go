@@ -199,3 +199,20 @@ func TestClientCanceled(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateMaxLengthURLAccepted 验证 URL 上限内的合法 URL 不会因为 JSON 转义后请求体变大而被 413 误杀。
+func TestCreateMaxLengthURLAccepted(t *testing.T) {
+	const prefix = "https://example.com/?q="
+	u := prefix + strings.Repeat("&", link.MaxURLLength-len(prefix))
+	if len(u) != link.MaxURLLength {
+		t.Fatalf("url length = %d, want %d", len(u), link.MaxURLLength)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"`+u+`"}`))
+	rec := httptest.NewRecorder()
+	newTestServer().Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}

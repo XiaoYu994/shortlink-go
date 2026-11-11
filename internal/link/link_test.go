@@ -30,7 +30,7 @@ func TestNewLink(t *testing.T) {
 		{"space in path", "https://example.com/a b", "", "must not contain whitespace"},
 		{"space in query", "https://example.com/?q=a b", "", "must not contain whitespace"},
 		{"tab in path", "https://example.com/a\tb", "", "must not contain whitespace"},
-		{"too long", "https://example.com/" + strings.Repeat("a", maxURLLength), "", "longer than"},
+		{"too long", "https://example.com/" + strings.Repeat("a", MaxURLLength), "", "longer than"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -18,8 +18,11 @@ import (
 	"unicode"
 )
 
-// maxURLLength 限制原始 URL 的字节数，避免把超大输入存进数据库。
-const maxURLLength = 2048
+/*
+MaxURLLength 限制原始 URL 的字节数，避免把超大输入存进数据库。
+导出是因为 HTTP 层要按它计算请求体上限：JSON 转义最坏情况下，URL 的每个字节会占 6 字节。
+*/
+const MaxURLLength = 2048
 
 // ErrNotFound 表示按短码查不到链接；HTTP 层用 errors.Is 映射成 404。
 var ErrNotFound = errors.New("link not found")
@@ -59,8 +62,8 @@ func NewLink(rawURL string) (*Link, error) {
 	if rawURL == "" {
 		return nil, &ValidationError{Field: "url", Reason: "must not be empty"}
 	}
-	if len(rawURL) > maxURLLength {
-		return nil, &ValidationError{Field: "url", Reason: fmt.Sprintf("longer than %d bytes", maxURLLength)}
+	if len(rawURL) > MaxURLLength {
+		return nil, &ValidationError{Field: "url", Reason: fmt.Sprintf("longer than %d bytes", MaxURLLength)}
 	}
 	// TrimSpace 只去掉首尾空白；
 	if strings.ContainsFunc(rawURL, unicode.IsSpace) {

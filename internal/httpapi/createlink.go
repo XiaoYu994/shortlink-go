@@ -9,8 +9,12 @@ import (
 	"shortlink/internal/link"
 )
 
-// maxBodyBytes 限制创建链接请求体的大小；URL 本身最多 2048 字节。
-const maxBodyBytes = 4 << 10
+/*
+maxBodyBytes 限制创建链接请求体的大小。
+JSON 编码会把 &、<、> 这类字符转义成 6 字节形式，最坏情况下 URL 的一个字节占 6 字节；
+按 link.MaxURLLength*6 再加 JSON 结构本身的余量，才不会误杀合法 URL。
+*/
+const maxBodyBytes = link.MaxURLLength*6 + 64
 
 type createLinkRequest struct {
 	URL string `json:"url"`
