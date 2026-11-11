@@ -24,7 +24,8 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/server  -> httpapi, postgres
+cmd/server  -> httpapi, postgres, config
+config      -> postgres
 httpapi     -> link
 postgres    -> link, idgen
 memorystore -> link, idgen
@@ -66,17 +67,17 @@ GET /r/{code}
 
 ## 配置
 
-当前从环境变量读取（第 8 课会收进 `internal/config`）：
+`config.LoadConfig` 在启动时读取并校验：
 
 - `ADDR`：监听地址，默认 `:8080`
 - `DATABASE_URL`：必填
 - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS`
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
-- `REDIS_ADDR`：阶段 5 使用
-- `SHUTDOWN_TIMEOUT`：阶段 8 使用
+- `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时使用（退出流程仍在第 8 课后半）
+- `REDIS_ADDR`：阶段 5 使用，`LoadConfig` 暂不读取
 
 ## 尚未实现
 
-- config 包、日志/恢复中间件、优雅退出（第 8 课）
+- 日志/恢复中间件、优雅退出（第 8 课）
 - Redis 缓存、点击统计（第 9、10 课）
 - 多租户、鉴权（阶段 6）

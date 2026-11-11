@@ -1,11 +1,121 @@
 /*
-Package config 从环境变量加载配置，并在启动时校验。
+Package config 从环境变量加载进程配置，并在启动时校验。
 
-要做的事（第 8 课）：
-
-  - Config 结构体和 LoadConfig() (Config, error)。
-  - 缺少必需配置时直接返回错误（fail fast）。
-  - 超时类配置用 time.ParseDuration 解析。
-  - 用 t.Setenv 给 LoadConfig 写测试。
+未设置的可选项使用默认值。缺少 DATABASE_URL、数值或时长无法解析、
+连接池参数或关机超时不合法时，LoadConfig 返回错误，由 main 终止启动。
+REDIS_ADDR 留给第 9 课，这里不读取。
 */
 package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
+	"shortlink/internal/postgres"
+)
+
+const (
+	defaultAddr = ":8080"
+	// defaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
+	defaultShutdownTimeout = 10 * time.Second
+)
+
+/*
+Config 是进程启动需要的配置。
+Pool 的默认值来自 postgres.DefaultPoolConfig，环境变量只覆盖显式设置的项。
+*/
+type Config struct {
+	Addr            string // HTTP 监听地址，例如 :8080
+	DatabaseURL     string // PostgreSQL 连接串
+	Pool            postgres.PoolConfig
+	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
+}
+
+/*
+LoadConfig 从环境变量读取进程配置。
+未设置的可选项使用默认值；DATABASE_URL 为空、数值或时长无法解析、
+连接池参数或关机超时不合法时返回错误。
+*/
+func LoadConfig() (Config, error) {
+	cfg := Config{
+		Addr:            defaultAddr,
+		Pool:            postgres.DefaultPoolConfig(),
+		ShutdownTimeout: defaultShutdownTimeout,
+	}
+
+	if addr := os.Getenv("ADDR"); addr != "" {
+		cfg.Addr = addr
+	}
+
+	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
+	if cfg.DatabaseURL == "" {
+		return Config{}, errors.New("DATABASE_URL is required")
+	}
+
+	var err error
+	if cfg.Pool.MaxOpenConns, err = envInt("DB_MAX_OPEN_CONNS", cfg.Pool.MaxOpenConns); err != nil {
+		return Config{}, err
+	}
+	if cfg.Pool.MaxIdleConns, err = envInt("DB_MAX_IDLE_CONNS", cfg.Pool.MaxIdleConns); err != nil {
+		return Config{}, err
+	}
+	if cfg.Pool.ConnMaxLifetime, err = envDuration("DB_CONN_MAX_LIFETIME", cfg.Pool.ConnMaxLifetime); err != nil {
+		return Config{}, err
+	}
+	if cfg.Pool.ConnMaxIdleTime, err = envDuration("DB_CONN_MAX_IDLE_TIME", cfg.Pool.ConnMaxIdleTime); err != nil {
+		return Config{}, err
+	}
+	if cfg.ShutdownTimeout, err = envDuration("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
+		return Config{}, err
+	}
+
+	if err := validate(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func validate(cfg Config) error {
+	if cfg.Pool.MaxOpenConns <= 0 {
+		return errors.New("DB_MAX_OPEN_CONNS must be positive")
+	}
+	if cfg.Pool.MaxIdleConns < 0 || cfg.Pool.MaxIdleConns > cfg.Pool.MaxOpenConns {
+		return errors.New("DB_MAX_IDLE_CONNS must be between 0 and DB_MAX_OPEN_CONNS")
+	}
+	if cfg.Pool.ConnMaxLifetime < 0 || cfg.Pool.ConnMaxIdleTime < 0 {
+		return errors.New("connection lifetimes must not be negative")
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		return errors.New("SHUTDOWN_TIMEOUT must be positive")
+	}
+	return nil
+}
+
+// envInt 读取整数环境变量。变量未设置时返回 def，调用方可以先放上默认值再覆盖。
+func envInt(name string, def int) (int, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return n, nil
+}
+
+// envDuration 读取 time.ParseDuration 能识别的时长。变量未设置时返回 def。
+func envDuration(name string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return d, nil
+}

@@ -27,7 +27,7 @@
 
 ## 阶段 4：配置、日志、中间件、优雅退出（第 8 课）
 
-- [ ] `internal/config`：`Load` 和测试
+- [x] `internal/config`：`LoadConfig` 和测试
 - [ ] logging、recoverer 中间件和 `chain`，各自有测试
 - [ ] `signal.NotifyContext` 加 `Shutdown`，手动验证：请求处理到一半时按 Ctrl+C
 

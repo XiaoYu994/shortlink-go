@@ -34,7 +34,7 @@ const (
 	maxCodeAttempts = 5
 )
 
-// PoolConfig 是数据库连接池参数，由 main 从环境变量读取后传入。
+// PoolConfig 是数据库连接池参数。启动时由配置加载填好，再传给 Open。
 type PoolConfig struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
