@@ -50,8 +50,8 @@ shortlink/
 
 ### 阶段 1：Base62（第 2、6 课）
 
-- [ ] `internal/idgen`：`EncodeBase62`、`DecodeBase62`
-- [ ] 表驱动测试，包含非法字符和溢出
+- [x] `internal/idgen`：`EncodeBase62`、`DecodeBase62`
+- [x] 表驱动测试，包含非法字符和溢出
 
 ### 阶段 2：内存版服务（第 3、4、6 课）
 
