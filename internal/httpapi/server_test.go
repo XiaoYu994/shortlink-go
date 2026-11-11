@@ -1,21 +1,25 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"shortlink/internal/link"
 )
 
-// newTestServer 返回一个不输出日志的 Server，供各个测试复用。
+// newTestServer 返回一个不输出日志、使用内存存储的 Server，供各个测试复用。
 func newTestServer() *Server {
-	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), link.NewMemoryStore())
 }
 
 /*
 这是 httptest 的写法示例：不启动真正的服务器，直接把请求交给 handler。
-之后的 handleCreate、handleRedirect 测试可以照这个样子写。
 */
 func TestHealthz(t *testing.T) {
 	srv := newTestServer()
@@ -29,5 +33,167 @@ func TestHealthz(t *testing.T) {
 	}
 	if got, want := rec.Body.String(), "ok\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestCreateAndRedirect(t *testing.T) {
+	srv := newTestServer()
+	handler := srv.Routes()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/path?q=1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var resp createLinkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != "1" {
+		t.Errorf("code = %q, want %q", resp.Code, "1")
+	}
+	if resp.URL != "https://example.com/path?q=1" {
+		t.Errorf("url = %q, want %q", resp.URL, "https://example.com/path?q=1")
+	}
+	if got := rec.Header().Get("Location"); got != "/r/1" {
+		t.Errorf("Location = %q, want %q", got, "/r/1")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/r/"+resp.Code, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("redirect status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	if got := rec.Header().Get("Location"); got != "https://example.com/path?q=1" {
+		t.Errorf("redirect Location = %q, want %q", got, "https://example.com/path?q=1")
+	}
+}
+
+func TestCreateBadRequest(t *testing.T) {
+	srv := newTestServer()
+	handler := srv.Routes()
+
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"empty body", "", http.StatusBadRequest},
+		{"invalid json", `{`, http.StatusBadRequest},
+		{"missing url", `{}`, http.StatusBadRequest},
+		{"invalid url", `{"url":"ftp://example.com"}`, http.StatusBadRequest},
+		{"url with space", `{"url":"https://example.com/a b"}`, http.StatusBadRequest},
+		{"trailing garbage", `{"url":"https://example.com"}x`, http.StatusBadRequest},
+		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, http.StatusBadRequest},
+		{"too large", `{"url":"` + strings.Repeat("a", maxBodyBytes) + `"}`, http.StatusRequestEntityTooLarge},
+		{"valid prefix + oversized tail", `{"url":"https://example.com/ok"}` + strings.Repeat(" ", maxBodyBytes), http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.want {
+				t.Errorf("status = %d, want %d, body = %s", rec.Code, tt.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRedirectNotFound(t *testing.T) {
+	srv := newTestServer()
+
+	req := httptest.NewRequest(http.MethodGet, "/r/missing", nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+// stubStore 只实现测试需要的读取能力，用来构造指定短码的链接。
+type stubStore struct {
+	links map[string]*link.Link
+}
+
+func (s *stubStore) Create(context.Context, *link.Link) error { return nil }
+
+func (s *stubStore) GetByCode(_ context.Context, code string) (*link.Link, error) {
+	l, ok := s.links[code]
+	if !ok {
+		return nil, link.ErrNotFound
+	}
+	return l, nil
+}
+
+/*
+TestCodeAndRouteNamespaces 验证短码和路由分属不同命名空间：
+短码 "healthz" 可以通过 /r/healthz 访问，/healthz 仍然是健康检查。
+*/
+func TestCodeAndRouteNamespaces(t *testing.T) {
+	store := &stubStore{links: map[string]*link.Link{
+		"healthz": {Code: "healthz", URL: "https://example.com/healthz"},
+	}}
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store)
+	handler := srv.Routes()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "ok\n" {
+		t.Errorf("GET /healthz = %d %q, want 200 %q", rec.Code, rec.Body.String(), "ok\n")
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/healthz", nil))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "https://example.com/healthz" {
+		t.Errorf("GET /r/healthz = %d Location=%q, want 302 %q", rec.Code, rec.Header().Get("Location"), "https://example.com/healthz")
+	}
+}
+
+func TestClientCanceled(t *testing.T) {
+	srv := newTestServer()
+	handler := srv.Routes()
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"create", http.MethodPost, "/api/v1/links", `{"url":"https://example.com"}`},
+		{"redirect", http.MethodGet, "/r/missing", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			ctx, cancel := context.WithCancel(req.Context())
+			cancel()
+			req = req.WithContext(ctx)
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			/*
+				没有写响应时 ResponseRecorder 的 Code 默认是 200；
+				真实连接已经断开，这个 200 不会被发送。
+			*/
+			if rec.Code == http.StatusInternalServerError {
+				t.Errorf("status = %d, want not 500", rec.Code)
+			}
+			if rec.Body.Len() != 0 {
+				t.Errorf("body = %q, want empty", rec.Body.String())
+			}
+		})
 	}
 }

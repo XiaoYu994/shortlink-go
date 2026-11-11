@@ -35,9 +35,16 @@
 - 包名短小全小写，按业务领域分包（`link`、`tenant`、`analytics`），
   不用 `util`、`common`、`base` 这类万能包，也避开和标准库重名（`http`、`context`）。
 
+### 路由
+
+- 管理 API 带版本前缀，当前是 `/api/v1`；不兼容改动时新增 `/api/v2`，旧版本按计划保留。
+- 公开短链固定在 `/r/{code}`，不加版本：短链是已经发出去的永久地址，不能随 API 版本失效。
+- `/healthz` 等运维端点不版本化。
+- 短码和路由分属不同路径命名空间，天然隔离。
+
 ### 错误处理
 
-- 哨兵错误用 `errors.New`，包装用 `fmt.Errorf("...: %w", err)`；调用方用 `errors.Is` / `errors.As` 判断。
+- 哨兵错误用 `errors.New`，包装用 `fmt.Errorf("...: %w", err)`；调用方用 `errors.Is` / `errors.As` 判断（Go 1.26 起也可以用 `errors.AsType`）。
 - 错误只处理一次：要么返回，要么在这里处理，不既打日志又返回。
 - 不用 panic/recover 模拟 try-catch。recover 只放在中间件和 goroutine 入口。
 

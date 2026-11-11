@@ -26,7 +26,10 @@ func TestNewLink(t *testing.T) {
 		{"missing host", "https://", "", "missing host"},
 		{"empty host with port", "http://:8080", "", "missing host"},
 		{"bad escape", "https://example.com/%zz", "", "invalid URL"},
-		{"space in host", "http://exa mple.com", "", "invalid URL"},
+		{"space in host", "http://exa mple.com", "", "must not contain whitespace"},
+		{"space in path", "https://example.com/a b", "", "must not contain whitespace"},
+		{"space in query", "https://example.com/?q=a b", "", "must not contain whitespace"},
+		{"tab in path", "https://example.com/a\tb", "", "must not contain whitespace"},
 		{"too long", "https://example.com/" + strings.Repeat("a", maxURLLength), "", "longer than"},
 	}
 	for _, tt := range tests {

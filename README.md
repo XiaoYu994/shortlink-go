@@ -21,6 +21,18 @@ make psql      # 进数据库看看
 make down      # 停止
 ```
 
+## HTTP 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/healthz` | 健康检查，运维端点，不版本化 |
+| `POST` | `/api/v1/links` | 创建短链，管理 API 带版本前缀 |
+| `GET` | `/r/{code}` | 302 跳转到原始 URL，公开短链地址，不版本化 |
+
+管理 API 有不兼容改动时新增 `/api/v2`，`v1` 按计划保留一段时间。
+短链是已经发出去的永久地址，不能跟着 API 版本失效，所以跳转路径固定为 `/r/{code}`。
+短码都在 `/r/` 命名空间下，和 `/healthz`、`/api/...` 天然隔离。
+
 ## 目录结构
 
 ```txt
@@ -57,9 +69,9 @@ shortlink/
 
 - [x] `internal/link`：`Link`、`NewLink`、`ErrNotFound`、`ValidationError`、URL 校验
 - [x] 内存版 Store（map 加 `sync.RWMutex`）
-- [ ] `httpapi`：`POST /links` 和 `GET /{code}`，在 `Server` 里定义 `LinkStore` 接口
-- [ ] 用 httptest 测试：创建成功、非法 URL 返回 400、不存在的短码返回 404、跳转返回 302
-- [ ] 限制请求体大小；拦截保留字（如 healthz）
+- [x] `httpapi`：`POST /api/v1/links` 和 `GET /r/{code}`，在 `Server` 里定义 `LinkStore` 接口
+- [x] 用 httptest 测试：创建成功、非法 URL 返回 400、不存在的短码返回 404、跳转返回 302
+- [x] 限制请求体大小；短码统一放在 `/r/` 下，和 `/healthz`、`/api` 路由天然隔离
 
 ### 阶段 3：PostgreSQL（第 7 课）
 

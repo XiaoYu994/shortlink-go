@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"shortlink/internal/httpapi"
+	"shortlink/internal/link"
 )
 
 func main() {
@@ -33,7 +34,8 @@ func run() error {
 		addr = ":8080"
 	}
 
-	srv := httpapi.NewServer(logger)
+	store := link.NewMemoryStore()
+	srv := httpapi.NewServer(logger, store)
 
 	httpSrv := &http.Server{
 		Addr:              addr,

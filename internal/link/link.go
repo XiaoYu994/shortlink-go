@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // maxURLLength 限制原始 URL 的字节数，避免把超大输入存进数据库。
@@ -60,6 +61,10 @@ func NewLink(rawURL string) (*Link, error) {
 	}
 	if len(rawURL) > maxURLLength {
 		return nil, &ValidationError{Field: "url", Reason: fmt.Sprintf("longer than %d bytes", maxURLLength)}
+	}
+	// TrimSpace 只去掉首尾空白；
+	if strings.ContainsFunc(rawURL, unicode.IsSpace) {
+		return nil, &ValidationError{Field: "url", Reason: "must not contain whitespace"}
 	}
 
 	u, err := url.Parse(rawURL)
