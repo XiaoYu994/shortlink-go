@@ -1,0 +1,21 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test and coverage output
+*.test
+*.out
+coverage.html
+
+# Go workspace files are local
+go.work
+go.work.sum
+
+vendor/
+
+# 本地配置，可能含密码
+.env

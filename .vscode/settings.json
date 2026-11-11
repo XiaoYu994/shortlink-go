@@ -1,0 +1,17 @@
+{
+  "go.useLanguageServer": true,
+  "go.enableCodeLens": {
+    "runtest": true
+  },
+  "go.testFlags": ["-race"],
+  "[go]": {
+    "editor.defaultFormatter": "golang.go",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "gopls": {
+    "ui.diagnostic.staticcheck": true
+  }
+}
