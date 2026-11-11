@@ -55,8 +55,8 @@ shortlink/
 
 ### 阶段 2：内存版服务（第 3、4、6 课）
 
-- [ ] `internal/link`：`Link`、`NewLink`、`ErrNotFound`、`ValidationError`、URL 校验
-- [ ] 内存版 Store（map 加 `sync.RWMutex`）
+- [x] `internal/link`：`Link`、`NewLink`、`ErrNotFound`、`ValidationError`、URL 校验
+- [x] 内存版 Store（map 加 `sync.RWMutex`）
 - [ ] `httpapi`：`POST /links` 和 `GET /{code}`，在 `Server` 里定义 `LinkStore` 接口
 - [ ] 用 httptest 测试：创建成功、非法 URL 返回 400、不存在的短码返回 404、跳转返回 302
 - [ ] 限制请求体大小；拦截保留字（如 healthz）

@@ -1,11 +1,77 @@
 /*
-Package link 是短链的核心业务：Link 结构体、业务错误、校验规则。
+Package link 是短链的核心业务：Link 结构体、业务错误和 URL 校验（第 3、4、6 课）。
 
-要做的事（第 3、4、6 课）：
+Link 只表达业务数据，不关心短码怎么生成、存在哪里。创建流程是：
+NewLink 校验并构造 Link，Store 负责分配 ID 和短码并持久化。
 
-  - Link 结构体和 NewLink 构造函数。
-  - 哨兵错误 ErrNotFound，自定义错误类型 ValidationError。
-  - 校验 URL：只允许 http 和 https。
-  - 内存版的 Store（map 加 sync.RWMutex），先让服务跑起来，也留给单元测试用。
+只允许 http 和 https 的绝对 URL；其他 scheme（javascript:、file: 等）
+既不是短链的使用场景，也会带来安全风险。
 */
 package link
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// maxURLLength 限制原始 URL 的字节数，避免把超大输入存进数据库。
+const maxURLLength = 2048
+
+// ErrNotFound 表示按短码查不到链接；HTTP 层用 errors.Is 映射成 404。
+var ErrNotFound = errors.New("link not found")
+
+/*
+ValidationError 表示调用方传入的链接数据不合法。
+HTTP 层用 errors.As 取出它，映射成 400。
+*/
+type ValidationError struct {
+	Field  string // 出错的字段，例如 "url"
+	Reason string // 面向调用方的原因
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("link: invalid %s: %s", e.Field, e.Reason)
+}
+
+/*
+Link 是一条短链。
+
+ID 和 Code 由 Store 在创建时分配，NewLink 只负责校验 URL；
+CreatedAt 也由存储层设置，因为数据库和内存实现的时钟来源可能不同。
+*/
+type Link struct {
+	ID        int64
+	Code      string
+	URL       string
+	CreatedAt time.Time
+}
+
+/*
+NewLink 校验 rawURL 并构造一条尚未持久化的链接。
+校验失败返回 *ValidationError，调用方可以用 errors.As 取出。
+*/
+func NewLink(rawURL string) (*Link, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil, &ValidationError{Field: "url", Reason: "must not be empty"}
+	}
+	if len(rawURL) > maxURLLength {
+		return nil, &ValidationError{Field: "url", Reason: fmt.Sprintf("longer than %d bytes", maxURLLength)}
+	}
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, &ValidationError{Field: "url", Reason: "invalid URL"}
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, &ValidationError{Field: "url", Reason: "only http and https are allowed"}
+	}
+	if u.Hostname() == "" {
+		return nil, &ValidationError{Field: "url", Reason: "missing host"}
+	}
+
+	return &Link{URL: rawURL}, nil
+}
