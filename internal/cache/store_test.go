@@ -408,6 +408,57 @@ func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
 	}
 }
 
+/*
+TestStoreCreateOverwritesNegativeCache 覆盖完整时序：
+先访问不存在的短码留下负缓存，再创建同码短链，
+写穿必须盖掉负缓存，之后的访问直接命中正缓存。
+*/
+func TestStoreCreateOverwritesNegativeCache(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+	ctx := context.Background()
+
+	want := &link.Link{ID: 7, Code: code, URL: "https://example.com/7"}
+	exists := false
+	next := &fakeStore{
+		get: func(context.Context, string) (*link.Link, error) {
+			if !exists {
+				return nil, link.ErrNotFound
+			}
+			return want, nil
+		},
+		create: func(*link.Link) error {
+			exists = true
+			return nil
+		},
+	}
+	s := newTestStore(t, next, rdb)
+
+	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
+		t.Fatalf("GetByCode before create = %v, want ErrNotFound", err)
+	}
+	if got := rdb.Get(ctx, keyPrefix+code).Val(); got != "null" {
+		t.Fatalf("negative cache = %q, want null", got)
+	}
+
+	if err := s.Create(ctx, want); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	callsBefore := next.calls.Load()
+	got, err := s.GetByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("GetByCode after create: %v", err)
+	}
+	if got.ID != want.ID || got.URL != want.URL {
+		t.Errorf("GetByCode after create = %+v, want ID %d URL %q", got, want.ID, want.URL)
+	}
+	if n := next.calls.Load() - callsBefore; n != 0 {
+		t.Errorf("store GetByCode calls after create = %d, want 0 (cache hit)", n)
+	}
+}
+
 // TestStoreGetByCodeSkipsMetricOnCanceledContext 验证客户端断开不计进命中率，也不冒充 Redis 降级。
 func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 	rdb := newTestRedis(t)
