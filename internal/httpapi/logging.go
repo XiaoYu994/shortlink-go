@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// statusClientClosedRequest 是 nginx 约定的“客户端提前断开”；只用于日志，不发给客户端。
+// statusClientClosedRequest 是 nginx 约定的“客户端提前断开”；只用于日志和指标，不发给客户端。
 const statusClientClosedRequest = 499
 
 /*
@@ -26,15 +26,7 @@ func logging(logger *slog.Logger) middleware {
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
 			defer func() {
-				status := sw.status
-				// handler 没写响应时 net/http 会补 200；客户端已断开则记 499，因为响应根本没发出去。
-				if status == 0 {
-					if errors.Is(r.Context().Err(), context.Canceled) {
-						status = statusClientClosedRequest
-					} else {
-						status = http.StatusOK
-					}
-				}
+				status := responseStatus(sw, r)
 				logger.InfoContext(r.Context(), "request",
 					"method", r.Method,
 					"path", r.URL.Path,
@@ -77,4 +69,15 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 // Unwrap 把内层 ResponseWriter 暴露给 http.ResponseController，否则外层中间件会挡住 Flush、SetWriteDeadline 等能力。
 func (w *statusWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// responseStatus 补全 statusWriter 记录的状态码：没写响应按 200，客户端断开按 499。
+func responseStatus(w *statusWriter, r *http.Request) int {
+	if w.status != 0 {
+		return w.status
+	}
+	if errors.Is(r.Context().Err(), context.Canceled) {
+		return statusClientClosedRequest
+	}
+	return http.StatusOK
 }

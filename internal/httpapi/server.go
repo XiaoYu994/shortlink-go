@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"shortlink/internal/link"
 )
 
@@ -26,18 +28,24 @@ type Server struct {
 	logger         *slog.Logger
 	store          LinkStore
 	requestTimeout time.Duration
+	registry       *prometheus.Registry
+	metrics        *httpMetrics
 }
 
 /*
 NewServer 组装 handler 依赖；store 由 main 注入，测试可以换成别的实现。
 logger 包上一层 requestIDHandler：带请求 context 的日志会自动写上 request_id。
 requestTimeout 是每个请求的处理时限，由 timeout 中间件执行，必须为正。
+registry 由 main 创建并注入，/metrics 从这里收集；测试每次传一个新的 Registry，
+避免同名指标重复注册。HTTP 指标也在这个构造函数里注册一次，Routes() 只组装中间件。
 */
-func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration) *Server {
+func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry) *Server {
 	return &Server{
 		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
 		store:          store,
 		requestTimeout: requestTimeout,
+		registry:       registry,
+		metrics:        newHTTPMetrics(registry),
 	}
 }
 

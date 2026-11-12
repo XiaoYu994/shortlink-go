@@ -17,9 +17,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+
 	"shortlink/internal/config"
 	"shortlink/internal/httpapi"
 	"shortlink/internal/postgres"
+	"shortlink/internal/storemetrics"
 )
 
 func main() {
@@ -47,7 +51,19 @@ func run() error {
 	defer func() { _ = db.Close() }()
 	logger.Info("connected to postgres")
 
-	srv := httpapi.NewServer(logger, postgres.NewStore(db), cfg.RequestTimeout)
+	/*
+		自建 Registry：测试会构造多个 Server，共用 DefaultRegisterer 时同名指标重复注册会 panic。
+		自建 Registry 默认是空的，Go 运行时指标和连接池指标要单独注册。
+	*/
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewDBStatsCollector(db, "shortlink"),
+	)
+
+	// 指标装饰器贴着数据库，缓存层以后包在它外面，缓存命中不会计入存储耗时。
+	store := storemetrics.New(postgres.NewStore(db), registry)
+	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry)
 
 	/*
 		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。

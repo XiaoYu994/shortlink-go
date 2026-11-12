@@ -11,15 +11,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 	"shortlink/internal/memorystore"
 )
 
+// newTestRegistry 返回一个独立的 Registry，并注册 Go 运行时指标。
+// 每次新建，避免测试之间重复注册同名指标。
+func newTestRegistry() *prometheus.Registry {
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors.NewGoCollector())
+	return registry
+}
+
 // newTestServer 返回一个不输出日志、使用内存存储的 Server，供各个测试复用。
 // 请求超时给得足够宽，只有专门测超时的用例才用短时限。
 func newTestServer() *Server {
-	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second)
+	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry())
 }
 
 /*
@@ -149,7 +160,7 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{
 		"healthz": {Code: "healthz", URL: "https://example.com/healthz"},
 	}}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second)
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry())
 	handler := srv.Routes()
 
 	rec := httptest.NewRecorder()
