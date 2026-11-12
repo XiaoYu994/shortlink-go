@@ -3,7 +3,9 @@ package postgres
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -11,13 +13,24 @@ import (
 	"shortlink/internal/link"
 )
 
-// newTestStore 每次测试前清空 links 表；DATABASE_URL 只能指向开发库。
+/*
+newTestStore 每次测试前清空 TEST_DATABASE_URL 指向的 links 表。
+没有设置 TEST_DATABASE_URL 时跳过；库名不以 _test 结尾时失败，避免误清开发库。
+*/
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL is not set")
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+	if !strings.HasSuffix(dbName, "_test") {
+		t.Fatalf("refusing to truncate non-test database %q: name must end with _test", dbName)
 	}
 
 	ctx := context.Background()
@@ -82,7 +95,7 @@ func TestStoreCreateRetriesOnCollision(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	codes := []string{"collision1", "collision1", "collision2"}
+	codes := []string{"collis01", "collis01", "collis02"}
 	store.generate = func() (string, error) {
 		if len(codes) == 0 {
 			t.Fatal("generate called too many times")
@@ -100,8 +113,8 @@ func TestStoreCreateRetriesOnCollision(t *testing.T) {
 	if err := store.Create(ctx, second); err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
-	if second.Code != "collision2" {
-		t.Errorf("second Code = %q, want %q", second.Code, "collision2")
+	if second.Code != "collis02" {
+		t.Errorf("second Code = %q, want %q", second.Code, "collis02")
 	}
 }
 

@@ -94,7 +94,21 @@ make test
 make lint
 ```
 
-注意：PostgreSQL 集成测试会 `TRUNCATE links`，`DATABASE_URL` 只能指向开发库，不要指向有真实数据的库。
+PostgreSQL 集成测试只读 `TEST_DATABASE_URL`，未设置时自动跳过；库名必须以 `_test` 结尾，防止误清开发库。应用的 `DATABASE_URL` 不会被测试使用。
+
+首次准备测试库：
+
+```bash
+docker exec si-crm-db-1 psql -U si_crm -d si_crm -c 'CREATE DATABASE si_crm_test'
+docker exec -i si-crm-db-1 psql -U si_crm -d si_crm_test < migrations/001_create_links.sql
+docker exec -i si-crm-db-1 psql -U si_crm -d si_crm_test < migrations/002_add_links_constraints.sql
+```
+
+然后在 `.env` 里加：
+
+```txt
+TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/si_crm_test?sslmode=disable
+```
 
 ## 停止
 
@@ -108,4 +122,4 @@ make lint
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
 | `make up` 报端口占用 | 已有 PostgreSQL 占用 5432；复用已有实例，不要启动 compose |
-| 测试清空了链接 | 集成测试会清空 `links` 表；不要指向生产库 |
+| 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |

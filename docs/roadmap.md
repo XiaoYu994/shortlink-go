@@ -20,7 +20,7 @@
 - [x] `go get github.com/jackc/pgx/v5`
 - [x] `internal/postgres`：`Store` 实现 `LinkStore`
 - [x] 错误处理：`sql.ErrNoRows` 转 `link.ErrNotFound`，`23505` 触发短码重试
-- [x] 集成测试（没有 `DATABASE_URL` 时 `t.Skip`）
+- [x] 集成测试（没有 `TEST_DATABASE_URL` 时 `t.Skip`）
 - [x] 短码改为随机生成（8 位 Base62），id 仅作内部主键
 - [x] 表名按 PostgreSQL 习惯使用 `links`
 - [x] 连接池参数从 `.env` 读取（`DB_MAX_OPEN_CONNS` 等）
