@@ -78,9 +78,9 @@ func TestHTTPMetricsRecordsRouteAndStatus(t *testing.T) {
 		{
 			name:   "redirect",
 			method: http.MethodGet,
-			path:   "/r/abc",
+			path:   "/r/AbC123xy",
 			store: &stubStore{links: map[string]*link.Link{
-				"abc": {Code: "abc", URL: "https://example.com"},
+				"AbC123xy": {Code: "AbC123xy", URL: "https://example.com"},
 			}},
 			wantStatus: http.StatusFound,
 			wantRoute:  "GET /r/{code}",
@@ -96,7 +96,7 @@ func TestHTTPMetricsRecordsRouteAndStatus(t *testing.T) {
 		{
 			name:       "missing short code",
 			method:     http.MethodGet,
-			path:       "/r/missing",
+			path:       "/r/AbC123xy",
 			store:      &stubStore{links: map[string]*link.Link{}},
 			wantStatus: http.StatusNotFound,
 			wantRoute:  "GET /r/{code}",
@@ -164,10 +164,10 @@ func TestHTTPMetricsRecordsPanicAs500(t *testing.T) {
 	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), panicStore{}, 5*time.Second, newTestRegistry())
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/abc", nil))
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
 
 	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("GET /r/abc = %d, want %d", rec.Code, http.StatusInternalServerError)
+		t.Fatalf("GET /r/AbC123xy = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 	status := strconv.Itoa(http.StatusInternalServerError)
 	got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("GET /r/{code}", http.MethodGet, status))

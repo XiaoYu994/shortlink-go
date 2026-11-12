@@ -9,6 +9,7 @@ package idgen
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 )
 
 // alphabet 是短码使用的字符集：0-9、A-Z、a-z，共 62 个。
@@ -48,4 +49,17 @@ func GenerateCode() (string, error) {
 		}
 	}
 	return string(code), nil
+}
+
+// ValidCode 报告 code 是不是本服务的短码。格式要和 links.code 的 CHECK 约束一致。
+func ValidCode(code string) bool {
+	if len(code) != CodeLength {
+		return false
+	}
+	for i := range len(code) {
+		if strings.IndexByte(alphabet, code[i]) < 0 {
+			return false
+		}
+	}
+	return true
 }

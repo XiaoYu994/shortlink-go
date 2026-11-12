@@ -29,7 +29,7 @@ shortlink/
 ```txt
 cmd/server   -> httpapi, postgres, storemetrics, cache, config
 config       -> postgres
-httpapi      -> link
+httpapi      -> link, idgen
 postgres     -> link, idgen
 memorystore  -> link, idgen
 storemetrics -> link
@@ -69,6 +69,7 @@ GET /r/{code}
   -> recoverer
   -> timeout
   -> handleRedirect
+  -> 校验短码格式（8 位 Base62，不合法直接 404）
   -> store.GetByCode（cache -> storemetrics -> postgres）
   -> 302 Location: 原始 URL
 ```

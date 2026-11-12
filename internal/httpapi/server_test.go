@@ -125,7 +125,7 @@ func TestCreateBadRequest(t *testing.T) {
 func TestRedirectNotFound(t *testing.T) {
 	srv := newTestServer()
 
-	req := httptest.NewRequest(http.MethodGet, "/r/missing", nil)
+	req := httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 
@@ -137,14 +137,48 @@ func TestRedirectNotFound(t *testing.T) {
 	}
 }
 
+/*
+TestRedirectInvalidCode 验证非法短码在进入存储之前就被拒绝。
+否则任意字符串都会先查 Redis 和数据库，超长 code 还会变成超长的缓存 key。
+*/
+func TestRedirectInvalidCode(t *testing.T) {
+	store := &stubStore{links: map[string]*link.Link{}}
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry())
+	handler := srv.Routes()
+
+	tests := []struct {
+		name string
+		code string
+	}{
+		{"too short", "missing"},
+		{"invalid character", "AbC123-y"},
+		{"too long", strings.Repeat("A", 1024)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/"+tt.code, nil))
+
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+			}
+		})
+	}
+	if store.calls != 0 {
+		t.Errorf("store GetByCode calls = %d, want 0", store.calls)
+	}
+}
+
 // stubStore 只实现测试需要的读取能力，用来构造指定短码的链接。
 type stubStore struct {
 	links map[string]*link.Link
+	calls int
 }
 
 func (s *stubStore) Create(context.Context, *link.Link) error { return nil }
 
 func (s *stubStore) GetByCode(_ context.Context, code string) (*link.Link, error) {
+	s.calls++
 	l, ok := s.links[code]
 	if !ok {
 		return nil, link.ErrNotFound
@@ -154,11 +188,11 @@ func (s *stubStore) GetByCode(_ context.Context, code string) (*link.Link, error
 
 /*
 TestCodeAndRouteNamespaces 验证短码和路由分属不同命名空间：
-短码 "healthz" 可以通过 /r/healthz 访问，/healthz 仍然是健康检查。
+/r/ 下的短码不会占用 /healthz，两个路径可以同时工作。
 */
 func TestCodeAndRouteNamespaces(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{
-		"healthz": {Code: "healthz", URL: "https://example.com/healthz"},
+		"healthz1": {Code: "healthz1", URL: "https://example.com/healthz"},
 	}}
 	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry())
 	handler := srv.Routes()
@@ -170,9 +204,9 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/healthz", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/healthz1", nil))
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "https://example.com/healthz" {
-		t.Errorf("GET /r/healthz = %d Location=%q, want 302 %q", rec.Code, rec.Header().Get("Location"), "https://example.com/healthz")
+		t.Errorf("GET /r/healthz1 = %d Location=%q, want 302 %q", rec.Code, rec.Header().Get("Location"), "https://example.com/healthz")
 	}
 }
 
@@ -187,7 +221,7 @@ func TestClientCanceled(t *testing.T) {
 		body   string
 	}{
 		{"create", http.MethodPost, "/api/v1/links", `{"url":"https://example.com"}`},
-		{"redirect", http.MethodGet, "/r/missing", ""},
+		{"redirect", http.MethodGet, "/r/AbC123xy", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -27,3 +27,27 @@ func TestGenerateCode(t *testing.T) {
 		seen[code] = struct{}{}
 	}
 }
+
+func TestValidCode(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want bool
+	}{
+		{"valid", "AbC123xy", true},
+		{"digits only", "12345678", true},
+		{"too short", "AbC123x", false},
+		{"too long", "AbC123xyZ", false},
+		{"invalid character", "AbC123-y", false},
+		{"empty", "", false},
+		{"space", "AbC 23xy", false},
+		{"non ascii", "AbC123é", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidCode(tt.code); got != tt.want {
+				t.Errorf("ValidCode(%q) = %v, want %v", tt.code, got, tt.want)
+			}
+		})
+	}
+}

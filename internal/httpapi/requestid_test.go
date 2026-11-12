@@ -73,7 +73,7 @@ func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), failingStore{err: errors.New("db down")}, 5*time.Second, newTestRegistry())
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/abc", nil))
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
 
 	id := rec.Header().Get(requestIDHeader)
 	if !validRequestID(id) {
@@ -81,8 +81,8 @@ func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 	}
 	assertLogsShareRequestID(t, &buf, id, "get link", "request")
 	for _, entry := range logEntries(t, &buf) {
-		if entry["msg"] == "get link" && entry["code"] != "abc" {
-			t.Errorf("code = %v, want abc", entry["code"])
+		if entry["msg"] == "get link" && entry["code"] != "AbC123xy" {
+			t.Errorf("code = %v, want AbC123xy", entry["code"])
 		}
 	}
 }
