@@ -1,6 +1,6 @@
 -- 短链表。表名按 PostgreSQL 习惯用复数 links。
 -- 首次 make up 时由 PostgreSQL 容器自动执行（挂载到 /docker-entrypoint-initdb.d）。
--- 之后的表结构变更改用迁移工具（goose 或 golang-migrate）管理。
+-- 之后的表结构变更按编号新增 SQL 文件；正式迁移工具（goose 或 golang-migrate）以后再接入。
 
 CREATE TABLE IF NOT EXISTS links (
     id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -11,4 +11,12 @@ CREATE TABLE IF NOT EXISTS links (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- id 由数据库自增，只作内部主键；对外短码由应用随机生成后写入 code。
+COMMENT ON TABLE links IS '短链映射表';
+COMMENT ON COLUMN links.id IS '内部主键';
+COMMENT ON COLUMN links.code IS '对外短码';
+COMMENT ON COLUMN links.url IS '原始 URL';
+COMMENT ON COLUMN links.clicks IS '点击次数';
+COMMENT ON COLUMN links.expires_at IS '过期时间';
+COMMENT ON COLUMN links.created_at IS '创建时间';
+
+-- id 只作内部主键；code 由应用随机生成。

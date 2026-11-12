@@ -70,7 +70,7 @@ GET /r/{code}
 
 - `internal/memorystore`：map + `sync.RWMutex`，只用于测试和本地开发。
 - `internal/postgres`：`database/sql` + pgx，生产使用。
-- 表 `links`：`id` 自增主键（内部），`code` 唯一索引（对外），`url`、`clicks`、`expires_at`、`created_at`。
+- 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`；`code` 格式和 `url` 长度由 CHECK 约束兜底。
 - 短码是 8 位 Base62 随机码，`crypto/rand` 生成；碰撞由唯一索引和最多 5 次重试处理。
 
 ## 配置

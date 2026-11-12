@@ -11,7 +11,7 @@ DATABASE_URL=postgres://user:password@127.0.0.1:5432/dbname?sslmode=disable
 
 `.env` 已被 gitignore，不会提交。
 
-- 数据库里已经执行过 `migrations/001_create_links.sql`，存在 `links` 表。
+- 数据库里已经执行过 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql`，存在 `links` 表。
 
 如果使用项目自带的 `docker-compose.yml`：
 
@@ -24,8 +24,9 @@ make run
 如果复用已经有 PostgreSQL 的容器（当前环境）：
 
 ```bash
-# 只执行一次建表
+# 只执行一次建表和约束
 docker exec -i si-crm-db-1 psql -U si_crm -d si_crm < migrations/001_create_links.sql
+docker exec -i si-crm-db-1 psql -U si_crm -d si_crm < migrations/002_add_links_constraints.sql
 
 make run
 ```
@@ -105,6 +106,6 @@ make lint
 | --- | --- |
 | `DATABASE_URL is required` | `.env` 缺失，或没有通过 `make run` 启动 |
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
-| `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` |
+| `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
 | `make up` 报端口占用 | 已有 PostgreSQL 占用 5432；复用已有实例，不要启动 compose |
 | 测试清空了链接 | 集成测试会清空 `links` 表；不要指向生产库 |
