@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -36,6 +37,7 @@ type Config struct {
 	Pool            postgres.PoolConfig
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
+	LogLevel        slog.Level    // 日志级别，默认 info
 }
 
 /*
@@ -52,6 +54,7 @@ func LoadConfig() (Config, error) {
 		Pool:            postgres.DefaultPoolConfig(),
 		RequestTimeout:  defaultRequestTimeout,
 		ShutdownTimeout: defaultShutdownTimeout,
+		LogLevel:        slog.LevelInfo,
 	}
 
 	if addr := os.Getenv("ADDR"); addr != "" {
@@ -65,6 +68,11 @@ func LoadConfig() (Config, error) {
 	cfg.RedisURL = os.Getenv("REDIS_URL")
 	if cfg.RedisURL == "" {
 		return Config{}, errors.New("REDIS_URL is required")
+	}
+	if level := os.Getenv("LOG_LEVEL"); level != "" {
+		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
+			return Config{}, fmt.Errorf("LOG_LEVEL: %w", err)
+		}
 	}
 
 	var err error

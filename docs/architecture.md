@@ -98,6 +98,7 @@ GET /r/{code}
 - `REQUEST_TIMEOUT`：默认 `5s`，单个请求的处理时限，超时返回 504
 - `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
 - `REDIS_URL`：必填，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。`main` 用它 Ping，连不上则进程退出
+- `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 
 ## 退出
 

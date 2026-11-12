@@ -36,12 +36,11 @@ func main() {
 }
 
 func run() error {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return err
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	db, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.Pool)

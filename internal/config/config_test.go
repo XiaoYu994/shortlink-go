@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ func TestLoadConfig(t *testing.T) {
 		"REQUEST_TIMEOUT":       "",
 		"SHUTDOWN_TIMEOUT":      "",
 		"REDIS_URL":             "redis://localhost:6379/0",
+		"LOG_LEVEL":             "",
 	}
 	defaults := Config{
 		Addr:            defaultAddr,
@@ -28,6 +30,7 @@ func TestLoadConfig(t *testing.T) {
 		Pool:            postgres.DefaultPoolConfig(),
 		RequestTimeout:  defaultRequestTimeout,
 		ShutdownTimeout: defaultShutdownTimeout,
+		LogLevel:        slog.LevelInfo,
 	}
 
 	tests := []struct {
@@ -65,6 +68,22 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "redis url and debug log",
+			env: map[string]string{
+				"REDIS_URL": "rediss://redis.example.com:6380/2",
+				"LOG_LEVEL": "debug",
+			},
+			want: Config{
+				Addr:            defaultAddr,
+				DatabaseURL:     "postgres://localhost/shortlink",
+				RedisURL:        "rediss://redis.example.com:6380/2",
+				Pool:            postgres.DefaultPoolConfig(),
+				RequestTimeout:  defaultRequestTimeout,
+				ShutdownTimeout: defaultShutdownTimeout,
+				LogLevel:        slog.LevelDebug,
+			},
+		},
+		{
 			name: "idle conns equal open conns",
 			env: map[string]string{
 				"DB_MAX_OPEN_CONNS": "10",
@@ -93,6 +112,11 @@ func TestLoadConfig(t *testing.T) {
 			name:    "missing redis url",
 			env:     map[string]string{"REDIS_URL": ""},
 			wantErr: "REDIS_URL is required",
+		},
+		{
+			name:    "invalid log level",
+			env:     map[string]string{"LOG_LEVEL": "verbose"},
+			wantErr: "LOG_LEVEL",
 		},
 		{
 			name:    "invalid open conns",

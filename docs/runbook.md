@@ -49,6 +49,8 @@ make run
 curl -i localhost:8080/healthz
 ```
 
+日志级别由 `LOG_LEVEL` 控制，默认 `info`；可选 `debug`、`warn`、`error`。
+
 ## 指标
 
 ```bash
