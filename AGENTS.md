@@ -70,6 +70,9 @@
 
 - `make check`：gofmt、go vet、go test -race，必须全部通过。
 - `make lint`：golangci-lint 完整静态检查（errcheck 必开，检查漏掉的 error）。
+- AI review：提交前把 `git diff --staged` 从头读一遍。AI 写代码容易顺着当前思路走到局部最优，
+  所以这一遍要跳出实现过程来看：有没有更简单的做法，和仓库已有写法、本文件约定是否一致，
+  是不是只给眼前这一处打了补丁。发现问题先告诉用户，再决定改不改。
 
 ## 提交规范
 
