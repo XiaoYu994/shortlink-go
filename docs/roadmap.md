@@ -59,8 +59,9 @@
 - [x] `CachedStore`：命中、负缓存、singleflight、Redis 故障降级
   - 正缓存 1h、负缓存 1m，value 是完整 `Link` 的 JSON；Redis 故障时回源数据库
   - 值格式、接口和测试策略见 [ADR 0006](adr/0006-redis-cache-design.md)
-- [ ] 缓存指标：命中、未命中、降级次数；同样的压测再跑一轮，和基线对比
-  - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。`shortlink_cache_writes_total{result}` 记录 `success`、`skipped`（`SET NX` 没写进去）、`error`。`shortlink_cache_operation_duration_seconds{operation,result}` 记录缓存操作耗时（`operation` 为 `get`、`set`）。请求取消不计入。压测对比还没做
+- [x] 缓存指标：命中、未命中、降级次数；同样的压测再跑一轮，和基线对比
+  - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。`shortlink_cache_writes_total{result}` 记录 `success`、`skipped`（`SET NX` 没写进去）、`error`。`shortlink_cache_operation_duration_seconds{operation,result}` 记录缓存操作耗时（`operation` 为 `get`、`set`）。请求取消不计入
+  - 2026-11-12 缓存压测：客户端 19,077 req/s（基线 10,105）、服务端跳转 p50 1.4ms / p99 4.7ms（基线 3.2 / 21.5ms），数据库连接池零使用，详见 runbook
 - [ ] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
 - [ ] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
 - [ ] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间

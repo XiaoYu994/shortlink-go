@@ -174,6 +174,36 @@ Prometheus（服务端，30 秒窗口）：
 - 客户端 p50/p99 来自 hey；服务端 p50/p99 来自直方图插值，桶从 0.1ms 起步。
 - 缓存做好后用同样的机器、预热、命令和查询窗口再跑一轮对比。
 
+## 缓存压测（2026-11-12）
+
+环境、方法和基线相同：同一台机器、50 并发、10s 预热 + 30s 测量、同一个短码；应用换成带 Redis 缓存的版本。本次短码 `jPsQPUB0`，URL 为 `https://example.com`。
+
+### 结果
+
+hey（客户端，30 秒）：572,365 次请求，全部 302，19,077 req/s，p50 2.5ms，p99 5.7ms。
+
+Prometheus（服务端，30 秒窗口）：
+
+| 指标 | 无缓存基线 | 有缓存 | 变化 |
+| --- | --- | --- | --- |
+| HTTP 跳转 p50 | 3.2 ms | 1.4 ms | -57% |
+| HTTP 跳转 p99 | 21.5 ms | 4.7 ms | -78% |
+| 存储 GetByCode p50/p99 | 3.2 / 21.4 ms | 无样本（全部命中缓存） | — |
+| 客户端 RPS | 10,105 | 19,077 | +89% |
+| 客户端 p50/p99 | 3.9 / 17.1 ms | 2.5 / 5.7 ms | -36% / -67% |
+| `go_sql_in_use_connections` 峰值 | 10 | 0 | — |
+| `go_sql_wait_count_total` | 约 9.9k 次/s | 0 | — |
+| `go_sql_wait_duration_seconds_total` | 约 32.2 s/s | 0 | — |
+
+缓存指标：`shortlink_cache_gets_total{result="hit"}` 约 17.6k 次/s，`miss` 和 `fallback` 为 0；测量窗口内没有写缓存，预热时已经写入。缓存 `get` 命中 p99 4.5ms，和 HTTP p99 接近，说明请求时间基本都花在 Redis 读取上；无缓存时对应的存储 p99 是 21.4ms。
+
+### 读数注意
+
+- 创建短链时写穿就写入了正缓存，预热和测量期间全部命中；累计计数 782,077 次 `hit`、0 次 `miss`、1 次 `success` 写入（来自创建）。
+- 只压一个热 key，不能据此推断多 key、缓存过期或 Redis 故障时的表现。
+- 缓存命中时 `shortlink_store_*` 没有样本，存储 p50/p99 查出来是空值，这是预期结果。
+- 和基线一样，app、Redis、PostgreSQL、Prometheus、hey 共享同一台 WSL2 VM，绝对数字只用于本机前后对比。
+
 ## 创建一条短链
 
 ```bash
