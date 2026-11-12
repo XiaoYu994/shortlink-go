@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 
@@ -13,18 +14,27 @@ import (
 )
 
 const (
-	// keyPrefix 给缓存 key 留命名空间，Redis 和其他应用共用时不会撞 key。
-	keyPrefix = "shortlink:link:"
-	// positiveTTL 是正常短链的缓存时间。
+	// keyPrefix 把缓存 key 和 Redis 里其他应用的 key 隔开。
+	keyPrefix   = "shortlink:link:"
 	positiveTTL = time.Hour
-	// negativeTTL 比 positiveTTL 短得多：不存在的短码不该长期占内存，
-	// 但短暂的负缓存能挡住用随机短码反复打数据库的请求。
+	// negativeTTL 更短：不存在的短码不该久占内存，又要挡住随机短码打数据库。
 	negativeTTL = time.Minute
+
+	getsMetricName   = "shortlink_cache_gets_total"
+	writesMetricName = "shortlink_cache_writes_total"
+
+	resultHit      = "hit"
+	resultMiss     = "miss"
+	resultFallback = "fallback"
+	// resultSkipped 不计数。调用方 ctx 已结束，不是 Redis 故障。
+	resultSkipped = ""
+
+	writeSuccess = "success"
+	writeError   = "error"
 )
 
 /*
-LinkStore 是装饰器需要的最小存储能力。接口由使用方定义，
-这样 cache 不依赖 httpapi，也不依赖具体的 postgres 实现。
+LinkStore 是装饰器需要的最小能力。接口放在使用方，cache 就不依赖 httpapi 和 postgres。
 */
 type LinkStore interface {
 	Create(ctx context.Context, l *link.Link) error
@@ -32,21 +42,35 @@ type LinkStore interface {
 }
 
 /*
-Store 是带 Redis 读缓存的 LinkStore 装饰器。
+Store 是带 Redis 读缓存的 LinkStore。
 
-缓存作用在 GetByCode 上。Create 成功后写穿正缓存，盖掉负缓存，
-否则新短码会在 TTL 内继续 404。并发未命中用 singleflight 合并，同一个短码同时只回源一次。
-Redis 故障按 fail-open 处理：读失败或写失败都回源数据库，不影响请求结果。
+Create 成功后写穿，盖掉负缓存，否则新短码会在 TTL 内继续 404。
+必须用指针：singleflight.Group 里有锁，复制后就各记各的。
 */
 type Store struct {
-	next  LinkStore
-	rdb   *redis.Client
-	group singleflight.Group // 零值就能用
+	next   LinkStore
+	rdb    *redis.Client
+	group  singleflight.Group // 零值就能用
+	gets   *prometheus.CounterVec
+	writes *prometheus.CounterVec
 }
 
-// New 包装 next，读写都走 rdb。rdb 只在这里当缓存用，不承担其他职责。
-func New(next LinkStore, rdb *redis.Client) *Store {
-	return &Store{next: next, rdb: rdb}
+// New 把指标注册到 registry。测试每次传新的，避免重复注册 panic。
+func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry) *Store {
+	s := &Store{
+		next: next,
+		rdb:  rdb,
+		gets: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: getsMetricName,
+			Help: "Total number of cache lookups by result.",
+		}, []string{"result"}),
+		writes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: writesMetricName,
+			Help: "Total number of cache writes by result.",
+		}, []string{"result"}),
+	}
+	registry.MustRegister(s.gets, s.writes)
+	return s
 }
 
 // Create 成功后写穿正缓存，盖掉负缓存。写失败不影响创建结果。
@@ -59,21 +83,23 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 }
 
 /*
-GetByCode 先读缓存，未命中或 Redis 故障时回源数据库。
+GetByCode 未命中或 Redis 故障时回源。负缓存的 value 是 JSON null。
 
-缓存命中直接返回，包括负缓存：value 为 JSON null，解出来的 Link 是 nil。
-回源用 singleflight 按 key 合并：并发未命中只有一个请求查库，其余等它的结果。
-singleflight 里的函数用第一个请求的 ctx；它被取消时，等待中的请求会一起拿到
-context.Canceled。回源很快，暂时接受这个行为。
+singleflight 用领头请求的 ctx，它取消时等待者也拿到 context.Canceled。
+每个请求按自己的读取结果计数，包括等在 singleflight 里的。
 */
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	key := keyPrefix + code
 
-	if l, ok := s.readCache(ctx, key); ok {
-		if l == nil {
-			return nil, link.ErrNotFound // 负缓存命中
+	cached, result := s.readCache(ctx, key)
+	if result != resultSkipped {
+		s.gets.WithLabelValues(result).Inc()
+	}
+	if result == resultHit {
+		if cached == nil {
+			return nil, link.ErrNotFound
 		}
-		return l, nil
+		return cached, nil
 	}
 
 	v, err, _ := s.group.Do(key, func() (any, error) {
@@ -90,30 +116,33 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 }
 
 /*
-readCache 返回缓存中的链接。ok 为 false 表示未命中或 Redis 故障，调用方回源。
-value 为 JSON null 时 l 是 nil、err 是 nil，这是一条负缓存，表示短码不存在。
+readCache 在调用方 ctx 已结束时返回 resultSkipped，不把断开记成降级。
 
-value 解析失败说明缓存里是旧格式或坏数据：删掉它，按未命中处理，让回源重新写入。
-Redis 故障也按未命中处理，由调用方回源；降级次数等缓存指标那一步再补。
+看 ctx.Err()，不看错误里的 DeadlineExceeded：go-redis 拨号用子 context，
+超时也是这个错误，但调用方的 ctx 还活着，那是 Redis 没连上。
+坏数据删掉后按未命中，让回源重新写入。
 */
-func (s *Store) readCache(ctx context.Context, key string) (l *link.Link, ok bool) {
+func (s *Store) readCache(ctx context.Context, key string) (*link.Link, string) {
 	data, err := s.rdb.Get(ctx, key).Bytes()
 	switch {
 	case err == nil:
+		var l *link.Link
 		if err := json.Unmarshal(data, &l); err != nil {
 			_ = s.rdb.Del(ctx, key).Err()
-			return nil, false
+			return nil, resultMiss
 		}
-		return l, true
+		return l, resultHit
 	case errors.Is(err, redis.Nil):
-		return nil, false
+		return nil, resultMiss
+	case ctx.Err() != nil:
+		return nil, resultSkipped
 	default:
-		return nil, false
+		return nil, resultFallback
 	}
 }
 
 /*
-writeCache 失败只影响下次命中。
+writeCache 失败只影响下次命中。ctx 已取消时不记成写失败。
 
 负缓存用 SET NX，避免后写的「不存在」盖掉刚创建的正缓存。
 正缓存用 SET，创建可以盖掉旧的负缓存。
@@ -123,14 +152,25 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		return
 	}
 
-	data, err := json.Marshal(l)
-	if err != nil {
+	data, marshalErr := json.Marshal(l)
+	if marshalErr != nil {
+		s.writes.WithLabelValues(writeError).Inc()
 		return
 	}
 
+	var setErr error
 	if l == nil {
-		_ = s.rdb.SetNX(ctx, key, data, negativeTTL).Err()
+		setErr = s.rdb.SetNX(ctx, key, data, negativeTTL).Err()
+	} else {
+		setErr = s.rdb.Set(ctx, key, data, positiveTTL).Err()
+	}
+	// 调用中取消同样不记。拨号超时不会让 ctx.Err() 非空，仍记成 error。
+	if setErr != nil && ctx.Err() != nil {
 		return
 	}
-	_ = s.rdb.Set(ctx, key, data, positiveTTL).Err()
+	result := writeSuccess
+	if setErr != nil {
+		result = writeError
+	}
+	s.writes.WithLabelValues(result).Inc()
 }

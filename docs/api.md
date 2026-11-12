@@ -75,13 +75,15 @@ curl -i localhost:8080/healthz
 curl -i localhost:8080/metrics
 ```
 
-返回 Prometheus 文本格式。目前暴露 Go 运行时、HTTP、存储和连接池指标：
+返回 Prometheus 文本格式。目前暴露 Go 运行时、HTTP、缓存、存储和连接池指标：
 
 - `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 只有 `GET`、`HEAD`、`POST`、`other`）
+- `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
+- `shortlink_cache_writes_total`（`result` 为 `success`、`error`。创建和回源写缓存都会计数）
 - `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 
-缓存命中和 `ClickRecorder` 的 dropped 计数随后加。它是运维端点，不版本化，公网隔离由部署层保证。
+`ClickRecorder` 的 dropped 计数随后加。它是运维端点，不版本化，公网隔离由部署层保证。
 
 ## 请求编号
 

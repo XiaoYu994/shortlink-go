@@ -55,7 +55,7 @@ curl -i localhost:8080/healthz
 
 ```bash
 curl -s -o /dev/null localhost:8080/healthz
-curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|go_sql_)'
+curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|shortlink_store_|shortlink_cache_|go_sql_)'
 ```
 
 计数发生在响应写完之后，没出现过的 label 也不会输出。刚启动后直接抓 `/metrics`，正文里还没有 `shortlink_http_*`，所以上面先访问一次 `/healthz`。
@@ -66,6 +66,8 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|go_sql
 - `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），一启动就有
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 只有 `GET`、`HEAD`、`POST`、`other`
 - `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。`/healthz` 不访问数据库，要创建或打开过短链才看得到
+- `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
+- `shortlink_cache_writes_total`：写缓存结果（`success`、`error`）。创建和回源写缓存都会计数
 
 本地 Prometheus 见下一节。
 

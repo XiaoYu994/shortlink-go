@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 
 	"shortlink/internal/link"
@@ -64,6 +66,12 @@ func newTestRedis(t *testing.T) *redis.Client {
 	return rdb
 }
 
+// newTestStore 给不关心指标的测试一个用完即弃的 Registry。
+func newTestStore(t *testing.T, next LinkStore, rdb *redis.Client) *Store {
+	t.Helper()
+	return New(next, rdb, prometheus.NewRegistry())
+}
+
 // newTestCode 生成每个测试独有的短码，避免测试之间和残留 key 互相影响。
 func newTestCode(t *testing.T) string {
 	t.Helper()
@@ -93,7 +101,7 @@ func TestStoreGetByCodeCacheHit(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return want, nil
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 	ctx := context.Background()
 
 	got, err := s.GetByCode(ctx, code)
@@ -118,6 +126,15 @@ func TestStoreGetByCodeCacheHit(t *testing.T) {
 	if ttl := rdb.PTTL(ctx, keyPrefix+code).Val(); ttl <= 0 || ttl > positiveTTL {
 		t.Errorf("cache TTL = %v, want in (0, %v]", ttl, positiveTTL)
 	}
+	if got := testutil.ToFloat64(s.gets.WithLabelValues(resultMiss)); got != 1 {
+		t.Errorf("gets{result=miss} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.gets.WithLabelValues(resultHit)); got != 1 {
+		t.Errorf("gets{result=hit} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); got != 1 {
+		t.Errorf("writes{result=success} = %v, want 1", got)
+	}
 }
 
 func TestStoreGetByCodeNegativeCache(t *testing.T) {
@@ -128,7 +145,7 @@ func TestStoreGetByCodeNegativeCache(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return nil, link.ErrNotFound
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 	ctx := context.Background()
 
 	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
@@ -151,6 +168,15 @@ func TestStoreGetByCodeNegativeCache(t *testing.T) {
 	if ttl := rdb.PTTL(ctx, keyPrefix+code).Val(); ttl <= 0 || ttl > negativeTTL {
 		t.Errorf("negative TTL = %v, want in (0, %v]", ttl, negativeTTL)
 	}
+	if got := testutil.ToFloat64(s.gets.WithLabelValues(resultMiss)); got != 1 {
+		t.Errorf("gets{result=miss} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.gets.WithLabelValues(resultHit)); got != 1 {
+		t.Errorf("gets{result=hit} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); got != 1 {
+		t.Errorf("writes{result=success} = %v, want 1", got)
+	}
 }
 
 func TestStoreGetByCodeSingleflight(t *testing.T) {
@@ -167,7 +193,7 @@ func TestStoreGetByCodeSingleflight(t *testing.T) {
 		<-release
 		return want, nil
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 	ctx := context.Background()
 
 	const goroutines = 20
@@ -213,7 +239,7 @@ func TestStoreGetByCodeFallsBackWhenRedisFails(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return want, nil
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 
 	got, err := s.GetByCode(context.Background(), "down")
 	if err != nil {
@@ -224,6 +250,12 @@ func TestStoreGetByCodeFallsBackWhenRedisFails(t *testing.T) {
 	}
 	if n := next.calls.Load(); n != 1 {
 		t.Errorf("store calls = %d, want 1", n)
+	}
+	if got := testutil.ToFloat64(s.gets.WithLabelValues(resultFallback)); got != 1 {
+		t.Errorf("gets{result=fallback} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); got != 1 {
+		t.Errorf("writes{result=error} = %v, want 1", got)
 	}
 }
 
@@ -242,7 +274,7 @@ func TestStoreGetByCodeRepairsCorruptedValue(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return want, nil
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 
 	got, err := s.GetByCode(ctx, code)
 	if err != nil {
@@ -278,7 +310,7 @@ func TestStoreGetByCodeDoesNotCacheErrors(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return nil, boom
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 
 	if _, err := s.GetByCode(ctx, code); !errors.Is(err, boom) {
 		t.Fatalf("first GetByCode error = %v, want boom", err)
@@ -299,7 +331,7 @@ func TestStoreCreatePassesThrough(t *testing.T) {
 	_ = rdb.Close()
 
 	next := &fakeStore{}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 
 	if err := s.Create(context.Background(), &link.Link{Code: "x", URL: "https://example.com"}); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -320,7 +352,7 @@ func TestStoreCreateWritesThrough(t *testing.T) {
 		l.CreatedAt = time.Now().Truncate(time.Second)
 		return nil
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 	ctx := context.Background()
 
 	l := &link.Link{URL: "https://example.com/5"}
@@ -337,6 +369,9 @@ func TestStoreCreateWritesThrough(t *testing.T) {
 	}
 	if n := next.calls.Load(); n != 0 {
 		t.Errorf("store GetByCode calls = %d, want 0 (cache hit)", n)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); got != 1 {
+		t.Errorf("writes{result=success} = %v, want 1", got)
 	}
 }
 
@@ -355,7 +390,7 @@ func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return want, nil
 	}}
-	s := New(next, rdb)
+	s := newTestStore(t, next, rdb)
 
 	s.writeCache(ctx, key, want)
 	s.writeCache(ctx, key, nil)
@@ -370,5 +405,37 @@ func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
 	}
 	if cached == nil || cached.ID != want.ID {
 		t.Errorf("cached value = %+v, want ID %d", cached, want.ID)
+	}
+}
+
+// TestStoreGetByCodeSkipsMetricOnCanceledContext 验证客户端断开不计进命中率，也不冒充 Redis 降级。
+func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	want := &link.Link{ID: 3, Code: code, URL: "https://example.com/3"}
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		return want, nil
+	}}
+	s := newTestStore(t, next, rdb)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := s.GetByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	if got.ID != want.ID {
+		t.Errorf("ID = %d, want %d", got.ID, want.ID)
+	}
+	for _, result := range []string{resultHit, resultMiss, resultFallback} {
+		if n := testutil.ToFloat64(s.gets.WithLabelValues(result)); n != 0 {
+			t.Errorf("gets{result=%q} = %v, want 0", result, n)
+		}
+	}
+	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); n != 0 {
+		t.Errorf("writes{result=error} = %v, want 0", n)
 	}
 }

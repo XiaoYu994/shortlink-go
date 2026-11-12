@@ -72,7 +72,7 @@ func run() error {
 
 	// 组合顺序：HTTP -> cache -> storemetrics -> postgres。
 	// 指标装饰器贴着数据库，缓存命中不会计入存储耗时。
-	store := cache.New(storemetrics.New(postgres.NewStore(db), registry), rdb)
+	store := cache.New(storemetrics.New(postgres.NewStore(db), registry), rdb, registry)
 	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry)
 
 	/*
