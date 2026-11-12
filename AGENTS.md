@@ -97,7 +97,6 @@ feat: 实现 Base62 编解码
 ```
 
 - 提交前 `make check` 必须通过。
-- AI 参与的提交在末尾加：`Co-Authored-By: Claude Code <noreply@anthropic.com>`。
 - 个人学习阶段直接在 main 上提交；多人协作时用 `feat/xxx` 之类的分支。
 
 ## 文档地图
