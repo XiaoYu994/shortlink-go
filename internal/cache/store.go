@@ -34,8 +34,8 @@ type LinkStore interface {
 /*
 Store 是带 Redis 读缓存的 LinkStore 装饰器。
 
-缓存只作用在 GetByCode 上；Create 直接透传：新短码还没有旧缓存，
-不需要失效，也不需要预热。并发未命中用 singleflight 合并，同一个短码同时只回源一次。
+缓存作用在 GetByCode 上。Create 成功后写穿正缓存，盖掉负缓存，
+否则新短码会在 TTL 内继续 404。并发未命中用 singleflight 合并，同一个短码同时只回源一次。
 Redis 故障按 fail-open 处理：读失败或写失败都回源数据库，不影响请求结果。
 */
 type Store struct {
@@ -49,9 +49,13 @@ func New(next LinkStore, rdb *redis.Client) *Store {
 	return &Store{next: next, rdb: rdb}
 }
 
-// Create 直接透传给下一层；缓存只服务读路径。
+// Create 成功后写穿正缓存，盖掉负缓存。写失败不影响创建结果。
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
-	return s.next.Create(ctx, l)
+	if err := s.next.Create(ctx, l); err != nil {
+		return err
+	}
+	s.writeCache(ctx, keyPrefix+l.Code, l)
+	return nil
 }
 
 /*
@@ -109,19 +113,24 @@ func (s *Store) readCache(ctx context.Context, key string) (l *link.Link, ok boo
 }
 
 /*
-writeCache 尽力写回缓存。失败只影响下一次命中率，不影响本次请求：
-数据库已经返回了正确结果，缓存只是优化。
-l 为 nil 表示查无此码，写 JSON null 做负缓存。
+writeCache 失败只影响下次命中。
+
+负缓存用 SET NX，避免后写的「不存在」盖掉刚创建的正缓存。
+正缓存用 SET，创建可以盖掉旧的负缓存。
 */
 func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
+	if ctx.Err() != nil {
+		return
+	}
+
 	data, err := json.Marshal(l)
 	if err != nil {
 		return
 	}
 
-	ttl := positiveTTL
 	if l == nil {
-		ttl = negativeTTL
+		_ = s.rdb.SetNX(ctx, key, data, negativeTTL).Err()
+		return
 	}
-	_ = s.rdb.Set(ctx, key, data, ttl).Err()
+	_ = s.rdb.Set(ctx, key, data, positiveTTL).Err()
 }

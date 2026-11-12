@@ -308,3 +308,67 @@ func TestStoreCreatePassesThrough(t *testing.T) {
 		t.Errorf("store Creates = %d, want 1", n)
 	}
 }
+
+func TestStoreCreateWritesThrough(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	next := &fakeStore{create: func(l *link.Link) error {
+		l.ID = 5
+		l.Code = code
+		l.CreatedAt = time.Now().Truncate(time.Second)
+		return nil
+	}}
+	s := New(next, rdb)
+	ctx := context.Background()
+
+	l := &link.Link{URL: "https://example.com/5"}
+	if err := s.Create(ctx, l); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.GetByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	if got.ID != l.ID || got.URL != l.URL {
+		t.Errorf("GetByCode = %+v, want ID %d URL %q", got, l.ID, l.URL)
+	}
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store GetByCode calls = %d, want 0 (cache hit)", n)
+	}
+}
+
+/*
+TestStoreNegativeWriteDoesNotOverwritePositive 模拟查找回源和创建并发：
+后到的负缓存写入不能覆盖已经写好的正缓存，否则刚创建的短码会继续 404。
+*/
+func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+	ctx := context.Background()
+	key := keyPrefix + code
+
+	want := &link.Link{ID: 11, Code: code, URL: "https://example.com/11"}
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		return want, nil
+	}}
+	s := New(next, rdb)
+
+	s.writeCache(ctx, key, want)
+	s.writeCache(ctx, key, nil)
+
+	data, err := rdb.Get(ctx, key).Bytes()
+	if err != nil {
+		t.Fatalf("get cached value: %v", err)
+	}
+	var cached *link.Link
+	if err := json.Unmarshal(data, &cached); err != nil {
+		t.Fatalf("decode cached value: %v", err)
+	}
+	if cached == nil || cached.ID != want.ID {
+		t.Errorf("cached value = %+v, want ID %d", cached, want.ID)
+	}
+}
