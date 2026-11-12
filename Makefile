@@ -5,7 +5,7 @@ export
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
-.PHONY: help run build test cover vet lint fmt check up down psql redis-cli
+.PHONY: help run build test cover vet lint fmt check up prometheus down psql redis-cli
 
 help: ## 列出所有命令
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -33,8 +33,11 @@ fmt: ## 格式化代码
 
 check: fmt vet test ## 提交前跑一遍：格式化、静态检查、测试
 
-up: ## 启动 PostgreSQL 和 Redis
+up: ## 启动 PostgreSQL、Redis 和 Prometheus
 	docker compose up -d --wait
+
+prometheus: ## 启动本地 Prometheus
+	docker compose up -d prometheus
 
 down: ## 停止依赖（数据保留；加 -v 才会清空）
 	docker compose down
