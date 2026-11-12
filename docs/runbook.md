@@ -7,8 +7,10 @@
 
 ```txt
 DATABASE_URL=postgres://user:password@127.0.0.1:5432/dbname?sslmode=disable
-REDIS_ADDR=localhost:6379
+REDIS_URL=redis://localhost:6379/0
 ```
+
+`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。
 
 `.env` 已被 gitignore，不会提交。
 
@@ -31,7 +33,7 @@ psql "$DATABASE_URL" -f migrations/002_add_links_constraints.sql
 make run
 ```
 
-这种情况下不要再执行 `make up`：它会尝试启动 compose 的 PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_ADDR` 上可连，启动时 Ping 失败进程会退出。
+这种情况下不要再执行 `make up`：它会尝试启动 compose 的 PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，启动时 Ping 失败进程会退出。
 
 ## 启动
 
@@ -227,10 +229,10 @@ TEST_DATABASE_URL=postgres://shortlink:shortlink@localhost:5432/shortlink_test?s
 
 使用自己的 PostgreSQL 时，把用户名、密码和库名换成实际的。
 
-Redis 缓存测试只读 `TEST_REDIS_ADDR`，未设置时自动跳过。测试用 `test-` 前缀的唯一短码，结束后只删除自己写入的 key，不会清空 Redis。在 `.env` 里加：
+Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用 `test-` 前缀的唯一短码，结束后只删除自己写入的 key，不会清空 Redis。在 `.env` 里加：
 
 ```txt
-TEST_REDIS_ADDR=localhost:6379
+TEST_REDIS_URL=redis://localhost:6379/0
 ```
 
 ## 停止
@@ -243,8 +245,9 @@ TEST_REDIS_ADDR=localhost:6379
 | --- | --- |
 | `DATABASE_URL is required` | `.env` 缺失，或没有通过 `make run` 启动 |
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
-| `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_ADDR` 是否正确；启动时 Ping 失败进程会退出 |
-| cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_ADDR`；`make test` 会自动加载 `.env` |
+| `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
+| `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
+| cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
 | `make up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `DATABASE_URL` 指向已有实例 |
 | 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |

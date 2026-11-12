@@ -53,7 +53,7 @@ func run() error {
 	logger.Info("connected to postgres")
 
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	rdb, err := cache.Open(ctx, cfg.RedisAddr)
+	rdb, err := cache.Open(ctx, cfg.RedisURL)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("connect redis: %w", err)

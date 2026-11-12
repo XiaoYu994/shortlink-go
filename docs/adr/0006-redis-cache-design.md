@@ -37,6 +37,7 @@
 - 读 Redis 出错（`redis.Nil` 除外）或写 Redis 出错都只影响命中率，请求照常回源数据库。
 - 启动时 `Ping` 失败仍然让进程退出：连不上 Redis 属于部署配置错误，应该在启动阶段暴露，而不是带病运行。
 - 客户端超时和重试调短：`DialTimeout` 500ms、`ReadTimeout`/`WriteTimeout` 200ms、`MaxRetries` 1。go-redis 默认读超时 5 秒、重试 3 次，Redis 挂掉时一次 GET 可能超过 `REQUEST_TIMEOUT`，降级还没走到数据库请求就先超时了。
+- 连接参数只保留 `REDIS_URL`：`redis://`、`rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。不再单独维护 `REDIS_ADDR`，避免两条配置路径和优先级规则。超时和重试在 URL 解析后统一覆盖。
 - 缓存值为坏数据（旧格式、写坏）时删除该 key、按未命中回源，让下一次写入自愈。
 
 ### 每个消费方声明自己的 LinkStore
@@ -47,7 +48,7 @@
 
 ### 测试连真实 Redis
 
-- cache 测试读 `TEST_REDIS_ADDR`；未设置时 `t.Skip`，用于没有 Redis 的 CI。本地在 `.env` 里配置后 `make test` 会真实执行，不是一直跳过。
+- cache 测试读 `TEST_REDIS_URL`；未设置时 `t.Skip`，用于没有 Redis 的 CI。本地在 `.env` 里配置后 `make test` 会真实执行，不是一直跳过。
 - 每个测试生成 `test-` 前缀的唯一短码，`t.Cleanup` 只删除自己的 key；绝不 `FLUSHDB`，Redis 可能和别的应用共用。
 - 降级测试不需要停 Redis：用已经 `Close()` 的客户端构造 Store，调用会稳定失败并触发回源。
 - 覆盖命中、负缓存、singleflight 合并、Redis 故障降级、坏数据自愈、错误不写缓存。
@@ -56,7 +57,7 @@
 
 - 当前没有任何行为需要按环境名分叉，加 `APP_ENV=dev/test/prod` 是死配置。
 - 单一环境名容易变成分支开关，让测试和生产走不同代码路径，bug 藏在没走到的那条路里。
-- 本地用 `.env`，测试用 `TEST_DATABASE_URL`/`TEST_REDIS_ADDR`，部署环境由平台注入变量；这些已经表达了“在哪运行”。
+- 本地用 `.env`，测试用 `TEST_DATABASE_URL`/`TEST_REDIS_URL`，部署环境由平台注入变量；这些已经表达了“在哪运行”。
 - 以后需要按环境变化时，加具体行为的开关（例如 `LOG_LEVEL`、`LOG_FORMAT`），而不是万能环境名。确实需要环境标识时，只把它当日志和指标的 label，不控制核心逻辑。
 
 ## 后果
@@ -64,7 +65,7 @@
 - 跳转命中缓存时不再占用数据库连接，效果用同一轮压测和基线对比验收（见 `docs/runbook.md`）。
 - 缓存值格式和 `link.Link` 绑定。以后给 `Link` 加字段或改序列化格式，需要升 key 前缀版本，或者依赖“解码失败按未命中”自愈。
 - 负缓存会短暂掩盖短码刚创建的情况：创建发生在负缓存写入之后没有问题；如果先查了不存在的短码，紧接着创建，最多 1 分钟内仍返回 404。当前创建和跳转是独立请求，接受这个窗口。
-- 测试需要可用的 Redis；没有 `TEST_REDIS_ADDR` 时 cache 测试跳过，其余测试不受影响。
+- 测试需要可用的 Redis；没有 `TEST_REDIS_URL` 时 cache 测试跳过，其余测试不受影响。
 - 生产上需要给缓存 Redis 配置 `maxmemory` 和淘汰策略，并尽量使用独立实例；默认的 `noeviction` 配置不适合缓存场景。
 - 缓存命中、未命中、降级次数和 `ClickRecorder` 的 dropped 计数仍待接入 `/metrics`（[ADR 0005](0005-prometheus-before-tracing.md)）。
 

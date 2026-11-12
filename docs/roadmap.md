@@ -55,7 +55,7 @@
 - [x] `docker-compose.yml` 加 Prometheus 抓取 `/metrics`；Prometheus 在容器里抓宿主机的 app，target 用 `host.docker.internal:8080`（Linux 下加 `extra_hosts: host.docker.internal:host-gateway`），或把 app 也放进 compose；压测一轮，用 PromQL 记下没有缓存时跳转的 p50、p99 作为基线
   - 2026-11-12 基线（50 并发、30 秒、10s 预热、无缓存）：服务端 p50 3.2ms、p99 21.5ms；连接池峰值 10，详见 runbook
 - [x] `go get github.com/redis/go-redis/v9`
-  - `REDIS_ADDR` 必填；`internal/cache.Open` 在启动时 Ping，失败则进程退出
+  - `REDIS_URL` 必填；`internal/cache.Open` 在启动时 Ping，失败则进程退出
 - [x] `CachedStore`：命中、负缓存、singleflight、Redis 故障降级
   - 正缓存 1h、负缓存 1m，value 是完整 `Link` 的 JSON；Redis 故障时回源数据库
   - 值格式、接口和测试策略见 [ADR 0006](adr/0006-redis-cache-design.md)

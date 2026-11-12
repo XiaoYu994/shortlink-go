@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-# 先按 docs/runbook.md 准备 .env、DATABASE_URL 和 REDIS_ADDR
+# 先按 docs/runbook.md 准备 .env、DATABASE_URL 和 REDIS_URL
 make run
 curl -i localhost:8080/healthz
 ```

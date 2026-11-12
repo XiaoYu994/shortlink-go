@@ -43,20 +43,20 @@ func (f *fakeStore) GetByCode(ctx context.Context, code string) (*link.Link, err
 }
 
 /*
-newTestRedis 连 TEST_REDIS_ADDR 指向的真实 Redis；没有设置时跳过。
+newTestRedis 连 TEST_REDIS_URL 指向的真实 Redis；没有设置时跳过。
 测试只读写自己生成的 test- 前缀短码，结束时删除，不使用 FLUSHDB。
 */
 func newTestRedis(t *testing.T) *redis.Client {
 	t.Helper()
 
-	addr := os.Getenv("TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("TEST_REDIS_ADDR is not set")
+	redisURL := os.Getenv("TEST_REDIS_URL")
+	if redisURL == "" {
+		t.Skip("TEST_REDIS_URL is not set")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	rdb, err := Open(ctx, addr)
+	rdb, err := Open(ctx, redisURL)
 	if err != nil {
 		t.Fatalf("open redis: %v", err)
 	}
