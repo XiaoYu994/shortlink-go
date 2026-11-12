@@ -29,7 +29,7 @@
 
 - [x] `internal/config`：`LoadConfig` 和测试
 - [x] logging、recoverer、request_id 中间件和 `chain`，各自有测试
-- [ ] `signal.NotifyContext` 加 `Shutdown`，手动验证：请求处理到一半时按 Ctrl+C
+- [x] `signal.NotifyContext` 加 `Shutdown`，手动验证：请求处理到一半时按 Ctrl+C
 
 ## 阶段 5：Redis 缓存与点击统计（第 9、10 课）
 

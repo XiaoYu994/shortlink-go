@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"shortlink/internal/config"
@@ -59,8 +61,40 @@ func run() error {
 
 	logger.Info("listening", "addr", cfg.Addr)
 
-	// TODO(第 8 课): 用 signal.NotifyContext 加 httpSrv.Shutdown 实现优雅退出。
-	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	/*
+		收到 SIGINT（Ctrl+C）或 SIGTERM（容器停止）后停止接受新连接，
+		并等待正在处理的请求结束，上限是 SHUTDOWN_TIMEOUT。
+		收到信号后马上 stop，第二次信号恢复默认行为，进程会立刻退出。
+		Shutdown 使用新的超时 context：信号 context 此时已经取消。
+		数据库在 Shutdown 返回、run 退出时由上面的 defer 关闭。
+	*/
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// ListenAndServe 在 Shutdown 关掉监听后返回 ErrServerClosed，这条 goroutine 随之退出。
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpSrv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-signalCtx.Done():
+		logger.Info("shutting down", "cause", context.Cause(signalCtx))
+	}
+
+	stop()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer shutdownCancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

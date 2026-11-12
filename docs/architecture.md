@@ -81,11 +81,14 @@ GET /r/{code}
 - `DATABASE_URL`：必填
 - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS`
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
-- `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时使用（退出流程仍在第 8 课后半）
+- `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
 - `REDIS_ADDR`：阶段 5 使用，`LoadConfig` 暂不读取
+
+## 退出
+
+进程监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`，然后 `run` 返回，`defer` 关闭数据库连接池。`Shutdown` 不会取消这些请求的 context。再次收到信号时恢复默认行为，进程立刻退出。
 
 ## 尚未实现
 
-- 优雅退出（第 8 课）
 - Redis 缓存、点击统计（第 9、10 课）
 - 多租户、鉴权（阶段 6）

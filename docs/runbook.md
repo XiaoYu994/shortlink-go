@@ -112,7 +112,7 @@ TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/si_crm_test?sslmode=di
 
 ## 停止
 
-前台 `make run` 用 `Ctrl+C` 停止（优雅退出在第 8 课实现）。`make down` 只停止项目自带的 compose 服务，不会影响 `si-crm-*` 容器。
+前台 `make run` 用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。再按一次 `Ctrl+C` 会立刻退出。`make down` 只停止项目自带的 compose 服务，不会影响 `si-crm-*` 容器。
 
 ## 常见问题
 
