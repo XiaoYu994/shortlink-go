@@ -49,15 +49,21 @@ func run() error {
 
 	srv := httpapi.NewServer(logger, postgres.NewStore(db), cfg.RequestTimeout)
 
+	/*
+		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。
+		ReadTimeout 从开始读请求算起，创建接口的 body 也算在里面；写死成更短的值时，
+		把请求时限调大后，body 会先被掐断。
+		WriteTimeout 从读完请求头算起，多出来的时间用来把 504 写回客户端。
+	*/
+	readWriteTimeout := cfg.RequestTimeout + 5*time.Second
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Routes(),
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		// WriteTimeout 比 REQUEST_TIMEOUT 宽松：请求超时之后还要把 504 写回客户端。
-		WriteTimeout: cfg.RequestTimeout + 5*time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:       readWriteTimeout,
+		WriteTimeout:      readWriteTimeout,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	logger.Info("listening", "addr", cfg.Addr)

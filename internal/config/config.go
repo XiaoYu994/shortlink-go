@@ -21,8 +21,8 @@ const (
 	defaultAddr = ":8080"
 	// defaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
 	defaultShutdownTimeout = 10 * time.Second
-	// defaultRequestTimeout 是单个请求的处理时限。main 让 WriteTimeout 比它宽松，
-	// 保证超时后还有时间把 504 写回客户端。
+	// defaultRequestTimeout 是单个请求的处理时限。main 让读写超时比它宽松，
+	// 保证读完 body，并在超时后还有时间把 504 写回客户端。
 	defaultRequestTimeout = 5 * time.Second
 )
 

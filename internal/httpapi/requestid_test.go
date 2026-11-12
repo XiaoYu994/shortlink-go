@@ -80,6 +80,11 @@ func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 		t.Fatalf("%s = %q, want a valid id", requestIDHeader, id)
 	}
 	assertLogsShareRequestID(t, &buf, id, "get link", "request")
+	for _, entry := range logEntries(t, &buf) {
+		if entry["msg"] == "get link" && entry["code"] != "abc" {
+			t.Errorf("code = %v, want abc", entry["code"])
+		}
+	}
 }
 
 func TestRequestIDTiesPanicAndAccessLog(t *testing.T) {

@@ -1,10 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +49,8 @@ TestRoutesGatewayTimeout 验证慢查询到点后 handler 返回 504 和 JSON �
 而不是把连接一直挂到客户端放弃、访问日志还记成成功。
 */
 func TestRoutesGatewayTimeout(t *testing.T) {
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), timeoutStore{}, 20*time.Millisecond)
+	var buf bytes.Buffer
+	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), timeoutStore{}, 20*time.Millisecond)
 	handler := srv.Routes()
 
 	tests := []struct {
@@ -57,12 +58,14 @@ func TestRoutesGatewayTimeout(t *testing.T) {
 		method string
 		path   string
 		body   string
+		code   string
 	}{
-		{"create", http.MethodPost, "/api/v1/links", `{"url":"https://example.com"}`},
-		{"redirect", http.MethodGet, "/r/abc12345", ""},
+		{"create", http.MethodPost, "/api/v1/links", `{"url":"https://example.com"}`, ""},
+		{"redirect", http.MethodGet, "/r/abc12345", "", "abc12345"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			buf.Reset()
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body)))
 
@@ -74,6 +77,24 @@ func TestRoutesGatewayTimeout(t *testing.T) {
 			}
 			if !strings.Contains(rec.Body.String(), "request timed out") {
 				t.Errorf("body = %q, want it to mention the timeout", rec.Body.String())
+			}
+
+			var access map[string]any
+			for _, entry := range logEntries(t, &buf) {
+				switch entry["msg"] {
+				case "request":
+					access = entry
+				case "request timed out":
+					if tt.code != "" && entry["code"] != tt.code {
+						t.Errorf("code = %v, want %q", entry["code"], tt.code)
+					}
+				}
+			}
+			if access == nil {
+				t.Fatalf("missing access log\n%s", buf.String())
+			}
+			if got := logStatus(t, access); got != http.StatusGatewayTimeout {
+				t.Errorf("logged status = %d, want %d", got, http.StatusGatewayTimeout)
 			}
 		})
 	}

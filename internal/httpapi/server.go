@@ -80,19 +80,22 @@ func (s *Server) writeError(ctx context.Context, w http.ResponseWriter, status i
 /*
 handleStoreError 把存储调用的失败映射成响应。
 客户端断开时什么都不写；请求超时返回 504；其余情况记错误日志并返回 500。
+attrs 是额外的日志字段。跳转失败时带上短码；创建失败时短码还没生成，不传。
 
 超时是 timeout 中间件的 deadline 正常生效，不是存储故障，所以记 Warn：
 数据库慢或负载高时这类日志会成片出现，不该和真正的 bug 混在一个级别。
 */
-func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op string, err error) {
+func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op string, err error, attrs ...any) {
 	if s.clientGone(r) {
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		s.logger.WarnContext(r.Context(), "request timed out", "op", op, "err", err)
+		args := append([]any{"op", op, "err", err}, attrs...)
+		s.logger.WarnContext(r.Context(), "request timed out", args...)
 		s.writeError(r.Context(), w, http.StatusGatewayTimeout, "request timed out")
 		return
 	}
-	s.logger.ErrorContext(r.Context(), op, "err", err)
+	args := append([]any{"err", err}, attrs...)
+	s.logger.ErrorContext(r.Context(), op, args...)
 	s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
 }

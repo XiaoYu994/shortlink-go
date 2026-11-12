@@ -9,7 +9,8 @@ import (
 
 /*
 handleRedirect 把 /r/{code} 302 跳转到原始 URL。
-短码不存在映射成 404，存储故障映射成 500；客户端断开时直接返回，不写响应。
+短码不存在映射成 404，存储故障映射成 500，处理超时映射成 504。
+客户端断开时直接返回，不写响应。
 */
 func (s *Server) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
@@ -24,7 +25,7 @@ func (s *Server) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			s.writeError(r.Context(), w, http.StatusNotFound, "link not found")
 			return
 		}
-		s.handleStoreError(w, r, "get link", err)
+		s.handleStoreError(w, r, "get link", err, "code", code)
 		return
 	}
 
