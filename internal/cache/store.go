@@ -20,13 +20,17 @@ const (
 	// negativeTTL 更短：不存在的短码不该久占内存，又要挡住随机短码打数据库。
 	negativeTTL = time.Minute
 
-	getsMetricName   = "shortlink_cache_gets_total"
-	writesMetricName = "shortlink_cache_writes_total"
+	getsMetricName     = "shortlink_cache_gets_total"
+	writesMetricName   = "shortlink_cache_writes_total"
+	durationMetricName = "shortlink_cache_operation_duration_seconds"
+
+	operationGet = "get"
+	operationSet = "set"
 
 	resultHit      = "hit"
 	resultMiss     = "miss"
 	resultFallback = "fallback"
-	// resultSkipped 不计数。调用方 ctx 已结束，不是 Redis 故障。
+	// resultSkipped 不计数，也不记耗时。调用方 ctx 已结束，不是 Redis 故障。
 	resultSkipped = ""
 
 	writeSuccess = "success"
@@ -34,6 +38,12 @@ const (
 	writeSkipped = "skipped"
 	writeError   = "error"
 )
+
+/*
+和 HTTP、存储指标用同一组桶：Redis 命中通常在 1ms 内，默认的 5ms 起步太粗。
+从 0.1ms 开始按 2 倍增长，覆盖到约 13s。
+*/
+var durationBuckets = prometheus.ExponentialBuckets(0.0001, 2, 18)
 
 /*
 LinkStore 是装饰器需要的最小能力。接口放在使用方，cache 就不依赖 httpapi 和 postgres。
@@ -50,11 +60,12 @@ Create 成功后写穿，盖掉负缓存，否则新短码会在 TTL 内继续 4
 必须用指针：singleflight.Group 里有锁，复制后就各记各的。
 */
 type Store struct {
-	next   LinkStore
-	rdb    *redis.Client
-	group  singleflight.Group // 零值就能用
-	gets   *prometheus.CounterVec
-	writes *prometheus.CounterVec
+	next     LinkStore
+	rdb      *redis.Client
+	group    singleflight.Group // 零值就能用
+	gets     *prometheus.CounterVec
+	writes   *prometheus.CounterVec
+	duration *prometheus.HistogramVec
 }
 
 // New 把指标注册到 registry。测试每次传新的，避免重复注册 panic。
@@ -70,8 +81,13 @@ func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry) *Stor
 			Name: writesMetricName,
 			Help: "Total number of cache writes by result.",
 		}, []string{"result"}),
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    durationMetricName,
+			Help:    "Cache operation duration in seconds by operation and result.",
+			Buckets: durationBuckets,
+		}, []string{"operation", "result"}),
 	}
-	registry.MustRegister(s.gets, s.writes)
+	registry.MustRegister(s.gets, s.writes, s.duration)
 	return s
 }
 
@@ -88,15 +104,12 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 GetByCode 未命中或 Redis 故障时回源。负缓存的 value 是 JSON null。
 
 singleflight 用领头请求的 ctx，它取消时等待者也拿到 context.Canceled。
-每个请求按自己的读取结果计数，包括等在 singleflight 里的。
+每个请求按自己的读取结果计数，包括等在 singleflight 里的；计数和耗时都在 readCache 里记。
 */
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	key := keyPrefix + code
 
 	cached, result := s.readCache(ctx, key)
-	if result != resultSkipped {
-		s.gets.WithLabelValues(result).Inc()
-	}
 	if result == resultHit {
 		if cached == nil {
 			return nil, link.ErrNotFound
@@ -118,22 +131,31 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 }
 
 /*
-readCache 在调用方 ctx 已结束时返回 resultSkipped，不把断开记成降级。
+readCache 在调用方 ctx 已结束时返回 resultSkipped，不计数也不记耗时，
+不把断开记成降级。
 
 看 ctx.Err()，不看错误里的 DeadlineExceeded：go-redis 拨号用子 context，
 超时也是这个错误，但调用方的 ctx 还活着，那是 Redis 没连上。
 坏数据删掉后按未命中，让回源重新写入。
 */
-func (s *Store) readCache(ctx context.Context, key string) (*link.Link, string) {
+func (s *Store) readCache(ctx context.Context, key string) (cached *link.Link, result string) {
+	start := time.Now()
+	defer func() {
+		if result == resultSkipped {
+			return
+		}
+		s.gets.WithLabelValues(result).Inc()
+		s.duration.WithLabelValues(operationGet, result).Observe(time.Since(start).Seconds())
+	}()
+
 	data, err := s.rdb.Get(ctx, key).Bytes()
 	switch {
 	case err == nil:
-		var l *link.Link
-		if err := json.Unmarshal(data, &l); err != nil {
+		if err := json.Unmarshal(data, &cached); err != nil {
 			_ = s.rdb.Del(ctx, key).Err()
 			return nil, resultMiss
 		}
-		return l, resultHit
+		return cached, resultHit
 	case errors.Is(err, redis.Nil):
 		return nil, resultMiss
 	case ctx.Err() != nil:
@@ -161,6 +183,7 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		return
 	}
 
+	start := time.Now()
 	var (
 		written bool
 		setErr  error
@@ -183,4 +206,5 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		result = writeSkipped
 	}
 	s.writes.WithLabelValues(result).Inc()
+	s.duration.WithLabelValues(operationSet, result).Observe(time.Since(start).Seconds())
 }

@@ -62,11 +62,12 @@ func run() error {
 
 	/*
 		自建 Registry：测试会构造多个 Server，共用 DefaultRegisterer 时同名指标重复注册会 panic。
-		自建 Registry 默认是空的，Go 运行时指标和连接池指标要单独注册。
+		自建 Registry 默认是空的，Go 运行时、进程和连接池指标要单独注册。
 	*/
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
 		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewDBStatsCollector(db, "shortlink"),
 	)
 

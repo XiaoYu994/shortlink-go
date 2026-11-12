@@ -24,7 +24,7 @@ func logging(logger *slog.Logger) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Prometheus 每 5 秒抓一次，记进访问日志会把业务日志淹没。
-			if r.URL.Path == metricsPath {
+			if isMetricsRequest(r) {
 				next.ServeHTTP(w, r)
 				return
 			}

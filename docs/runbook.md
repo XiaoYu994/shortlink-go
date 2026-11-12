@@ -55,7 +55,7 @@ curl -i localhost:8080/healthz
 
 ```bash
 curl -s -o /dev/null localhost:8080/healthz
-curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|shortlink_store_|shortlink_cache_|go_sql_)'
+curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|go_sql_)'
 ```
 
 计数发生在响应写完之后，没出现过的 label 也不会输出。刚启动后直接抓 `/metrics`，正文里还没有 `shortlink_http_*`，所以上面先访问一次 `/healthz`。
@@ -63,11 +63,13 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|shortl
 目前能看到：
 
 - `go_goroutines` 等 Go 运行时指标，一启动就有
+- `process_*`：进程 CPU、内存、文件描述符，一启动就有
 - `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），一启动就有
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 只有 `GET`、`HEAD`、`POST`、`other`
 - `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。`/healthz` 不访问数据库，要创建或打开过短链才看得到
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
 - `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。创建和回源写缓存都会计数；`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
+- `shortlink_cache_operation_duration_seconds`：缓存操作耗时，`operation` 为 `get`、`set`，用来区分慢在 Redis 还是数据库
 
 Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志和 HTTP 指标。
 
@@ -133,7 +135,7 @@ Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:80
    hey -disable-redirects -z 30s -c 50 http://localhost:8080/r/<code>
    ```
 
-5. 测量结束后用 Prometheus 的 30 秒窗口查询服务端 p50/p99、RPS 和连接池：
+5. 测量结束后用 Prometheus 的 30 秒窗口查询服务端 p50/p99、RPS、连接池和缓存：
 
    ```promql
    histogram_quantile(0.50, sum by (le) (rate(shortlink_http_request_duration_seconds_bucket{route="GET /r/{code}",method="GET",status="302"}[30s])))
@@ -144,6 +146,9 @@ Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:80
    max_over_time(go_sql_in_use_connections{db_name="shortlink"}[30s])
    rate(go_sql_wait_duration_seconds_total{db_name="shortlink"}[30s])
    sum(rate(go_sql_wait_count_total{db_name="shortlink"}[30s]))
+   sum by (result) (rate(shortlink_cache_gets_total[30s]))
+   histogram_quantile(0.99, sum by (le) (rate(shortlink_cache_operation_duration_seconds_bucket{operation="get",result="hit"}[30s])))
+   histogram_quantile(0.99, sum by (le) (rate(shortlink_cache_operation_duration_seconds_bucket{operation="set",result="success"}[30s])))
    ```
 
 6. 单轮预热加单轮测量。数字用于同一台机器上的前后对比，不作为容量规划依据。

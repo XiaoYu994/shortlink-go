@@ -51,7 +51,7 @@
   - 耗时直方图从 0.1ms 开始按 2 倍增长；默认桶从 5ms 开始，跳转的 p99 看不出缓存效果
 - [x] 存储耗时：写一个实现 `LinkStore` 的装饰器包在 `postgres.Store` 外层，按操作记耗时和结果（`not_found`、`canceled`、`timeout` 都不算失败；耗时直方图带同样的结果标签）
   - 组合顺序固定为 `HTTP -> CachedStore -> 指标装饰器 -> postgres.Store`，存储耗时只算真正打到数据库的调用
-- [x] 连接池指标：注册 `collectors.NewDBStatsCollector`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`
+- [x] 连接池指标：注册 `collectors.NewDBStatsCollector`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`；同时注册 `collectors.NewProcessCollector` 暴露 `process_*`
 - [x] `docker-compose.yml` 加 Prometheus 抓取 `/metrics`；Prometheus 在容器里抓宿主机的 app，target 用 `host.docker.internal:8080`（Linux 下加 `extra_hosts: host.docker.internal:host-gateway`），或把 app 也放进 compose；压测一轮，用 PromQL 记下没有缓存时跳转的 p50、p99 作为基线
   - 2026-11-12 基线（50 并发、30 秒、10s 预热、无缓存）：服务端 p50 3.2ms、p99 21.5ms；连接池峰值 10，详见 runbook
 - [x] `go get github.com/redis/go-redis/v9`
@@ -60,7 +60,7 @@
   - 正缓存 1h、负缓存 1m，value 是完整 `Link` 的 JSON；Redis 故障时回源数据库
   - 值格式、接口和测试策略见 [ADR 0006](adr/0006-redis-cache-design.md)
 - [ ] 缓存指标：命中、未命中、降级次数；同样的压测再跑一轮，和基线对比
-  - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。`shortlink_cache_writes_total{result}` 记录 `success`、`skipped`（`SET NX` 没写进去）、`error`。请求取消和写失败不计入。压测对比还没做
+  - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。`shortlink_cache_writes_total{result}` 记录 `success`、`skipped`（`SET NX` 没写进去）、`error`。`shortlink_cache_operation_duration_seconds{operation,result}` 记录缓存操作耗时（`operation` 为 `get`、`set`）。请求取消不计入。压测对比还没做
 - [ ] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
 - [ ] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
 - [ ] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间

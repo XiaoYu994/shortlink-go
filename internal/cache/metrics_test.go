@@ -37,6 +37,10 @@ func TestGetByCodeCountsMissThenHit(t *testing.T) {
 	assertCacheResult(t, s, resultMiss, 1)
 	assertCacheResult(t, s, resultHit, 1)
 	assertCacheResult(t, s, resultFallback, 0)
+	// get/miss、get/hit，加上回源后写正缓存的 set/success。
+	if n := testutil.CollectAndCount(s.duration); n != 3 {
+		t.Errorf("duration series = %d, want 3", n)
+	}
 }
 
 func TestGetByCodeCountsNegativeAsHit(t *testing.T) {

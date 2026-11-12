@@ -59,7 +59,7 @@ func (m *httpMetrics) httpMiddleware(mux *http.ServeMux) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// 抓取请求不算业务请求，别让 /metrics 自己变成一条时间序列。
-			if r.URL.Path == metricsPath {
+			if isMetricsRequest(r) {
 				next.ServeHTTP(w, r)
 				return
 			}

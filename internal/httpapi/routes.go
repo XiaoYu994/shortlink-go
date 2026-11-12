@@ -15,6 +15,11 @@ const (
 	metricsPath = "/metrics"
 )
 
+// isMetricsRequest 判断请求是否打到抓取端点；logging 和 HTTP 指标都跳过它。
+func isMetricsRequest(r *http.Request) bool {
+	return r.URL.Path == metricsPath
+}
+
 /*
 Routes 返回注册好全部路由的 handler。
 requestID 在最外层，里面的 logging、recoverer 和 handler 拿到的 context 里已经有编号。

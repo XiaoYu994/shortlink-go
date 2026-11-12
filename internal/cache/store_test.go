@@ -412,6 +412,9 @@ func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
 	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSkipped)); got != 1 {
 		t.Errorf("writes{result=%q} = %v, want 1", writeSkipped, got)
 	}
+	if n := testutil.CollectAndCount(s.duration); n != 2 {
+		t.Errorf("duration series = %d, want 2", n)
+	}
 }
 
 /*
