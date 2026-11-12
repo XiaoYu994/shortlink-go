@@ -71,8 +71,9 @@ func run() error {
 		collectors.NewDBStatsCollector(db, "shortlink"),
 	)
 
-	// 指标装饰器贴着数据库，缓存层以后包在它外面，缓存命中不会计入存储耗时。
-	store := storemetrics.New(postgres.NewStore(db), registry)
+	// 组合顺序：HTTP -> cache -> storemetrics -> postgres。
+	// 指标装饰器贴着数据库，缓存命中不会计入存储耗时。
+	store := cache.New(storemetrics.New(postgres.NewStore(db), registry), rdb)
 	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry)
 
 	/*
