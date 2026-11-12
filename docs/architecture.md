@@ -112,6 +112,7 @@ GET /r/{code}
 ## 尚未实现
 
 - Prometheus 业务指标（[ADR 0005](adr/0005-prometheus-before-tracing.md)）：`GET /metrics` 已暴露 Go 运行时、HTTP、缓存、存储和连接池指标；`ClickRecorder` 的 dropped 计数待做。`/metrics` 与业务共用端口，公网隔离由部署层保证
-- 点击统计和点击写入（第 10 课）
+- 链接过期：`expires_at` 列已存在，但查询过滤和缓存 TTL 联动还没实现
+- 点击统计和点击写入（第 10 课）：`clicks` 列由 `ClickRecorder` 维护
 - 多租户和 API Key 鉴权，拆分 `cmd/redirector` 与 `cmd/console`（阶段 6）
 - OpenTelemetry 追踪（可选，ADR 0005）：等指标解释不了慢请求再加

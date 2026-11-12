@@ -63,6 +63,7 @@
   - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。请求取消和写失败不计入。`shortlink_cache_writes_total{result}` 记录写缓存成功/失败。压测对比还没做
 - [ ] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
 - [ ] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
+- [ ] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间
 - [ ] 用泛型的 `doTyped` 去掉类型断言
 
 ## 阶段 6：一个 SaaS 功能

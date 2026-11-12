@@ -19,4 +19,7 @@ COMMENT ON COLUMN links.clicks IS '点击次数';
 COMMENT ON COLUMN links.expires_at IS '过期时间';
 COMMENT ON COLUMN links.created_at IS '创建时间';
 
+-- TODO(第 10 课): clicks 由 ClickRecorder 维护。
+-- TODO: expires_at 的过期校验和缓存 TTL 联动还没实现。
+
 -- id 只作内部主键；code 由应用随机生成。
