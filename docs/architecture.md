@@ -87,7 +87,7 @@ GET /r/{code}
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
 - `REQUEST_TIMEOUT`：默认 `5s`，单个请求的处理时限，超时返回 504
 - `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
-- `REDIS_ADDR`：阶段 5 使用，`LoadConfig` 暂不读取
+- `REDIS_ADDR`：第 9 课缓存使用，`LoadConfig` 暂不读取
 
 ## 退出
 
@@ -95,5 +95,7 @@ GET /r/{code}
 
 ## 尚未实现
 
+- Prometheus 指标，排在 Redis 前面（[ADR 0005](adr/0005-prometheus-before-tracing.md)）：`GET /metrics`，以及 HTTP、存储、连接池的指标。缓存命中和 `ClickRecorder` 的 dropped 计数也进这里；`/metrics` 与业务共用端口，公网隔离由部署层保证
 - Redis 缓存、点击统计（第 9、10 课）
-- 多租户、鉴权（阶段 6）
+- 多租户和 API Key 鉴权，拆分 `cmd/redirector` 与 `cmd/console`（阶段 6）
+- OpenTelemetry 追踪（可选，ADR 0005）：等指标解释不了慢请求再加
