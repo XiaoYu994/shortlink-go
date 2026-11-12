@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"shortlink/internal/cache"
 	"shortlink/internal/config"
 	"shortlink/internal/httpapi"
 	"shortlink/internal/postgres"
@@ -50,6 +51,15 @@ func run() error {
 	}
 	defer func() { _ = db.Close() }()
 	logger.Info("connected to postgres")
+
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	rdb, err := cache.Open(ctx, cfg.RedisAddr)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("connect redis: %w", err)
+	}
+	defer func() { _ = rdb.Close() }()
+	logger.Info("connected to redis")
 
 	/*
 		自建 Registry：测试会构造多个 Server，共用 DefaultRegisterer 时同名指标重复注册会 panic。

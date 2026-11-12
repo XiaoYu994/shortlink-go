@@ -1,9 +1,8 @@
 /*
 Package config 从环境变量加载进程配置，并在启动时校验。
 
-未设置的可选项使用默认值。缺少 DATABASE_URL、数值或时长无法解析、
+未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_ADDR、数值或时长无法解析、
 连接池参数、请求超时或关机超时不合法时，LoadConfig 返回错误，由 main 终止启动。
-REDIS_ADDR 留给第 9 课，这里不读取。
 */
 package config
 
@@ -33,6 +32,7 @@ Pool 的默认值来自 postgres.DefaultPoolConfig，环境变量只覆盖显式
 type Config struct {
 	Addr            string // HTTP 监听地址，例如 :8080
 	DatabaseURL     string // PostgreSQL 连接串
+	RedisAddr       string // Redis 地址，例如 localhost:6379
 	Pool            postgres.PoolConfig
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
@@ -40,7 +40,7 @@ type Config struct {
 
 /*
 LoadConfig 从环境变量读取进程配置。
-未设置的可选项使用默认值；DATABASE_URL 为空、数值或时长无法解析、
+未设置的可选项使用默认值；DATABASE_URL 或 REDIS_ADDR 为空、数值或时长无法解析、
 连接池参数、请求超时或关机超时不合法时返回错误。
 */
 func LoadConfig() (Config, error) {
@@ -58,6 +58,10 @@ func LoadConfig() (Config, error) {
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
+	}
+	cfg.RedisAddr = os.Getenv("REDIS_ADDR")
+	if cfg.RedisAddr == "" {
+		return Config{}, errors.New("REDIS_ADDR is required")
 	}
 
 	var err error

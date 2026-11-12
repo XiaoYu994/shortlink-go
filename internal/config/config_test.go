@@ -19,10 +19,12 @@ func TestLoadConfig(t *testing.T) {
 		"DB_CONN_MAX_IDLE_TIME": "",
 		"REQUEST_TIMEOUT":       "",
 		"SHUTDOWN_TIMEOUT":      "",
+		"REDIS_ADDR":            "localhost:6379",
 	}
 	defaults := Config{
 		Addr:            defaultAddr,
 		DatabaseURL:     "postgres://localhost/shortlink",
+		RedisAddr:       "localhost:6379",
 		Pool:            postgres.DefaultPoolConfig(),
 		RequestTimeout:  defaultRequestTimeout,
 		ShutdownTimeout: defaultShutdownTimeout,
@@ -46,10 +48,12 @@ func TestLoadConfig(t *testing.T) {
 				"DB_CONN_MAX_IDLE_TIME": "5m",
 				"REQUEST_TIMEOUT":       "2s",
 				"SHUTDOWN_TIMEOUT":      "15s",
+				"REDIS_ADDR":            "redis:6379",
 			},
 			want: Config{
 				Addr:        ":9090",
 				DatabaseURL: "postgres://user:pass@db:5432/shortlink?sslmode=disable",
+				RedisAddr:   "redis:6379",
 				Pool: postgres.PoolConfig{
 					MaxOpenConns:    20,
 					MaxIdleConns:    4,
@@ -69,6 +73,7 @@ func TestLoadConfig(t *testing.T) {
 			want: Config{
 				Addr:        defaultAddr,
 				DatabaseURL: "postgres://localhost/shortlink",
+				RedisAddr:   "localhost:6379",
 				Pool: postgres.PoolConfig{
 					MaxOpenConns:    10,
 					MaxIdleConns:    10,
@@ -83,6 +88,11 @@ func TestLoadConfig(t *testing.T) {
 			name:    "missing database url",
 			env:     map[string]string{"DATABASE_URL": ""},
 			wantErr: "DATABASE_URL is required",
+		},
+		{
+			name:    "missing redis addr",
+			env:     map[string]string{"REDIS_ADDR": ""},
+			wantErr: "REDIS_ADDR is required",
 		},
 		{
 			name:    "invalid open conns",
