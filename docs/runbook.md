@@ -2,11 +2,12 @@
 
 ## 前置条件
 
-- 本机 Docker 中有一个可用的 PostgreSQL，或者用项目自带的 `docker-compose.yml` 启动一个。
+- 本机 Docker 中有一个可用的 PostgreSQL 和 Redis，或者用项目自带的 `docker-compose.yml` 启动。
 - 项目根目录有 `.env`，至少包含：
 
 ```txt
 DATABASE_URL=postgres://user:password@127.0.0.1:5432/dbname?sslmode=disable
+REDIS_ADDR=localhost:6379
 ```
 
 `.env` 已被 gitignore，不会提交。
@@ -30,7 +31,7 @@ psql "$DATABASE_URL" -f migrations/002_add_links_constraints.sql
 make run
 ```
 
-这种情况下不要再执行 `make up`：它会尝试启动 compose 的 PostgreSQL 并占用 5432 端口。
+这种情况下不要再执行 `make up`：它会尝试启动 compose 的 PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_ADDR` 上可连，启动时 Ping 失败进程会退出。
 
 ## 启动
 
@@ -38,7 +39,7 @@ make run
 make run
 ```
 
-看到 `connected to postgres` 和 `listening addr=:8080` 表示启动成功。`make run` 会自动加载 `.env`。
+看到 `connected to postgres`、`connected to redis` 和 `listening addr=:8080` 表示启动成功。`make run` 会自动加载 `.env`。
 
 检查：
 
@@ -63,6 +64,20 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|go_sql
 - `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。`/healthz` 不访问数据库，要创建或打开过短链才看得到
 
 本地 Prometheus 见下一节。
+
+## 缓存
+
+- 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
+- 正缓存 TTL 1 小时；查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
+- 并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源 PostgreSQL，请求不受影响。启动时 Ping 失败进程会退出，属于部署配置错误。
+- 查看某个短码的缓存：
+
+```bash
+redis-cli -h localhost -p 6379 GET shortlink:link:AbC123xy
+redis-cli -h localhost -p 6379 TTL shortlink:link:AbC123xy
+```
+
+设计背景见 [ADR 0006](adr/0006-redis-cache-design.md)。
 
 ## Prometheus
 
@@ -212,6 +227,12 @@ TEST_DATABASE_URL=postgres://shortlink:shortlink@localhost:5432/shortlink_test?s
 
 使用自己的 PostgreSQL 时，把用户名、密码和库名换成实际的。
 
+Redis 缓存测试只读 `TEST_REDIS_ADDR`，未设置时自动跳过。测试用 `test-` 前缀的唯一短码，结束后只删除自己写入的 key，不会清空 Redis。在 `.env` 里加：
+
+```txt
+TEST_REDIS_ADDR=localhost:6379
+```
+
 ## 停止
 
 前台 `make run` 用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。再按一次 `Ctrl+C` 会立刻退出。`make down` 只停止项目自带的 compose 服务。
@@ -222,6 +243,8 @@ TEST_DATABASE_URL=postgres://shortlink:shortlink@localhost:5432/shortlink_test?s
 | --- | --- |
 | `DATABASE_URL is required` | `.env` 缺失，或没有通过 `make run` 启动 |
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
+| `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_ADDR` 是否正确；启动时 Ping 失败进程会退出 |
+| cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_ADDR`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
 | `make up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `DATABASE_URL` 指向已有实例 |
 | 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |

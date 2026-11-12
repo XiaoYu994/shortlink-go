@@ -1,0 +1,76 @@
+# 0006. Redis 读缓存的设计
+
+- 状态：Accepted
+- 日期：2026-11-12
+
+## 背景
+
+第 9 课要给跳转加 Redis 读缓存。没有缓存时的基线是 50 并发、服务端 p50 3.2ms、p99 21.5ms，连接池峰值打满 10 个连接，`go_sql_wait_count_total` 约 9.9k 次/s，瓶颈在 PostgreSQL 连接池。缓存要解决的是读路径的回源压力，同时不能把 Redis 故障变成请求失败。
+
+实现前讨论过四个问题：缓存值存什么格式、`LinkStore` 接口要不要抽公共定义、测试怎么连真实 Redis、要不要加 `APP_ENV` 环境参数。这个 ADR 记录结论和代价。
+
+## 决策
+
+### 缓存完整 Link 的 JSON
+
+- key 是 `shortlink:link:<code>`，前缀给共享 Redis 留命名空间；value 是完整 `link.Link` 的 JSON。
+- 只存 URL 也能满足当前跳转，但命中时拼出来的 `Link` 会丢 `ID` 和 `CreatedAt`。下一步 `ClickRecorder` 要按 `ID` 记点击，零值会变成静默的错数据。存完整 Link 让缓存对调用方透明。
+- 用 JSON 而不是自定义的 `id|url`：标准库、能自描述、字段扩展方便。代价是固定的字段名和时间戳开销。
+- 实测（Redis 7，URL 60 字节，TTL 1 小时）：只存 URL 每个 key 128 字节，完整 JSON 224 字节，差 96 字节（约 75%）。1000 万个缓存短码约差 0.96 GB。key 和 Redis 对象本身还有约 68 字节固定开销，URL 越长 JSON 占比越小。
+- 访问量不直接决定内存，决定内存的是 TTL 窗口内不同短码的数量。以后内存真的成为瓶颈，再把缓存值改成只含 `ID` 和 `URL` 的紧凑结构；缓存格式是内部实现，解码失败按未命中处理，或者升 key 前缀版本即可安全切换。
+
+### 正缓存 1 小时，负缓存 1 分钟
+
+- 正缓存 TTL 1 小时；负缓存写 JSON `null`，TTL 1 分钟。
+- 负缓存防止用随机短码反复打数据库；TTL 短是为了不让不存在的短码长期占内存。随机短码攻击下的内存上限约等于 QPS × 负缓存 TTL，这个参数比 JSON 格式更值得关注。
+- `null` 解出来是 nil `*link.Link`，`GetByCode` 把它映射成 `link.ErrNotFound`。
+
+### 组合顺序和透传
+
+- 组合顺序固定为 `HTTP -> cache -> storemetrics -> postgres`。缓存命中不进入存储指标，`shortlink_store_*` 只统计真正打到数据库的调用；缓存效果和数据库耗时可以分开看。
+- `Create` 直接透传。新短码没有旧缓存需要失效，也不做写穿预热；第一次跳转回源时自然填缓存。
+- 并发未命中用 `singleflight` 按 cache key 合并，同一个短码同时只有一个请求回源。
+- `singleflight` 里的回源函数使用第一个请求的 ctx。领头请求被取消时，等待中的请求会一起拿到 `context.Canceled`。回源很快，暂时接受；以后需要再给回源派生独立的 context。
+
+### Redis 故障 fail-open
+
+- 读 Redis 出错（`redis.Nil` 除外）或写 Redis 出错都只影响命中率，请求照常回源数据库。
+- 启动时 `Ping` 失败仍然让进程退出：连不上 Redis 属于部署配置错误，应该在启动阶段暴露，而不是带病运行。
+- 客户端超时和重试调短：`DialTimeout` 500ms、`ReadTimeout`/`WriteTimeout` 200ms、`MaxRetries` 1。go-redis 默认读超时 5 秒、重试 3 次，Redis 挂掉时一次 GET 可能超过 `REQUEST_TIMEOUT`，降级还没走到数据库请求就先超时了。
+- 缓存值为坏数据（旧格式、写坏）时删除该 key、按未命中回源，让下一次写入自愈。
+
+### 每个消费方声明自己的 LinkStore
+
+- `httpapi`、`storemetrics`、`cache` 各自定义需要的 `LinkStore` 接口，不抽公共接口。
+- Go 接口是结构化满足的，实现方不需要 import 接口包；接口定义在使用方，依赖方向保持 `cache -> link`、`storemetrics -> link`，不互相依赖。
+- 接口只有两个方法，重复定义的成本远低于引入公共包造成的耦合。改签名时实现和调用点本来就要一起改，抽公共接口并不会少改几处；等装饰器多到接口开始漂移，再考虑收敛。
+
+### 测试连真实 Redis
+
+- cache 测试读 `TEST_REDIS_ADDR`；未设置时 `t.Skip`，用于没有 Redis 的 CI。本地在 `.env` 里配置后 `make test` 会真实执行，不是一直跳过。
+- 每个测试生成 `test-` 前缀的唯一短码，`t.Cleanup` 只删除自己的 key；绝不 `FLUSHDB`，Redis 可能和别的应用共用。
+- 降级测试不需要停 Redis：用已经 `Close()` 的客户端构造 Store，调用会稳定失败并触发回源。
+- 覆盖命中、负缓存、singleflight 合并、Redis 故障降级、坏数据自愈、错误不写缓存。
+
+### 暂不引入 APP_ENV
+
+- 当前没有任何行为需要按环境名分叉，加 `APP_ENV=dev/test/prod` 是死配置。
+- 单一环境名容易变成分支开关，让测试和生产走不同代码路径，bug 藏在没走到的那条路里。
+- 本地用 `.env`，测试用 `TEST_DATABASE_URL`/`TEST_REDIS_ADDR`，部署环境由平台注入变量；这些已经表达了“在哪运行”。
+- 以后需要按环境变化时，加具体行为的开关（例如 `LOG_LEVEL`、`LOG_FORMAT`），而不是万能环境名。确实需要环境标识时，只把它当日志和指标的 label，不控制核心逻辑。
+
+## 后果
+
+- 跳转命中缓存时不再占用数据库连接，效果用同一轮压测和基线对比验收（见 `docs/runbook.md`）。
+- 缓存值格式和 `link.Link` 绑定。以后给 `Link` 加字段或改序列化格式，需要升 key 前缀版本，或者依赖“解码失败按未命中”自愈。
+- 负缓存会短暂掩盖短码刚创建的情况：创建发生在负缓存写入之后没有问题；如果先查了不存在的短码，紧接着创建，最多 1 分钟内仍返回 404。当前创建和跳转是独立请求，接受这个窗口。
+- 测试需要可用的 Redis；没有 `TEST_REDIS_ADDR` 时 cache 测试跳过，其余测试不受影响。
+- 生产上需要给缓存 Redis 配置 `maxmemory` 和淘汰策略，并尽量使用独立实例；默认的 `noeviction` 配置不适合缓存场景。
+- 缓存命中、未命中、降级次数和 `ClickRecorder` 的 dropped 计数仍待接入 `/metrics`（[ADR 0005](0005-prometheus-before-tracing.md)）。
+
+## 参考
+
+- `internal/cache/store.go`、`internal/cache/client.go`
+- `docs/architecture.md`、`docs/runbook.md`
+- [ADR 0005](0005-prometheus-before-tracing.md)
+- [路线图阶段 5](../roadmap.md)

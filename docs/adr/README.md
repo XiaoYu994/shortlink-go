@@ -22,6 +22,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0003](0003-postgres-and-pool-config.md) | PostgreSQL 和连接池配置 | Accepted |
 | [0004](0004-storage-package-layout.md) | 存储包的目录结构 | Accepted |
 | [0005](0005-prometheus-before-tracing.md) | 先做 Prometheus 指标，追踪以后再说 | Accepted |
+| [0006](0006-redis-cache-design.md) | Redis 读缓存的设计 | Accepted |
 
 ## 模板
 

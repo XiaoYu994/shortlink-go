@@ -16,7 +16,8 @@ shortlink/
 │   ├── memorystore/     # 内存存储，仅测试和本地开发
 │   ├── postgres/        # PostgreSQL 存储，生产使用
 │   ├── storemetrics/    # LinkStore 的指标装饰器
-│   └── config/          # 配置加载（第 8 课）
+│   ├── cache/           # Redis 客户端和读缓存（CachedStore）
+│   └── config/          # 配置加载
 ├── migrations/          # 建表 SQL
 ├── deploy/              # 本地 Prometheus 配置
 ├── docs/                # 架构、API、运行手册、路线图、ADR
@@ -26,12 +27,13 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/server   -> httpapi, postgres, storemetrics, config
+cmd/server   -> httpapi, postgres, storemetrics, cache, config
 config       -> postgres
 httpapi      -> link
 postgres     -> link, idgen
 memorystore  -> link, idgen
 storemetrics -> link
+cache        -> link
 link         -> 标准库
 idgen        -> 标准库
 ```
@@ -67,7 +69,7 @@ GET /r/{code}
   -> recoverer
   -> timeout
   -> handleRedirect
-  -> store.GetByCode
+  -> store.GetByCode（cache -> storemetrics -> postgres）
   -> 302 Location: 原始 URL
 ```
 
@@ -79,7 +81,8 @@ GET /r/{code}
 
 - `internal/memorystore`：map + `sync.RWMutex`，只用于测试和本地开发。
 - `internal/postgres`：`database/sql` + pgx，生产使用。
-- `internal/storemetrics`：实现 `LinkStore` 的装饰器，按操作记录耗时和结果。`not_found`、`canceled`、`timeout` 都不算失败，只有其余错误记成 `error`。耗时直方图带同样的结果标签。组装顺序是 `HTTP -> CachedStore -> storemetrics -> postgres.Store`，缓存命中不会计入存储耗时。
+- `internal/storemetrics`：实现 `LinkStore` 的装饰器，按操作记录耗时和结果。`not_found`、`canceled`、`timeout` 都不算失败，只有其余错误记成 `error`。耗时直方图带同样的结果标签。组装顺序是 `HTTP -> cache -> storemetrics -> postgres.Store`，缓存命中不会计入存储耗时。
+- `internal/cache`：`GetByCode` 的 Redis 读缓存装饰器。key 是 `shortlink:link:<code>`，value 是完整 `link.Link` 的 JSON；正缓存 TTL 1 小时，负缓存（JSON `null`）TTL 1 分钟。并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源数据库，不影响请求。设计见 [ADR 0006](adr/0006-redis-cache-design.md)。
 - 连接池指标由 `collectors.NewDBStatsCollector` 暴露为 `go_sql_*`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`。
 - 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`；`code` 格式和 `url` 长度由 CHECK 约束兜底。
 - 短码是 8 位 Base62 随机码，`crypto/rand` 生成；碰撞由唯一索引和最多 5 次重试处理。
@@ -94,11 +97,11 @@ GET /r/{code}
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
 - `REQUEST_TIMEOUT`：默认 `5s`，单个请求的处理时限，超时返回 504
 - `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
-- `REDIS_ADDR`：第 9 课缓存使用，`LoadConfig` 暂不读取
+- `REDIS_ADDR`：必填，例如 `localhost:6379`。`main` 用它 Ping，连不上则进程退出
 
 ## 退出
 
-进程监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`，然后 `run` 返回，`defer` 关闭数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，进程立刻退出。
+进程监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`，然后 `run` 返回，`defer` 关闭 Redis 客户端和数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，进程立刻退出。
 
 ## 监控
 
@@ -107,6 +110,6 @@ GET /r/{code}
 ## 尚未实现
 
 - Prometheus 业务指标（[ADR 0005](adr/0005-prometheus-before-tracing.md)）：`GET /metrics` 已暴露 Go 运行时、HTTP、存储和连接池指标；缓存命中和 `ClickRecorder` 的 dropped 计数待做。`/metrics` 与业务共用端口，公网隔离由部署层保证
-- Redis 缓存、点击统计（第 9、10 课）
+- 点击统计和点击写入（第 10 课）
 - 多租户和 API Key 鉴权，拆分 `cmd/redirector` 与 `cmd/console`（阶段 6）
 - OpenTelemetry 追踪（可选，ADR 0005）：等指标解释不了慢请求再加
