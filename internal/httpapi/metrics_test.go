@@ -46,6 +46,39 @@ func TestMetricsEndpoint(t *testing.T) {
 }
 
 /*
+抓取的 route 是 ServeMux 模式 "GET /metrics"，不是 URL 路径。
+再打一次 /healthz，确认只有抓取被跳过。
+*/
+func TestHTTPMetricsSkipsMetricsPath(t *testing.T) {
+	srv := newTestServer()
+	handler := srv.Routes()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want %d", metricsPath, rec.Code, http.StatusOK)
+	}
+
+	metricsRoute := "GET " + metricsPath
+	statusOK := strconv.Itoa(http.StatusOK)
+	if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues(metricsRoute, http.MethodGet, statusOK)); got != 0 {
+		t.Errorf("requests{route=%q} = %v, want 0", metricsRoute, got)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /healthz = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("GET /healthz", http.MethodGet, statusOK)); got != 1 {
+		t.Errorf("requests{route=%q} = %v, want 1", "GET /healthz", got)
+	}
+	if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues(metricsRoute, http.MethodGet, statusOK)); got != 0 {
+		t.Errorf("requests{route=%q} = %v, want 0", metricsRoute, got)
+	}
+}
+
+/*
 TestHTTPMetricsRecordsRouteAndStatus 验证 counter 的 route、method、status label。
 每个子测试用新的 Server 和 Registry，计数从 1 开始。
 */

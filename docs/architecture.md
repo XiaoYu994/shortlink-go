@@ -107,7 +107,7 @@ GET /r/{code}
 
 ## 监控
 
-`GET /metrics` 暴露 Go 运行时、HTTP、缓存、存储和连接池指标。本地 `make prometheus` 启动 Prometheus，抓取 `host.docker.internal:8080/metrics`，配置在 `deploy/prometheus.yml`。
+`GET /metrics` 暴露 Go 运行时、HTTP、缓存、存储和连接池指标。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，抓取 `host.docker.internal:8080/metrics`，配置在 `deploy/prometheus.yml`。
 
 ## 尚未实现
 

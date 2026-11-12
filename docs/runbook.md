@@ -69,6 +69,8 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|shortl
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
 - `shortlink_cache_writes_total`：写缓存结果（`success`、`error`）。创建和回源写缓存都会计数
 
+Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志和 HTTP 指标。
+
 本地 Prometheus 见下一节。
 
 ## 缓存

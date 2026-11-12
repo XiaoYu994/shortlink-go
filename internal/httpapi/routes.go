@@ -11,6 +11,8 @@ const (
 	apiV1Prefix = "/api/v1"
 	// redirectPrefix 是公开短链的固定前缀。短链一旦发出去就是永久地址，不能改路径。
 	redirectPrefix = "/r/"
+	// metricsPath 是抓取路径。logging 和 HTTP 指标跳过它，避免抓取污染业务指标。
+	metricsPath = "/metrics"
 )
 
 /*
@@ -24,7 +26,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// /metrics 用注入的 Registry；promhttp.Handler() 抓的是 DefaultGatherer，注入的指标不会出现。
-	mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
+	mux.Handle("GET "+metricsPath, promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("POST "+apiV1Prefix+"/links", s.handleCreate)
 	mux.HandleFunc("GET "+redirectPrefix+"{code}", s.handleRedirect)
 	return chain(mux,

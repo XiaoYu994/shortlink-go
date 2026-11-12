@@ -102,6 +102,17 @@ func TestRoutesLogRequest(t *testing.T) {
 	}
 }
 
+func TestLoggingSkipsMetrics(t *testing.T) {
+	var buf bytes.Buffer
+	handler := logging(slog.New(slog.NewJSONHandler(&buf, nil)))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, metricsPath, nil))
+
+	if buf.Len() != 0 {
+		t.Errorf("metrics request was logged: %s", buf.String())
+	}
+}
+
 func oneLogEntry(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 	entries := logEntries(t, buf)

@@ -58,6 +58,12 @@ label 只放取值有限的维度：route 用 ServeMux 的模式，未匹配统�
 func (m *httpMetrics) httpMiddleware(mux *http.ServeMux) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 抓取请求不算业务请求，别让 /metrics 自己变成一条时间序列。
+			if r.URL.Path == metricsPath {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
 			defer func() {
