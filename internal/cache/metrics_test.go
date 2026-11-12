@@ -240,6 +240,9 @@ func TestWriteCanceledDuringSetDoesNotCount(t *testing.T) {
 	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); n != 0 {
 		t.Errorf("writes{result=%q} = %v, want 0", writeSuccess, n)
 	}
+	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeSkipped)); n != 0 {
+		t.Errorf("writes{result=%q} = %v, want 0", writeSkipped, n)
+	}
 }
 
 func assertCacheResult(t *testing.T, s *Store, result string, want float64) {

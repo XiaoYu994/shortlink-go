@@ -67,7 +67,7 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|shortlink_http_|shortl
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 只有 `GET`、`HEAD`、`POST`、`other`
 - `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。`/healthz` 不访问数据库，要创建或打开过短链才看得到
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
-- `shortlink_cache_writes_total`：写缓存结果（`success`、`error`）。创建和回源写缓存都会计数
+- `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。创建和回源写缓存都会计数；`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
 
 Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志和 HTTP 指标。
 

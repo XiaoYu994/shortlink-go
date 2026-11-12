@@ -60,7 +60,7 @@
   - 正缓存 1h、负缓存 1m，value 是完整 `Link` 的 JSON；Redis 故障时回源数据库
   - 值格式、接口和测试策略见 [ADR 0006](adr/0006-redis-cache-design.md)
 - [ ] 缓存指标：命中、未命中、降级次数；同样的压测再跑一轮，和基线对比
-  - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。请求取消和写失败不计入。`shortlink_cache_writes_total{result}` 记录写缓存成功/失败。压测对比还没做
+  - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。`shortlink_cache_writes_total{result}` 记录 `success`、`skipped`（`SET NX` 没写进去）、`error`。请求取消和写失败不计入。压测对比还没做
 - [ ] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
 - [ ] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
 - [ ] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间

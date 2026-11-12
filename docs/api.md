@@ -79,7 +79,7 @@ curl -i localhost:8080/metrics
 
 - `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 只有 `GET`、`HEAD`、`POST`、`other`）
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
-- `shortlink_cache_writes_total`（`result` 为 `success`、`error`。创建和回源写缓存都会计数）
+- `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建和回源写缓存都会计数；`skipped` 表示负缓存的 `SET NX` 发现 key 已被并发的创建写好）
 - `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 

@@ -83,7 +83,7 @@ GET /r/{code}
 - `internal/memorystore`：map + `sync.RWMutex`，只用于测试和本地开发。
 - `internal/postgres`：`database/sql` + pgx，生产使用。
 - `internal/storemetrics`：实现 `LinkStore` 的装饰器，按操作记录耗时和结果。`not_found`、`canceled`、`timeout` 都不算失败，只有其余错误记成 `error`。耗时直方图带同样的结果标签。组装顺序是 `HTTP -> cache -> storemetrics -> postgres.Store`，缓存命中不会计入存储耗时。
-- `internal/cache`：`GetByCode` 的 Redis 读缓存装饰器。key 是 `shortlink:link:<code>`，value 是完整 `link.Link` 的 JSON；正缓存 TTL 1 小时，负缓存（JSON `null`）TTL 1 分钟。并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源数据库，不影响请求。创建成功后写穿正缓存，负缓存用 `SET NX`，避免创建和查找并发时后到的负缓存覆盖正缓存。查找结果记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存结果记在 `shortlink_cache_writes_total`（`success`、`error`）。设计见 [ADR 0006](adr/0006-redis-cache-design.md)。
+- `internal/cache`：`GetByCode` 的 Redis 读缓存装饰器。key 是 `shortlink:link:<code>`，value 是完整 `link.Link` 的 JSON；正缓存 TTL 1 小时，负缓存（JSON `null`）TTL 1 分钟。并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源数据库，不影响请求。创建成功后写穿正缓存，负缓存用 `SET NX`，避免创建和查找并发时后到的负缓存覆盖正缓存。查找结果记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存结果记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示 `SET NX` 没写进去）。设计见 [ADR 0006](adr/0006-redis-cache-design.md)。
 - 连接池指标由 `collectors.NewDBStatsCollector` 暴露为 `go_sql_*`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`。
 - 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`；`code` 格式和 `url` 长度由 CHECK 约束兜底。
 - 短码是 8 位 Base62 随机码，`crypto/rand` 生成；碰撞由唯一索引和最多 5 次重试处理。

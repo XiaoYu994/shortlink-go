@@ -30,6 +30,8 @@ const (
 	resultSkipped = ""
 
 	writeSuccess = "success"
+	// writeSkipped 表示负缓存的 SET NX 没写进去：key 已被并发的创建写好。
+	writeSkipped = "skipped"
 	writeError   = "error"
 )
 
@@ -144,7 +146,8 @@ func (s *Store) readCache(ctx context.Context, key string) (*link.Link, string) 
 /*
 writeCache 失败只影响下次命中。ctx 已取消时不记成写失败。
 
-负缓存用 SET NX，避免后写的「不存在」盖掉刚创建的正缓存。
+负缓存用 SET NX，避免后写的「不存在」盖掉刚创建的正缓存；
+SET NX 没写进去说明正缓存已经在，记 skipped 而不是 success。
 正缓存用 SET，创建可以盖掉旧的负缓存。
 */
 func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
@@ -158,19 +161,26 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		return
 	}
 
-	var setErr error
+	var (
+		written bool
+		setErr  error
+	)
 	if l == nil {
-		setErr = s.rdb.SetNX(ctx, key, data, negativeTTL).Err()
+		written, setErr = s.rdb.SetNX(ctx, key, data, negativeTTL).Result()
 	} else {
 		setErr = s.rdb.Set(ctx, key, data, positiveTTL).Err()
+		written = setErr == nil
 	}
 	// 调用中取消同样不记。拨号超时不会让 ctx.Err() 非空，仍记成 error。
 	if setErr != nil && ctx.Err() != nil {
 		return
 	}
 	result := writeSuccess
-	if setErr != nil {
+	switch {
+	case setErr != nil:
 		result = writeError
+	case !written:
+		result = writeSkipped
 	}
 	s.writes.WithLabelValues(result).Inc()
 }

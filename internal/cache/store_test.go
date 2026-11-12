@@ -406,6 +406,12 @@ func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
 	if cached == nil || cached.ID != want.ID {
 		t.Errorf("cached value = %+v, want ID %d", cached, want.ID)
 	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); got != 1 {
+		t.Errorf("writes{result=%q} = %v, want 1", writeSuccess, got)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSkipped)); got != 1 {
+		t.Errorf("writes{result=%q} = %v, want 1", writeSkipped, got)
+	}
 }
 
 /*
