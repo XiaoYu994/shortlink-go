@@ -19,7 +19,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | --- | --- | --- |
 | [0001](0001-api-versioning-and-route-namespace.md) | API 版本和路由命名空间 | Accepted |
 | [0002](0002-random-short-codes.md) | 随机短码 | Accepted |
-| [0003](0003-postgres-shared-db-and-pool-config.md) | 复用 PostgreSQL 和连接池配置 | Accepted |
+| [0003](0003-postgres-and-pool-config.md) | PostgreSQL 和连接池配置 | Accepted |
 | [0004](0004-storage-package-layout.md) | 存储包的目录结构 | Accepted |
 | [0005](0005-prometheus-before-tracing.md) | 先做 Prometheus 指标，追踪以后再说 | Accepted |
 

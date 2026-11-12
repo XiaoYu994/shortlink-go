@@ -1,15 +1,15 @@
-# 0003. 复用 PostgreSQL 和连接池配置
+# 0003. PostgreSQL 和连接池配置
 
 - 状态：Accepted
 - 日期：2026-11-11
 
 ## 背景
 
-本机已有运行中的 PostgreSQL（`si-crm-db-1`），不需要再启动一套 compose。数据库可能和其他项目共用，表名要和 PostgreSQL 习惯一致，连接池参数需要可配置。
+短链服务使用 PostgreSQL 存储。表名要和 PostgreSQL 习惯一致，连接池参数需要可配置。
 
 ## 决策
 
-- 复用已有 PostgreSQL，`DATABASE_URL` 必填；缺失时启动失败。
+- 使用 PostgreSQL，`DATABASE_URL` 必填；缺失时启动失败。
 - 表名使用 `links`，遵循 PostgreSQL 复数命名习惯。
 - `id` 用 `GENERATED ALWAYS AS IDENTITY` 自增，只作内部主键。
 - `code` 唯一索引，`url`、`created_at` 等字段见 migration。
@@ -18,7 +18,6 @@
 
 ## 后果
 
-- 本地启动依赖已有数据库；`.env` 不提交。
+- 本地启动需要一个可用的 PostgreSQL；`.env` 不提交。
 - 集成测试使用独立的 `TEST_DATABASE_URL`（库名以 `_test` 结尾），不使用应用的 `DATABASE_URL`；原先“清空开发库”的做法已废弃。
-- 如果其他项目也使用 `links` 表名，需要改为独立数据库或重新评估命名。
 - 表结构变更后续用迁移工具管理，不手改生产库。

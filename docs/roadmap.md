@@ -35,22 +35,25 @@
 
 指标不在课程里，排在 Redis 前面做：缓存有没有效果要靠数字验收，第 10 课 `ClickRecorder` 的 dropped 计数也要有地方暴露。
 
-- [ ] `go get github.com/prometheus/client_golang`；`GET /metrics` 暴露指标（运维端点，不版本化，不对公网开放）
+- [x] `go get github.com/prometheus/client_golang`；`GET /metrics` 暴露指标（运维端点，不版本化，不对公网开放）
   - Registry 自己建、由 `main` 注入：测试里会创建很多个 `Server`，往同一个 Registry 重复注册同名指标，`MustRegister` 会 panic
-  - 指标在 `NewServer` 里注册一次，`Routes()` 只组装中间件、不注册：现有测试会在同一个 `Server` 上多次调用 `Routes()`（`internal/httpapi/requestid_test.go`），在 `Routes()` 里注册第二次就 panic
+  - HTTP 指标在 `NewServer` 里注册一次，`Routes()` 只组装中间件、不注册：现有测试会在同一个 `Server` 上多次调用 `Routes()`（`internal/httpapi/requestid_test.go`），在 `Routes()` 里注册第二次就 panic
   - 自建的 Registry 是空的，Go 运行时指标（`go_goroutines` 等）要自己注册
   - `/metrics` 用 `promhttp.HandlerFor(reg, promhttp.HandlerOpts{})` 暴露，不用 `promhttp.Handler()`（后者默认抓 `DefaultGatherer`）
   - 与业务共用 `ADDR` 端口；“不对公网开放”由部署层保证（反向代理不转发或网络策略限制），应用本身不做鉴权
   - 抓取也走中间件链，会被 logging 记日志、被 HTTP 指标统计一次；暂时接受，噪声影响排查时再挪到链外
-- [ ] HTTP 指标中间件：按路由模式、方法、状态码记请求数和耗时直方图
+- [x] HTTP 指标中间件：按路由模式、方法、状态码记请求数和耗时直方图
   - label 只用取值有限的维度，短码、request_id 不能做 label
   - 路由模式用 `mux.Handler(r)` 查，未匹配的归到一个固定值；`mux.Handler` 对 405 也返回空 pattern，会归进同一个值，状态码 label 仍能区分
-  - 外层中间件里读 `r.Pattern` 是空串（`requestID`、`timeout` 用 `WithContext` 换过 Request）
+  - 外层中间件里读 `r.Pattern` 是空串：`timeout` 在指标中间件里层用 `WithContext` 换过 Request，`ServeMux` 只把 Pattern 写到那份副本上
+  - 方法只保留 GET、HEAD、POST，其余记成 `other`。未匹配请求的方法来自客户端，原样做 label 会无限增长；HEAD 要保留是因为 GET 的模式同时匹配 HEAD
   - 中间件放在 `recoverer` 外面（和 `logging` 一样），用 status writer 捕获状态码；否则 panic 被写成 500 时指标会漏掉
-- [ ] 存储耗时：写一个实现 `LinkStore` 的装饰器包在 `postgres.Store` 外层，按操作记耗时和失败次数（`link.ErrNotFound` 是正常结果，不算失败）
+  - 耗时直方图从 0.1ms 开始按 2 倍增长；默认桶从 5ms 开始，跳转的 p99 看不出缓存效果
+- [x] 存储耗时：写一个实现 `LinkStore` 的装饰器包在 `postgres.Store` 外层，按操作记耗时和结果（`not_found`、`canceled`、`timeout` 都不算失败；耗时直方图带同样的结果标签）
   - 组合顺序固定为 `HTTP -> CachedStore -> 指标装饰器 -> postgres.Store`，存储耗时只算真正打到数据库的调用
-- [ ] 连接池指标：注册 `collectors.NewDBStatsCollector`，重点看等待时长和使用中的连接数
-- [ ] `docker-compose.yml` 加 Prometheus 抓取 `/metrics`；Prometheus 在容器里抓宿主机的 app，target 用 `host.docker.internal:8080`（Linux 下加 `extra_hosts: host.docker.internal:host-gateway`），或把 app 也放进 compose；压测一轮，用 PromQL 记下没有缓存时跳转的 p50、p99 作为基线
+- [x] 连接池指标：注册 `collectors.NewDBStatsCollector`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`
+- [x] `docker-compose.yml` 加 Prometheus 抓取 `/metrics`；Prometheus 在容器里抓宿主机的 app，target 用 `host.docker.internal:8080`（Linux 下加 `extra_hosts: host.docker.internal:host-gateway`），或把 app 也放进 compose；压测一轮，用 PromQL 记下没有缓存时跳转的 p50、p99 作为基线
+  - 2026-11-12 基线（50 并发、30 秒、10s 预热、无缓存）：服务端 p50 3.2ms、p99 21.5ms；连接池峰值 10，详见 runbook
 - [ ] `go get github.com/redis/go-redis/v9`
 - [ ] `CachedStore`：命中、负缓存、singleflight、Redis 故障降级
 - [ ] 缓存指标：命中、未命中、降级次数；同样的压测再跑一轮，和基线对比

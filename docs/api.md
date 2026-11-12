@@ -5,6 +5,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/healthz` | 健康检查，返回 `ok` |
+| `GET` | `/metrics` | Prometheus 指标，运维端点 |
 | `POST` | `/api/v1/links` | 创建短链 |
 | `GET` | `/r/{code}` | 302 跳转到原始 URL |
 
@@ -67,6 +68,20 @@ curl -i localhost:8080/healthz
 ```
 
 返回 200 和 `ok`。它是 liveness 探针，故意不访问数据库。
+
+## 指标
+
+```bash
+curl -i localhost:8080/metrics
+```
+
+返回 Prometheus 文本格式。目前暴露 Go 运行时、HTTP、存储和连接池指标：
+
+- `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 只有 `GET`、`HEAD`、`POST`、`other`）
+- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
+- `go_sql_*`（连接池，`db_name="shortlink"`）
+
+缓存命中和 `ClickRecorder` 的 dropped 计数随后加。它是运维端点，不版本化，公网隔离由部署层保证。
 
 ## 请求编号
 
