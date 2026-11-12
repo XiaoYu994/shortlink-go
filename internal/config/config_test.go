@@ -17,12 +17,14 @@ func TestLoadConfig(t *testing.T) {
 		"DB_MAX_IDLE_CONNS":     "",
 		"DB_CONN_MAX_LIFETIME":  "",
 		"DB_CONN_MAX_IDLE_TIME": "",
+		"REQUEST_TIMEOUT":       "",
 		"SHUTDOWN_TIMEOUT":      "",
 	}
 	defaults := Config{
 		Addr:            defaultAddr,
 		DatabaseURL:     "postgres://localhost/shortlink",
 		Pool:            postgres.DefaultPoolConfig(),
+		RequestTimeout:  defaultRequestTimeout,
 		ShutdownTimeout: defaultShutdownTimeout,
 	}
 
@@ -42,6 +44,7 @@ func TestLoadConfig(t *testing.T) {
 				"DB_MAX_IDLE_CONNS":     "4",
 				"DB_CONN_MAX_LIFETIME":  "1h30m",
 				"DB_CONN_MAX_IDLE_TIME": "5m",
+				"REQUEST_TIMEOUT":       "2s",
 				"SHUTDOWN_TIMEOUT":      "15s",
 			},
 			want: Config{
@@ -53,6 +56,7 @@ func TestLoadConfig(t *testing.T) {
 					ConnMaxLifetime: 90 * time.Minute,
 					ConnMaxIdleTime: 5 * time.Minute,
 				},
+				RequestTimeout:  2 * time.Second,
 				ShutdownTimeout: 15 * time.Second,
 			},
 		},
@@ -71,6 +75,7 @@ func TestLoadConfig(t *testing.T) {
 					ConnMaxLifetime: defaults.Pool.ConnMaxLifetime,
 					ConnMaxIdleTime: defaults.Pool.ConnMaxIdleTime,
 				},
+				RequestTimeout:  defaultRequestTimeout,
 				ShutdownTimeout: defaultShutdownTimeout,
 			},
 		},
@@ -106,6 +111,16 @@ func TestLoadConfig(t *testing.T) {
 			name:    "invalid shutdown timeout",
 			env:     map[string]string{"SHUTDOWN_TIMEOUT": "abc"},
 			wantErr: "SHUTDOWN_TIMEOUT",
+		},
+		{
+			name:    "invalid request timeout",
+			env:     map[string]string{"REQUEST_TIMEOUT": "abc"},
+			wantErr: "REQUEST_TIMEOUT",
+		},
+		{
+			name:    "zero request timeout",
+			env:     map[string]string{"REQUEST_TIMEOUT": "0s"},
+			wantErr: "REQUEST_TIMEOUT must be positive",
 		},
 		{
 			name:    "zero shutdown timeout",

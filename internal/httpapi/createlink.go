@@ -73,11 +73,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.Create(r.Context(), l); err != nil {
-		if s.clientGone(r) {
-			return
-		}
-		s.logger.ErrorContext(r.Context(), "create link", "err", err)
-		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+		s.handleStoreError(w, r, "create link", err)
 		return
 	}
 

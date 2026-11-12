@@ -47,7 +47,7 @@ func run() error {
 	defer func() { _ = db.Close() }()
 	logger.Info("connected to postgres")
 
-	srv := httpapi.NewServer(logger, postgres.NewStore(db))
+	srv := httpapi.NewServer(logger, postgres.NewStore(db), cfg.RequestTimeout)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -55,8 +55,9 @@ func run() error {
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// WriteTimeout 比 REQUEST_TIMEOUT 宽松：请求超时之后还要把 504 写回客户端。
+		WriteTimeout: cfg.RequestTimeout + 5*time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	logger.Info("listening", "addr", cfg.Addr)
@@ -64,6 +65,7 @@ func run() error {
 	/*
 		收到 SIGINT（Ctrl+C）或 SIGTERM（容器停止）后停止接受新连接，
 		并等待正在处理的请求结束，上限是 SHUTDOWN_TIMEOUT。
+		正在处理的请求有自己的 REQUEST_TIMEOUT 兜底，慢查询不会把退出拖满。
 		收到信号后马上 stop，第二次信号恢复默认行为，进程会立刻退出。
 		Shutdown 使用新的超时 context：信号 context 此时已经取消。
 		数据库在 Shutdown 返回、run 退出时由上面的 defer 关闭。

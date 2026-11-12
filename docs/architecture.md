@@ -44,6 +44,7 @@ POST /api/v1/links
   -> requestID
   -> logging
   -> recoverer
+  -> timeout
   -> handleCreate
   -> 读取并限制请求体
   -> json.Unmarshal
@@ -59,12 +60,15 @@ GET /r/{code}
   -> requestID
   -> logging
   -> recoverer
+  -> timeout
   -> handleRedirect
   -> store.GetByCode
   -> 302 Location: 原始 URL
 ```
 
 `chain` 里靠前的中间件在外层。`requestID` 确定编号，写入响应头 `X-Request-ID` 和请求 context。`logging` 记录方法、路径、状态码和耗时；`recoverer` 把 handler 的 panic 写成 500。带 context 的日志会自动加上 `request_id`。`http.ErrAbortHandler` 会继续抛出，那是 `net/http` 用来中止当前连接的哨兵。
+
+`timeout` 在最里层，给请求 context 加处理时限。到点后 handler 里的数据库查询被取消（pgx 会中断正在执行的 SQL），handler 返回 504。`http.Server` 的 `ReadTimeout`、`WriteTimeout` 只管连接的读写，不会取消 handler 的 context，处理时限只能靠这一层。
 
 ## 存储
 
@@ -81,12 +85,13 @@ GET /r/{code}
 - `DATABASE_URL`：必填
 - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS`
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
+- `REQUEST_TIMEOUT`：默认 `5s`，单个请求的处理时限，超时返回 504
 - `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
 - `REDIS_ADDR`：阶段 5 使用，`LoadConfig` 暂不读取
 
 ## 退出
 
-进程监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`，然后 `run` 返回，`defer` 关闭数据库连接池。`Shutdown` 不会取消这些请求的 context。再次收到信号时恢复默认行为，进程立刻退出。
+进程监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`，然后 `run` 返回，`defer` 关闭数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，进程立刻退出。
 
 ## 尚未实现
 

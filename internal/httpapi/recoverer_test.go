@@ -41,6 +41,9 @@ func TestRecovererTurnsPanicIntoInternalError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
 	if !strings.Contains(rec.Body.String(), "internal error") {
 		t.Errorf("body = %q, want internal error", rec.Body.String())
 	}

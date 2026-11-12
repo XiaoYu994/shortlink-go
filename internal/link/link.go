@@ -65,7 +65,8 @@ func NewLink(rawURL string) (*Link, error) {
 	if len(rawURL) > MaxURLLength {
 		return nil, &ValidationError{Field: "url", Reason: fmt.Sprintf("longer than %d bytes", MaxURLLength)}
 	}
-	// TrimSpace 只去掉首尾空白；
+	// TrimSpace 只去掉首尾空白；url.Parse 对 path 和 query 里的空格很宽容，
+	// 会悄悄接受，这里显式拒绝，保证存进库的都是写明白的 URL。
 	if strings.ContainsFunc(rawURL, unicode.IsSpace) {
 		return nil, &ValidationError{Field: "url", Reason: "must not contain whitespace"}
 	}

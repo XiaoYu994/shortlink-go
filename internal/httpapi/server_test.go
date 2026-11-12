@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
@@ -16,8 +17,9 @@ import (
 )
 
 // newTestServer 返回一个不输出日志、使用内存存储的 Server，供各个测试复用。
+// 请求超时给得足够宽，只有专门测超时的用例才用短时限。
 func newTestServer() *Server {
-	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New())
+	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second)
 }
 
 /*
@@ -147,7 +149,7 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{
 		"healthz": {Code: "healthz", URL: "https://example.com/healthz"},
 	}}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store)
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second)
 	handler := srv.Routes()
 
 	rec := httptest.NewRecorder()

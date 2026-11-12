@@ -4,8 +4,10 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"shortlink/internal/link"
 )
@@ -21,18 +23,21 @@ type LinkStore interface {
 
 // Server 持有 handler 需要的依赖。
 type Server struct {
-	logger *slog.Logger
-	store  LinkStore
+	logger         *slog.Logger
+	store          LinkStore
+	requestTimeout time.Duration
 }
 
 /*
 NewServer 组装 handler 依赖；store 由 main 注入，测试可以换成别的实现。
 logger 包上一层 requestIDHandler：带请求 context 的日志会自动写上 request_id。
+requestTimeout 是每个请求的处理时限，由 timeout 中间件执行，必须为正。
 */
-func NewServer(logger *slog.Logger, store LinkStore) *Server {
+func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration) *Server {
 	return &Server{
-		logger: slog.New(requestIDHandler{Handler: logger.Handler()}),
-		store:  store,
+		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
+		store:          store,
+		requestTimeout: requestTimeout,
 	}
 }
 
@@ -70,4 +75,24 @@ func (s *Server) writeJSON(ctx context.Context, w http.ResponseWriter, status in
 
 func (s *Server) writeError(ctx context.Context, w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(ctx, w, status, errorResponse{Error: msg})
+}
+
+/*
+handleStoreError 把存储调用的失败映射成响应。
+客户端断开时什么都不写；请求超时返回 504；其余情况记错误日志并返回 500。
+
+超时是 timeout 中间件的 deadline 正常生效，不是存储故障，所以记 Warn：
+数据库慢或负载高时这类日志会成片出现，不该和真正的 bug 混在一个级别。
+*/
+func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	if s.clientGone(r) {
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		s.logger.WarnContext(r.Context(), "request timed out", "op", op, "err", err)
+		s.writeError(r.Context(), w, http.StatusGatewayTimeout, "request timed out")
+		return
+	}
+	s.logger.ErrorContext(r.Context(), op, "err", err)
+	s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
 }

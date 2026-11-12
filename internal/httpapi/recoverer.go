@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -31,8 +32,13 @@ func recoverer(logger *slog.Logger) middleware {
 					"path", r.URL.Path,
 					"stack", string(debug.Stack()),
 				)
-				// 响应已经开始写出时，状态码改不到 500，这里仍然尝试写一条明文错误。
-				http.Error(w, "internal error", http.StatusInternalServerError)
+				/*
+					返回和 writeError 一致的 JSON 错误体，docs/api.md 承诺的错误格式对 panic 也成立。
+					响应已经开始写出时，状态码和 Content-Type 都改不了，这次写入也会失败，都不影响上面的日志。
+				*/
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"error":"internal error"}`+"\n")
 			}()
 			next.ServeHTTP(w, r)
 		})

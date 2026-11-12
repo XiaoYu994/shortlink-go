@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"shortlink/internal/link"
 )
@@ -69,7 +70,7 @@ func TestRequestIDDiffersAcrossRequests(t *testing.T) {
 
 func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 	var buf bytes.Buffer
-	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), failingStore{err: errors.New("db down")})
+	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), failingStore{err: errors.New("db down")}, 5*time.Second)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/abc", nil))

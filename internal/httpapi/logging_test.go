@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"shortlink/internal/memorystore"
 )
@@ -84,7 +85,7 @@ func TestLoggingRecordsStatus(t *testing.T) {
 
 func TestRoutesLogRequest(t *testing.T) {
 	var buf bytes.Buffer
-	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), memorystore.New())
+	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), memorystore.New(), 5*time.Second)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
