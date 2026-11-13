@@ -24,6 +24,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0005](0005-prometheus-before-tracing.md) | 先做 Prometheus 指标，追踪以后再说 | Accepted |
 | [0006](0006-redis-cache-design.md) | Redis 读缓存的设计 | Accepted |
 | [0007](0007-async-click-recording.md) | 异步批量记录点击 | Accepted |
+| [0008](0008-cold-cache-read-path.md) | 冷缓存和长尾短码的读路径保护 | Proposed |
 
 ## 模板
 

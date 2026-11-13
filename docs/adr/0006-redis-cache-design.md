@@ -78,4 +78,5 @@
 - `internal/cache/store.go`、`internal/cache/client.go`
 - `docs/architecture.md`、`docs/runbook.md`
 - [ADR 0005](0005-prometheus-before-tracing.md)
+- [ADR 0008](0008-cold-cache-read-path.md)：正常未命中和长尾短码的读路径保护
 - [路线图阶段 5](../roadmap.md)

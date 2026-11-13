@@ -71,6 +71,9 @@
 - [x] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间
 - [x] 用泛型的 `doTyped` 去掉类型断言
   - `singleflight.Group.Do` 仍返回 `any`。`doTyped` 把断言收在一处；回调先返回 `*link.Link`，nil 指针装进 `any` 后仍带着类型，断言得到零值
+- [ ] 冷缓存/长尾短码的读路径保护（[ADR 0008](adr/0008-cold-cache-read-path.md)，Proposed）
+  - 正常 cache miss 没有回源并发上限，只受 `DB_MAX_OPEN_CONNS`（默认 10）约束；大量不同短码时请求在连接池排队到 `REQUEST_TIMEOUT` 后 504
+  - 计划：在 singleflight 内加正常 miss 的 bulkhead、独立回源超时、增加 shed 指标；先做多 key 压测再定参数
 
 ## 阶段 6：一个 SaaS 功能
 
