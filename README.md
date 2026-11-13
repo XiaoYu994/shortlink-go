@@ -24,6 +24,18 @@ curl -i -X POST localhost:8080/api/v1/links \
 curl -i localhost:8080/r/AbC123xy
 ```
 
+## 验证
+
+```bash
+make deps-up      # 使用项目自带 compose 时：只启动 PostgreSQL 和 Redis
+make selfcheck    # 格式、vet、单测、lint、build、集成测试、冒烟测试
+```
+
+`make deps-up` 只适用于项目自带的 compose；本机已有 PostgreSQL/Redis 时跳过它，
+把 `.env` 指向已有实例即可。`make verify` 不启动 Docker，只跑代码检查；
+`make selfcheck` 会重建测试库并启动真实进程验证 HTTP 行为。CI 配置见
+`.github/workflows/ci.yml`，push 和 PR 会跑同样的检查。
+
 ## 文档
 
 | 文档 | 内容 |

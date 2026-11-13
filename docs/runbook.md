@@ -33,7 +33,8 @@ psql "$DATABASE_URL" -f migrations/002_add_links_constraints.sql
 make run
 ```
 
-这种情况下不要再执行 `make up`：它会尝试启动 compose 的 PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，启动时 Ping 失败进程会退出。
+这种情况下不要再执行 `make up` 或 `make deps-up`：它们会尝试启动 compose 的
+PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，启动时 Ping 失败进程会退出。
 
 ## 启动
 
@@ -98,7 +99,7 @@ redis-cli -h localhost -p 6379 TTL shortlink:link:AbC123xy
 make prometheus
 ```
 
-Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:8080/metrics`，所以 app 要用 `make run` 跑在宿主机。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
+Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:8080/metrics`，所以 app 要用 `make run` 跑在宿主机。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
 ## 基线压测（无缓存）
 
@@ -249,35 +250,49 @@ psql "$DATABASE_URL" -c 'SELECT id, code, url, created_at FROM links ORDER BY id
 ## 测试
 
 ```bash
-make test
-make lint
+make test             # 全部测试；使用 .env 里的 TEST_*，库没准备好时会失败
+make test-unit        # 只跑不依赖 PostgreSQL/Redis 的测试
+make verify           # 格式校验、vet、单测、lint、build，不启动 Docker
+make test-integration # 重建测试库，再跑全部测试（含集成）
+make smoke            # 启动真实进程跑冒烟测试
+make selfcheck        # test-db + verify + test-integration + smoke
 ```
 
-PostgreSQL 集成测试只读 `TEST_DATABASE_URL`，未设置时自动跳过；库名必须以 `_test` 结尾，防止误清开发库。应用的 `DATABASE_URL` 不会被测试使用。
+`make selfcheck` 不负责启动依赖；用 compose 时先 `make deps-up`，用自己的实例时
+确认 `.env` 指向的服务可连。
 
-首次准备测试库（使用项目自带的 compose）：
+`make test-integration` 连接 `.env` 里的 `TEST_DATABASE_URL`，删除并重建该库的
+`links` 表、执行 `migrations/` 下的文件，然后带 `TEST_*` 跑 `go test -race`。
+测试库每次都会被清空，所以库名必须以 `_test` 结尾，防止误清开发库；应用的
+`DATABASE_URL` 不会被测试使用。准备测试库不依赖 compose：本机没有 psql 时会用
+`postgres:17-alpine` 镜像里的客户端。使用项目自带的 compose 时先跑 `make deps-up`；
+使用自己的 PostgreSQL/Redis 时跳过它，确保 `.env` 指向已有实例即可。
 
-```bash
-docker compose exec postgres psql -U shortlink -d shortlink -c 'CREATE DATABASE shortlink_test'
-docker compose exec -i postgres psql -U shortlink -d shortlink_test < migrations/001_create_links.sql
-docker compose exec -i postgres psql -U shortlink -d shortlink_test < migrations/002_add_links_constraints.sql
-```
+`make smoke` 会启动真实进程（默认 `127.0.0.1:18080`，可用 `SMOKE_ADDR` 覆盖），
+使用测试库和测试 Redis，验证健康检查、创建、跳转、HEAD、404、非法参数、过期链接和指标，
+最后用 SIGTERM 检查优雅退出。它同样会重建测试库，不碰开发库。
 
-如果使用自己的 PostgreSQL，建一个以 `_test` 结尾的库，并用你的 psql 客户端执行同样两个迁移文件。
-
-然后在 `.env` 里加：
+测试配置在 `.env` 里：
 
 ```txt
 TEST_DATABASE_URL=postgres://shortlink:shortlink@localhost:5432/shortlink_test?sslmode=disable
-```
-
-使用自己的 PostgreSQL 时，把用户名、密码和库名换成实际的。
-
-Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用 `test-` 前缀的唯一短码，结束后只删除自己写入的 key，不会清空 Redis。在 `.env` 里加：
-
-```txt
 TEST_REDIS_URL=redis://localhost:6379/0
 ```
+
+Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用 `test-` 前缀的唯一短码，
+结束后只删除自己写入的 key，不会清空 Redis。
+
+使用自己的 PostgreSQL 时，把 `TEST_DATABASE_URL` 指过去即可；准备脚本会自动创建
+不存在的 `_test` 库（数据库用户需要 CREATEDB 权限），然后重建 `links` 表。Redis
+同样用 `TEST_REDIS_URL` 指向自己的实例。
+
+## CI
+
+`.github/workflows/ci.yml` 在 push 到 main 和 PR 时运行：
+
+- `verify`：安装固定版本的 golangci-lint，跑 `make verify`。
+- `integration`：从 `.env.example` 生成 `.env`，启动 compose 的 PostgreSQL/Redis，
+  跑 `make test-integration smoke`。
 
 ## 停止
 
@@ -294,5 +309,5 @@ TEST_REDIS_URL=redis://localhost:6379/0
 | 跳转大量 503 | Redis 读失败且回源并发已满；先查 Redis 和 `shortlink_cache_gets_total{result="fallback"}`，回源上限是每进程 8 个 |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
-| `make up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `DATABASE_URL` 指向已有实例 |
+| `make up` / `make deps-up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `.env` 指向已有实例 |
 | 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # install-only 把 golangci-lint 装进 PATH，供后面的 make verify 使用。
+      # 版本和本地开发保持一致，避免 CI 和本机报不同的结果。
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          install-only: true
+      - run: make verify
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # 测试和冒烟都从 .env 读连接串，CI 里从 .env.example 生成一份。
+      - run: cp .env.example .env
+      # CI 没有外部依赖，用 compose 起 PostgreSQL/Redis；本机已有实例时不要执行。
+      - run: make deps-up
+      # test-integration 会重建测试库；smoke 再启动真实进程验证 HTTP 行为。
+      - run: make test-integration smoke
+      - name: Stop dependencies
+        if: always()
+        run: docker compose down -v

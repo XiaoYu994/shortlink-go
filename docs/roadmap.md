@@ -1,6 +1,6 @@
 # 路线图
 
-按顺序做，每个阶段结束跑 `make check` 和 `make lint`。
+按顺序做，每个阶段结束跑 `make selfcheck`（没有 Docker 时至少跑 `make verify`）。
 
 ## 阶段 1：Base62（第 2、6 课）
 
