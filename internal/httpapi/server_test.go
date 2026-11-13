@@ -75,6 +75,9 @@ func TestCreateAndRedirect(t *testing.T) {
 	if resp.URL != "https://example.com/path?q=1" {
 		t.Errorf("url = %q, want %q", resp.URL, "https://example.com/path?q=1")
 	}
+	if resp.ExpiresAt != nil {
+		t.Errorf("expires_at = %v, want nil", resp.ExpiresAt)
+	}
 	if got, want := rec.Header().Get("Location"), "/r/"+resp.Code; got != want {
 		t.Errorf("Location = %q, want %q", got, want)
 	}
@@ -91,6 +94,35 @@ func TestCreateAndRedirect(t *testing.T) {
 	}
 }
 
+func TestCreateWithExpiresAt(t *testing.T) {
+	srv := newTestServer()
+	handler := srv.Routes()
+
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	body := `{"url":"https://example.com/exp","expires_at":"` + expires.Format(time.RFC3339) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var resp createLinkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ExpiresAt == nil || !resp.ExpiresAt.Equal(expires) {
+		t.Fatalf("expires_at = %v, want %v", resp.ExpiresAt, expires)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/r/"+resp.Code, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("redirect status = %d, want %d", rec.Code, http.StatusFound)
+	}
+}
+
 func TestCreateBadRequest(t *testing.T) {
 	srv := newTestServer()
 	handler := srv.Routes()
@@ -104,6 +136,7 @@ func TestCreateBadRequest(t *testing.T) {
 		{"invalid json", `{`, http.StatusBadRequest},
 		{"missing url", `{}`, http.StatusBadRequest},
 		{"invalid url", `{"url":"ftp://example.com"}`, http.StatusBadRequest},
+		{"expired", `{"url":"https://example.com","expires_at":"2000-01-01T00:00:00Z"}`, http.StatusBadRequest},
 		{"url with space", `{"url":"https://example.com/a b"}`, http.StatusBadRequest},
 		{"trailing garbage", `{"url":"https://example.com"}x`, http.StatusBadRequest},
 		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, http.StatusBadRequest},

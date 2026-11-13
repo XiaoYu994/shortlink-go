@@ -47,17 +47,28 @@ ID 和 Code 由 Store 在创建时分配，NewLink 只负责校验 URL；
 CreatedAt 也由存储层设置，因为数据库和内存实现的时钟来源可能不同。
 */
 type Link struct {
-	ID        int64
-	Code      string
-	URL       string
+	ID   int64
+	Code string
+	URL  string
+	// ExpiresAt 为 nil 表示永不过期。time.Time 的零值是公元 1 年，不能拿来表示「没有」。
+	ExpiresAt *time.Time
 	CreatedAt time.Time
 }
 
 /*
+Expired 报告链接在 now 是否已经过期。
+到期时刻本身算过期，和 SQL 的 expires_at > now() 是同一条界限。
+*/
+func (l *Link) Expired(now time.Time) bool {
+	return l.ExpiresAt != nil && !l.ExpiresAt.After(now)
+}
+
+/*
 NewLink 校验 rawURL 并构造一条尚未持久化的链接。
+expiresAt 为 nil 表示永不过期；非 nil 时必须是将来的时间。
 校验失败返回 *ValidationError，调用方可以用 errors.As 取出。
 */
-func NewLink(rawURL string) (*Link, error) {
+func NewLink(rawURL string, expiresAt *time.Time) (*Link, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil, &ValidationError{Field: "url", Reason: "must not be empty"}
@@ -81,6 +92,14 @@ func NewLink(rawURL string) (*Link, error) {
 	if u.Hostname() == "" {
 		return nil, &ValidationError{Field: "url", Reason: "missing host"}
 	}
+	if expiresAt != nil {
+		// 存 UTC 副本。调用方之后改自己的 time.Time，不影响这条链接。
+		t := expiresAt.UTC()
+		if !t.After(time.Now()) {
+			return nil, &ValidationError{Field: "expires_at", Reason: "must be in the future"}
+		}
+		expiresAt = &t
+	}
 
-	return &Link{URL: rawURL}, nil
+	return &Link{URL: rawURL, ExpiresAt: expiresAt}, nil
 }

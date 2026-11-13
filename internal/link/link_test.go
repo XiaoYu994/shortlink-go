@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewLink(t *testing.T) {
@@ -34,7 +35,7 @@ func TestNewLink(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewLink(tt.rawURL)
+			got, err := NewLink(tt.rawURL, nil)
 			if tt.wantErr != "" {
 				var verr *ValidationError
 				if !errors.As(err, &verr) {
@@ -54,6 +55,55 @@ func TestNewLink(t *testing.T) {
 			if got.URL != tt.wantURL {
 				t.Errorf("NewLink(%q).URL = %q, want %q", tt.rawURL, got.URL, tt.wantURL)
 			}
+			if got.ExpiresAt != nil {
+				t.Errorf("NewLink(%q).ExpiresAt = %v, want nil", tt.rawURL, got.ExpiresAt)
+			}
 		})
+	}
+}
+
+func TestNewLinkExpiresAt(t *testing.T) {
+	past := time.Now().Add(-time.Second)
+	_, err := NewLink("https://example.com", &past)
+	var verr *ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("NewLink past error = %v, want *ValidationError", err)
+	}
+	if verr.Field != "expires_at" {
+		t.Errorf("ValidationError.Field = %q, want %q", verr.Field, "expires_at")
+	}
+	if !strings.Contains(verr.Reason, "must be in the future") {
+		t.Errorf("ValidationError.Reason = %q, want substring %q", verr.Reason, "must be in the future")
+	}
+
+	future := time.Now().Add(time.Hour)
+	got, err := NewLink("https://example.com", &future)
+	if err != nil {
+		t.Fatalf("NewLink future: %v", err)
+	}
+	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(future.UTC()) {
+		t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, future.UTC())
+	}
+	future = future.Add(time.Hour)
+	if !got.ExpiresAt.Equal(future.Add(-time.Hour).UTC()) {
+		t.Error("ExpiresAt follows the caller's time.Time")
+	}
+}
+
+func TestLinkExpired(t *testing.T) {
+	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	if (&Link{}).Expired(now) {
+		t.Error("nil ExpiresAt is expired")
+	}
+	future := now.Add(time.Second)
+	if (&Link{ExpiresAt: &future}).Expired(now) {
+		t.Error("future ExpiresAt is expired")
+	}
+	if !(&Link{ExpiresAt: &now}).Expired(now) {
+		t.Error("ExpiresAt equal to now is still valid")
+	}
+	past := now.Add(-time.Second)
+	if !(&Link{ExpiresAt: &past}).Expired(now) {
+		t.Error("past ExpiresAt is still valid")
 	}
 }

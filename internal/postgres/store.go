@@ -23,8 +23,13 @@ import (
 const (
 	linksTable = "links"
 
-	insertLinkSQL = `INSERT INTO ` + linksTable + ` (code, url) VALUES ($1, $2) RETURNING id, created_at`
-	getLinkSQL    = `SELECT id, code, url, created_at FROM ` + linksTable + ` WHERE code = $1`
+	insertLinkSQL = `INSERT INTO ` + linksTable + ` (code, url, expires_at) VALUES ($1, $2, $3) RETURNING id, created_at`
+	/*
+		过期行留在表里，短码继续占着。查询把它看成找不到。
+		到期时刻本身算过期，界限是 expires_at > now()。
+	*/
+	getLinkSQL = `SELECT id, code, url, expires_at, created_at FROM ` + linksTable + `
+WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())`
 	/*
 		同一行在 data 里只出现一次，调用方已经按 id 加总。
 		unnest 的两个数组按下标配对，长度必须一致。
@@ -104,7 +109,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			return fmt.Errorf("generate code: %w", err)
 		}
 
-		err = s.db.QueryRowContext(ctx, insertLinkSQL, code, l.URL).Scan(&l.ID, &l.CreatedAt)
+		err = s.db.QueryRowContext(ctx, insertLinkSQL, code, l.URL, l.ExpiresAt).Scan(&l.ID, &l.CreatedAt)
 		if err == nil {
 			l.Code = code
 			return nil
@@ -118,11 +123,13 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 }
 
 /*
-GetByCode 按短码查找链接，找不到返回 link.ErrNotFound。
+GetByCode 按短码查找链接，找不到或已过期都返回 link.ErrNotFound。
+过期行仍留在表里。
 */
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	var l link.Link
-	err := s.db.QueryRowContext(ctx, getLinkSQL, code).Scan(&l.ID, &l.Code, &l.URL, &l.CreatedAt)
+	err := s.db.QueryRowContext(ctx, getLinkSQL, code).Scan(
+		&l.ID, &l.Code, &l.URL, &l.ExpiresAt, &l.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}

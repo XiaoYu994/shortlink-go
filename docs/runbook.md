@@ -80,7 +80,7 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 ## 缓存
 
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
-- 正缓存 TTL 1 小时；查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
+- 正缓存 TTL 取剩余寿命和 1 小时里更短的那个；没有到期时间时是 1 小时。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
 - 创建成功后写穿正缓存；负缓存用 `SET NX`，避免和创建并发时后到的负缓存覆盖正缓存。
 - 并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源 PostgreSQL，读失败且回源并发已满时返回 503。启动时 Ping 失败进程会退出，属于部署配置错误。
 - 查看某个短码的缓存：

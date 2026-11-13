@@ -500,6 +500,109 @@ func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 	}
 }
 
+func TestCacheTTL(t *testing.T) {
+	if got := cacheTTL(&link.Link{}); got != positiveTTL {
+		t.Errorf("cacheTTL(no expiry) = %v, want %v", got, positiveTTL)
+	}
+
+	soon := time.Now().Add(30 * time.Minute)
+	got := cacheTTL(&link.Link{ExpiresAt: &soon})
+	if got <= 0 || got > 30*time.Minute {
+		t.Errorf("cacheTTL(30m) = %v, want in (0, 30m]", got)
+	}
+
+	past := time.Now().Add(-time.Second)
+	if got := cacheTTL(&link.Link{ExpiresAt: &past}); got > 0 {
+		t.Errorf("cacheTTL(past) = %v, want <= 0", got)
+	}
+}
+
+func TestStoreGetByCodeCacheTTLFollowsExpiry(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	expires := time.Now().Add(30 * time.Minute)
+	want := &link.Link{
+		ID:        7,
+		Code:      code,
+		URL:       "https://example.com/exp",
+		ExpiresAt: &expires,
+		CreatedAt: time.Now().Truncate(time.Second),
+	}
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		return want, nil
+	}}
+	s := newTestStore(t, next, rdb)
+	ctx := context.Background()
+
+	if _, err := s.GetByCode(ctx, code); err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	ttl := rdb.PTTL(ctx, keyPrefix+code).Val()
+	if ttl <= 0 || ttl > 30*time.Minute {
+		t.Errorf("cache TTL = %v, want in (0, 30m]", ttl)
+	}
+}
+
+func TestStoreGetByCodeExpiredCacheEntry(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	past := time.Now().Add(-time.Minute).UTC()
+	body, err := json.Marshal(&link.Link{
+		ID:        7,
+		Code:      code,
+		URL:       "https://example.com/old",
+		ExpiresAt: &past,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	ctx := context.Background()
+	if err := rdb.Set(ctx, keyPrefix+code, body, time.Hour).Err(); err != nil {
+		t.Fatalf("set cache: %v", err)
+	}
+
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		t.Error("expired cache entry fell through to the store")
+		return nil, link.ErrNotFound
+	}}
+	s := newTestStore(t, next, rdb)
+	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
+		t.Fatalf("GetByCode error = %v, want ErrNotFound", err)
+	}
+	if n := rdb.Exists(ctx, keyPrefix+code).Val(); n != 0 {
+		t.Errorf("cached key still exists")
+	}
+}
+
+func TestStoreSkipsCacheWhenLinkAlreadyExpired(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	past := time.Now().Add(-time.Minute)
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		return &link.Link{
+			ID:        7,
+			Code:      code,
+			URL:       "https://example.com/past",
+			ExpiresAt: &past,
+		}, nil
+	}}
+	s := newTestStore(t, next, rdb)
+	ctx := context.Background()
+	if _, err := s.GetByCode(ctx, code); err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	if n := rdb.Exists(ctx, keyPrefix+code).Val(); n != 0 {
+		t.Errorf("expired link was cached")
+	}
+}
+
 func TestJitteredTTL(t *testing.T) {
 	const ttl = time.Hour
 	seen := make(map[time.Duration]struct{})

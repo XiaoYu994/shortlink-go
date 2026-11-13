@@ -125,7 +125,11 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 
 	cached, result := s.readCache(ctx, key)
 	if result == resultHit {
-		if cached == nil {
+		// Redis 惰性删除，到期后的正缓存可能还在。删掉后按找不到返回。
+		if cached == nil || cached.Expired(time.Now()) {
+			if cached != nil {
+				_ = s.rdb.Del(ctx, key).Err()
+			}
 			return nil, link.ErrNotFound
 		}
 		return cached, nil
@@ -196,6 +200,15 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		return
 	}
 
+	ttl := negativeTTL
+	if l != nil {
+		ttl = cacheTTL(l)
+		// go-redis 的 Set 在 duration <= 0 时不带过期时间，key 会一直留着。
+		if ttl <= 0 {
+			return
+		}
+	}
+
 	data, marshalErr := json.Marshal(l)
 	if marshalErr != nil {
 		s.writes.WithLabelValues(writeError).Inc()
@@ -208,9 +221,9 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		setErr  error
 	)
 	if l == nil {
-		written, setErr = s.rdb.SetNX(ctx, key, data, jitteredTTL(negativeTTL)).Result()
+		written, setErr = s.rdb.SetNX(ctx, key, data, jitteredTTL(ttl)).Result()
 	} else {
-		setErr = s.rdb.Set(ctx, key, data, jitteredTTL(positiveTTL)).Err()
+		setErr = s.rdb.Set(ctx, key, data, jitteredTTL(ttl)).Err()
 		written = setErr == nil
 	}
 	// 调用中取消同样不记。拨号超时不会让 ctx.Err() 非空，仍记成 error。
@@ -257,6 +270,21 @@ func (s *Store) readStore(ctx context.Context, code string, limited bool) (*link
 		}
 	}
 	return s.next.GetByCode(ctx, code)
+}
+
+/*
+cacheTTL 是这条正缓存能放多久。
+没有到期时间时用 1 小时；有的话不能比链接本身活得更久。
+*/
+func cacheTTL(l *link.Link) time.Duration {
+	if l.ExpiresAt == nil {
+		return positiveTTL
+	}
+	remaining := time.Until(*l.ExpiresAt)
+	if remaining < positiveTTL {
+		return remaining
+	}
+	return positiveTTL
 }
 
 /*

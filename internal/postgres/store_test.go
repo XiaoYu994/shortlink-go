@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
@@ -48,7 +49,7 @@ func newTestStore(t *testing.T) *Store {
 
 func mustLink(t *testing.T, rawURL string) *link.Link {
 	t.Helper()
-	l, err := link.NewLink(rawURL)
+	l, err := link.NewLink(rawURL, nil)
 	if err != nil {
 		t.Fatalf("NewLink(%q): %v", rawURL, err)
 	}
@@ -77,8 +78,39 @@ func TestStoreCreateAndGetByCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByCode: %v", err)
 	}
-	if got.ID != l.ID || got.Code != l.Code || got.URL != l.URL || !got.CreatedAt.Equal(l.CreatedAt) {
+	if got.ID != l.ID || got.Code != l.Code || got.URL != l.URL || !got.CreatedAt.Equal(l.CreatedAt) || got.ExpiresAt != nil {
 		t.Errorf("GetByCode = %+v, want %+v", got, l)
+	}
+}
+
+func TestGetByCodeHonorsExpiresAt(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// timestamptz 的精度是微秒，纳秒会在往返里丢掉。
+	future := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	l, err := link.NewLink("https://example.com/exp", &future)
+	if err != nil {
+		t.Fatalf("NewLink: %v", err)
+	}
+	if err := store.Create(ctx, l); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := store.GetByCode(ctx, l.Code)
+	if err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(future) {
+		t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, future)
+	}
+
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE "+linksTable+" SET expires_at = now() - interval '1 minute' WHERE id = $1", l.ID); err != nil {
+		t.Fatalf("expire link: %v", err)
+	}
+	if _, err := store.GetByCode(ctx, l.Code); !errors.Is(err, link.ErrNotFound) {
+		t.Errorf("GetByCode expired error = %v, want link.ErrNotFound", err)
 	}
 }
 

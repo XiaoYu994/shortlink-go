@@ -20,6 +20,6 @@ COMMENT ON COLUMN links.expires_at IS '过期时间';
 COMMENT ON COLUMN links.created_at IS '创建时间';
 
 -- clicks 由 ClickRecorder 异步批量维护，跳转请求里不直接 UPDATE。
--- TODO: expires_at 的过期校验和缓存 TTL 联动还没实现。
+-- 过期行留在表里。GetByCode 用 expires_at > now() 把它滤成找不到，缓存 TTL 取剩余寿命。
 
 -- id 只作内部主键；code 由应用随机生成。

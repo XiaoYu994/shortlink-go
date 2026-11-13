@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"shortlink/internal/link"
 )
@@ -17,12 +18,14 @@ JSON 编码会把 &、<、> 这类字符转义成 6 字节形式，最坏情况�
 const maxBodyBytes = link.MaxURLLength*6 + 64
 
 type createLinkRequest struct {
-	URL string `json:"url"`
+	URL       string     `json:"url"`
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 type createLinkResponse struct {
-	Code string `json:"code"`
-	URL  string `json:"url"`
+	Code      string     `json:"code"`
+	URL       string     `json:"url"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 /*
@@ -61,7 +64,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l, err := link.NewLink(req.URL)
+	l, err := link.NewLink(req.URL, req.ExpiresAt)
 	if err != nil {
 		if verr, ok := errors.AsType[*link.ValidationError](err); ok {
 			s.writeError(r.Context(), w, http.StatusBadRequest, verr.Error())
@@ -78,5 +81,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", redirectPrefix+l.Code)
-	s.writeJSON(r.Context(), w, http.StatusCreated, createLinkResponse{Code: l.Code, URL: l.URL})
+	s.writeJSON(r.Context(), w, http.StatusCreated, createLinkResponse{
+		Code: l.Code, URL: l.URL, ExpiresAt: l.ExpiresAt,
+	})
 }
