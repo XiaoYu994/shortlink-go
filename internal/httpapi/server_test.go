@@ -19,7 +19,30 @@ import (
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 	"shortlink/internal/memorystore"
+	"shortlink/internal/tenant"
 )
+
+// testAPIKey 是测试用的固定密钥，符合 slk_ 加 64 位小写十六进制。
+const testAPIKey = "slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+// allowKey 只接受 testAPIKey，并把它映射成租户 1。
+type allowKey struct{}
+
+func (allowKey) Authenticate(_ context.Context, token string) (tenant.Tenant, error) {
+	if token == testAPIKey {
+		return tenant.Tenant{ID: 1}, nil
+	}
+	return tenant.Tenant{}, tenant.ErrUnauthenticated
+}
+
+func authorize(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+}
+
+// testServer 用测试密钥组装 Server，避免每个用例都传一遍 authenticator。
+func testServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
+	return NewServer(logger, store, requestTimeout, registry, clicks, allowKey{})
+}
 
 // newTestRegistry 返回一个独立的 Registry，并注册 Go 运行时指标。
 // 每次新建，避免测试之间重复注册同名指标。
@@ -32,7 +55,7 @@ func newTestRegistry() *prometheus.Registry {
 // newTestServer 返回一个不输出日志、使用内存存储的 Server，供各个测试复用。
 // 请求超时给得足够宽，只有专门测超时的用例才用短时限。
 func newTestServer() *Server {
-	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil)
+	return testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil)
 }
 
 /*
@@ -59,6 +82,7 @@ func TestCreateAndRedirect(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/path?q=1"}`))
 	req.Header.Set("Content-Type", "application/json")
+	authorize(req)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -102,6 +126,7 @@ func TestCreateWithExpiresAt(t *testing.T) {
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	body := `{"url":"https://example.com/exp","expires_at":"` + expires.Format(time.RFC3339) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(body))
+	authorize(req)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -142,6 +167,7 @@ func TestCreateBadRequest(t *testing.T) {
 		{"expires_at not a time", `{"url":"https://example.com","expires_at":"tomorrow"}`, http.StatusBadRequest, "invalid expires_at"},
 		{"expires_at number", `{"url":"https://example.com","expires_at":1}`, http.StatusBadRequest, "invalid expires_at"},
 		{"unknown field", `{"url":"https://example.com","expire_at":"2030-01-01T00:00:00Z"}`, http.StatusBadRequest, `unknown field`},
+		{"tenant in body", `{"url":"https://example.com","tenant_id":1}`, http.StatusBadRequest, "unknown field"},
 		{"url with space", `{"url":"https://example.com/a b"}`, http.StatusBadRequest, ""},
 		{"trailing garbage", `{"url":"https://example.com"}x`, http.StatusBadRequest, "invalid JSON body"},
 		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, http.StatusBadRequest, "invalid JSON body"},
@@ -151,6 +177,7 @@ func TestCreateBadRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(tt.body))
+			authorize(req)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
@@ -177,6 +204,7 @@ func TestCreateFullyEscapedURLWithExpiresAt(t *testing.T) {
 
 	srv := newTestServer()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(b.String()))
+	authorize(req)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -206,7 +234,7 @@ TestRedirectInvalidCode 验证非法短码在进入存储之前就被拒绝。
 */
 func TestRedirectInvalidCode(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{}}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
 	handler := srv.Routes()
 
 	tests := []struct {
@@ -248,7 +276,7 @@ func TestRedirectRecordsClick(t *testing.T) {
 		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/recorded"},
 	}}
 	sink := &recordSink{}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
 	handler := srv.Routes()
 
 	rec := httptest.NewRecorder()
@@ -275,7 +303,7 @@ func TestRedirectHeadDoesNotRecordClick(t *testing.T) {
 		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/recorded"},
 	}}
 	sink := &recordSink{}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/r/AbC123xy", nil))
@@ -304,7 +332,7 @@ func TestRedirectCanceledDuringGetDoesNotRecordClick(t *testing.T) {
 		cancel: cancel,
 	}
 	sink := &recordSink{}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
 
 	req := httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -358,7 +386,7 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{
 		"healthz1": {Code: "healthz1", URL: "https://example.com/healthz"},
 	}}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
 	handler := srv.Routes()
 
 	rec := httptest.NewRecorder()
@@ -390,6 +418,9 @@ func TestClientCanceled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			if tt.method == http.MethodPost {
+				authorize(req)
+			}
 			ctx, cancel := context.WithCancel(req.Context())
 			cancel()
 			req = req.WithContext(ctx)
@@ -420,6 +451,7 @@ func TestCreateMaxLengthURLAccepted(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"`+u+`"}`))
+	authorize(req)
 	rec := httptest.NewRecorder()
 	newTestServer().Routes().ServeHTTP(rec, req)
 
@@ -430,7 +462,7 @@ func TestCreateMaxLengthURLAccepted(t *testing.T) {
 
 // TestStoreOverloadedReturns503 验证存储层的临时过载错误映射成 503，而不是 500。
 func TestStoreOverloadedReturns503(t *testing.T) {
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), overloadedStore{}, 5*time.Second, newTestRegistry(), nil)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), overloadedStore{}, 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))

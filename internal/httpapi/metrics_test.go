@@ -154,7 +154,7 @@ func TestHTTPMetricsRecordsRouteAndStatus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), tt.store, 5*time.Second, newTestRegistry(), nil)
+			srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), tt.store, 5*time.Second, newTestRegistry(), nil)
 
 			rec := httptest.NewRecorder()
 			srv.Routes().ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
@@ -194,7 +194,7 @@ func (panicStore) GetByCode(context.Context, string) (*link.Link, error) { panic
 
 // TestHTTPMetricsRecordsPanicAs500 验证指标中间件在 recoverer 外面，panic 后的 500 也能记到。
 func TestHTTPMetricsRecordsPanicAs500(t *testing.T) {
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), panicStore{}, 5*time.Second, newTestRegistry(), nil)
+	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), panicStore{}, 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))

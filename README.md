@@ -10,10 +10,17 @@ make run
 curl -i localhost:8080/healthz
 ```
 
+先签发一把密钥（明文只打印一次），再创建短链：
+
+```bash
+make console ARGS="key issue --name acme"
+```
+
 创建短链：
 
 ```bash
 curl -i -X POST localhost:8080/api/v1/links \
+  -H 'Authorization: Bearer slk_...' \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 ```

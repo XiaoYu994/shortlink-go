@@ -1,6 +1,7 @@
 #!/bin/sh
-# 准备 TEST_DATABASE_URL 指向的测试库：库不存在就创建，然后重建 links 表
-# 并执行 migrations/ 下的迁移。只动测试库：库名必须以 _test 结尾。
+# 准备 TEST_DATABASE_URL 指向的测试库：库不存在就创建，然后删掉
+# links、api_keys、tenants，再按文件名顺序执行 migrations/。
+# 只动测试库：库名必须以 _test 结尾。
 #
 # 不负责启动 PostgreSQL/Redis：用项目自带的 compose 时先 make deps-up，
 # 用自己的实例时直接配置 .env。没有本机 psql 时用 postgres 镜像里的客户端，
@@ -68,9 +69,8 @@ if [ "$exists" != 1 ]; then
 fi
 
 {
-	echo 'DROP TABLE IF EXISTS links CASCADE;'
-	cat migrations/001_create_links.sql
-	cat migrations/002_add_links_constraints.sql
+	echo 'DROP TABLE IF EXISTS links, api_keys, tenants CASCADE;'
+	cat migrations/*.sql
 } | psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -1 || {
 	echo "准备测试库失败：检查 TEST_DATABASE_URL 和数据库是否可连" >&2
 	exit 1

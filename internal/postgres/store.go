@@ -18,17 +18,18 @@ import (
 
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
+	"shortlink/internal/tenant"
 )
 
 const (
 	linksTable = "links"
 
-	insertLinkSQL = `INSERT INTO ` + linksTable + ` (code, url, expires_at) VALUES ($1, $2, $3) RETURNING id, created_at`
+	insertLinkSQL = `INSERT INTO ` + linksTable + ` (code, url, expires_at, tenant_id) VALUES ($1, $2, $3, $4) RETURNING id, created_at`
 	/*
 		过期行留在表里，短码继续占着。查询把它看成找不到。
 		到期时刻本身算过期，界限是 expires_at > now()。
 	*/
-	getLinkSQL = `SELECT id, code, url, expires_at, created_at FROM ` + linksTable + `
+	getLinkSQL = `SELECT id, code, url, expires_at, created_at, tenant_id FROM ` + linksTable + `
 WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())`
 	/*
 		同一行在 data 里只出现一次，调用方已经按 id 加总。
@@ -109,7 +110,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			return fmt.Errorf("generate code: %w", err)
 		}
 
-		err = s.db.QueryRowContext(ctx, insertLinkSQL, code, l.URL, l.ExpiresAt).Scan(&l.ID, &l.CreatedAt)
+		err = s.db.QueryRowContext(ctx, insertLinkSQL, code, l.URL, l.ExpiresAt, l.TenantID).Scan(&l.ID, &l.CreatedAt)
 		if err == nil {
 			l.Code = code
 			return nil
@@ -129,7 +130,7 @@ GetByCode 按短码查找链接，找不到或已过期都返回 link.ErrNotFoun
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	var l link.Link
 	err := s.db.QueryRowContext(ctx, getLinkSQL, code).Scan(
-		&l.ID, &l.Code, &l.URL, &l.ExpiresAt, &l.CreatedAt)
+		&l.ID, &l.Code, &l.URL, &l.ExpiresAt, &l.CreatedAt, &l.TenantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
@@ -166,6 +167,41 @@ func (s *Store) AddClicks(ctx context.Context, counts map[int64]int64) error {
 		return fmt.Errorf("add clicks: %w", err)
 	}
 	return nil
+}
+
+/*
+Authenticate 用 API Key 的哈希查找租户。
+格式不对、查无此密钥、已过期、已吊销都是 ErrUnauthenticated。
+这几种情况共用一个错误，调用方返回同一个 401，不透露密钥是否存在过。
+其他错误原样往上送，避免把数据库故障说成密钥无效。
+到期时刻本身算过期，界限和链接一样是 expires_at > now()。
+*/
+func (s *Store) Authenticate(ctx context.Context, token string) (tenant.Tenant, error) {
+	if err := ctx.Err(); err != nil {
+		return tenant.Tenant{}, err
+	}
+	if !tenant.ValidToken(token) {
+		return tenant.Tenant{}, tenant.ErrUnauthenticated
+	}
+	var tn tenant.Tenant
+	var externalID sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT t.id, t.external_id
+FROM api_keys k
+JOIN tenants t ON t.id = k.tenant_id
+WHERE k.key_hash = $1
+  AND k.revoked_at IS NULL
+  AND (k.expires_at IS NULL OR k.expires_at > now())`, tenant.HashAPIKey(token)).Scan(&tn.ID, &externalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tenant.Tenant{}, tenant.ErrUnauthenticated
+	}
+	if err != nil {
+		return tenant.Tenant{}, fmt.Errorf("authenticate api key: %w", err)
+	}
+	if externalID.Valid {
+		tn.ExternalID = externalID.String
+	}
+	return tn, nil
 }
 
 // isUniqueViolation 报告错误是否是 PostgreSQL 的唯一约束冲突（SQLSTATE 23505）。

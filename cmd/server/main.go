@@ -1,8 +1,8 @@
 /*
-Command server 是短链接服务的入口。
+Command server 是短链接服务的 HTTP 入口。
 
-目前创建短链和跳转都在这一个程序里。做到 SaaS 层时，
-再按笔记第 1 节拆成 cmd/redirector、cmd/console、cmd/worker。
+创建短链和跳转目前都在这一个程序里。租户和 API Key 的运维命令在 cmd/console。
+进程拆分见 ADR 0009：redirector 只做跳转，管理 HTTP 再迁到 console。
 */
 package main
 
@@ -92,7 +92,8 @@ func run() error {
 	// 组合顺序：HTTP -> cache -> storemetrics -> postgres。
 	// 指标装饰器贴着数据库，缓存命中不会计入存储耗时。
 	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry)
-	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry, clicks)
+	// pgStore 同时负责查链接和用 API Key 哈希换租户。缓存不参与鉴权。
+	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry, clicks, pgStore)
 
 	/*
 		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。

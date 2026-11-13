@@ -45,6 +45,7 @@ Link 是一条短链。
 
 ID 和 Code 由 Store 在创建时分配，NewLink 负责校验 URL 和到期时间；
 CreatedAt 也由存储层设置，因为数据库和内存实现的时钟来源可能不同。
+TenantID 由鉴权中间件写入，不从创建请求的 JSON 读取。
 */
 type Link struct {
 	ID   int64
@@ -53,6 +54,8 @@ type Link struct {
 	// ExpiresAt 为 nil 表示永不过期。time.Time 的零值是公元 1 年，不能拿来表示「没有」。
 	ExpiresAt *time.Time
 	CreatedAt time.Time
+	// TenantID 是这条链接所属的租户。
+	TenantID int64
 }
 
 /*

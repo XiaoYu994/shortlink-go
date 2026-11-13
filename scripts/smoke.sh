@@ -61,6 +61,36 @@ assert_eq() { # got want message
 	[ "$1" = "$2" ] || fail "$3: got '$1', want '$2'"
 }
 
+psql_cmd() { # url [psql args...]
+	url=$1
+	shift
+	if command -v psql >/dev/null 2>&1; then
+		psql "$url" "$@"
+	else
+		docker run --rm -i --network host postgres:17-alpine psql "$url" "$@"
+	fi
+}
+
+# seed_smoke_key 往测试库写入一把固定 API Key。明文只留在这个脚本里。
+# 准备脚本会清掉租户表，所以每次冒烟都要重新种，不能提前写进迁移。
+seed_smoke_key() {
+	hash=$(printf '%s' "$SMOKE_API_KEY" | sha256sum | awk '{print $1}')
+	psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q <<SQL || fail '写入冒烟 API Key 失败'
+INSERT INTO tenants (name)
+SELECT 'smoke'
+WHERE NOT EXISTS (
+    SELECT 1 FROM api_keys WHERE key_hash = decode('${hash}', 'hex')
+);
+INSERT INTO api_keys (tenant_id, key_hash)
+SELECT id, decode('${hash}', 'hex')
+FROM tenants
+WHERE name = 'smoke'
+ORDER BY id
+LIMIT 1
+ON CONFLICT (key_hash) DO NOTHING;
+SQL
+}
+
 # request 把状态码写到 stdout，响应体和响应头分别放进 $TMP/body、$TMP/headers。
 request() { # method path [json]
 	method=$1
@@ -68,7 +98,9 @@ request() { # method path [json]
 	body=${3:-}
 	if [ -n "$body" ]; then
 		curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
-			-X "$method" -H 'Content-Type: application/json' -d "$body" "$BASE$path"
+			-X "$method" -H 'Content-Type: application/json' \
+			-H "Authorization: Bearer $SMOKE_API_KEY" \
+			-d "$body" "$BASE$path"
 	else
 		curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 			-X "$method" "$BASE$path"
@@ -98,6 +130,10 @@ BASE=http://$ADDR
 export ADDR
 export LOG_LEVEL=error
 
+# 64 位小写十六进制。只存在于测试库，和开发库无关。
+SMOKE_API_KEY=slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+seed_smoke_key
+
 ./bin/server >"$LOG" 2>&1 &
 SERVER_PID=$!
 
@@ -116,6 +152,13 @@ echo 'smoke: healthz'
 status=$(request GET /healthz)
 assert_eq "$status" 200 'GET /healthz 状态码'
 assert_eq "$(cat "$TMP/body")" 'ok' 'GET /healthz 响应体'
+
+echo 'smoke: unauthorized'
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-d '{"url":"https://example.com/no-key"}' "$BASE/api/v1/links")
+assert_eq "$status" 401 '没有 API Key 的创建'
+grep -q '"unauthorized"' "$TMP/body" || fail '401 响应体不是 unauthorized'
 
 echo 'smoke: create'
 url="https://example.com/smoke-$$-$(date +%s)"

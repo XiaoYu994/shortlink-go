@@ -14,7 +14,7 @@ REDIS_URL=redis://localhost:6379/0
 
 `.env` 已被 gitignore，不会提交。
 
-- 数据库里已经执行过 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql`，存在 `links` 表。
+- 数据库里已经执行过 `migrations/001_create_links.sql`、`002_add_links_constraints.sql` 和 `003_add_tenants.sql`，存在 `links`、`tenants` 和 `api_keys` 表。
 
 如果使用项目自带的 `docker-compose.yml`：
 
@@ -30,6 +30,7 @@ make run
 set -a; . ./.env; set +a
 psql "$DATABASE_URL" -f migrations/001_create_links.sql
 psql "$DATABASE_URL" -f migrations/002_add_links_constraints.sql
+psql "$DATABASE_URL" -f migrations/003_add_tenants.sql
 make run
 ```
 
@@ -207,10 +208,27 @@ Prometheus（服务端，30 秒窗口）：
 - 缓存命中时 `shortlink_store_*` 没有样本，存储 p50/p99 查出来是空值，这是预期结果。
 - 和基线一样，app、Redis、PostgreSQL、Prometheus、hey 共享同一台 WSL2 VM，绝对数字只用于本机前后对比。
 
+## 签发 API Key
+
+`make` 会加载 `.env`，所以下面的命令能读到 `DATABASE_URL`。直接 `go run` 时要先导出环境变量。命令不连接 Redis。
+
+```bash
+make console ARGS="key issue --name acme"
+make console ARGS="key issue --name acme --expires 2026-12-01T00:00:00Z"
+make console ARGS="key issue --tenant 1"
+make console ARGS="key list --tenant 1"
+make console ARGS="key revoke --id 1"
+```
+
+`key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`key list` 只显示编号和时间，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
+
+已有租户再发一把密钥时用 `--tenant`。`--name` 每次都新建租户，名称不必唯一。`--external-id` 只在新建时写入，并且不能重复。
+
 ## 创建一条短链
 
 ```bash
 curl -i -X POST localhost:8080/api/v1/links \
+  -H 'Authorization: Bearer slk_...' \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 ```
@@ -261,8 +279,8 @@ make selfcheck        # test-db + verify + test-integration + smoke
 `make selfcheck` 不负责启动依赖；用 compose 时先 `make deps-up`，用自己的实例时
 确认 `.env` 指向的服务可连。
 
-`make test-integration` 连接 `.env` 里的 `TEST_DATABASE_URL`，删除并重建该库的
-`links` 表、执行 `migrations/` 下的文件，然后带 `TEST_*` 跑 `go test -race`。
+`make test-integration` 连接 `.env` 里的 `TEST_DATABASE_URL`，删掉该库的
+`links`、`api_keys`、`tenants`，再执行 `migrations/` 下的全部文件，然后带 `TEST_*` 跑 `go test -race`。
 测试库每次都会被清空，所以库名必须以 `_test` 结尾，防止误清开发库；应用的
 `DATABASE_URL` 不会被测试使用。准备测试库不依赖 compose：本机没有 psql 时会用
 `postgres:17-alpine` 镜像里的客户端。使用项目自带的 compose 时先跑 `make deps-up`；
@@ -308,6 +326,6 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
 | 跳转大量 503 | Redis 读失败且回源并发已满；先查 Redis 和 `shortlink_cache_gets_total{result="fallback"}`，回源上限是每进程 8 个 |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
-| `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
+| `relation "links" does not exist` | 按顺序执行 `migrations/001`、`002`、`003` |
 | `make up` / `make deps-up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `.env` 指向已有实例 |
 | 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |

@@ -6,18 +6,21 @@
 | --- | --- | --- |
 | `GET` | `/healthz` | 健康检查，返回 `ok` |
 | `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| `POST` | `/api/v1/links` | 创建短链 |
+| `POST` | `/api/v1/links` | 创建短链，需要 API Key |
 | `GET` | `/r/{code}` | 302 跳转到原始 URL |
 
-管理 API 带版本前缀 `/api/v1`；跳转路径 `/r/{code}` 不加版本，因为短链是永久地址。`/healthz` 是运维端点，不版本化。阶段 5 的 `/metrics` 同样是运维端点：不版本化，不对公网开放（由部署层的反向代理或网络策略限制）。
+管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 是运维端点，不版本化。阶段 5 的 `/metrics` 同样是运维端点：不版本化，不对公网开放（由部署层的反向代理或网络策略限制）。
 
 ## 创建短链
 
 ```bash
 curl -i -X POST localhost:8080/api/v1/links \
+  -H 'Authorization: Bearer slk_...' \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/path?q=1"}'
 ```
+
+`slk_` 后面是 64 位小写十六进制。明文只在 `cmd/console key issue` 成功时出现一次，服务里只存 SHA-256。密钥代表一个租户，链接的 `tenant_id` 由服务端写入，请求体里不能传。签发、查看和吊销见 [runbook](runbook.md)。
 
 成功：
 
@@ -49,9 +52,12 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 | 状态码 | 场景 |
 | --- | --- |
 | 400 | JSON 不合法、有未知字段、URL 或 `expires_at` 不合法 |
+| 401 | 没有 `Authorization: Bearer`、密钥格式不对、密钥不存在、已过期或已吊销 |
 | 413 | 请求体超过上限（约 12KB） |
 | 500 | 存储或内部错误 |
 | 504 | 请求处理超过 `REQUEST_TIMEOUT`（默认 5s） |
+
+401 的正文是 `{"error":"unauthorized"}`，并带 `WWW-Authenticate: Bearer`。格式错误、未知密钥、过期和吊销用同一句，不透露密钥是否存在过。
 
 单个请求的处理时限由 `REQUEST_TIMEOUT` 控制。到点后数据库查询被取消，服务端返回 504，不会让请求一直挂着占住连接。
 

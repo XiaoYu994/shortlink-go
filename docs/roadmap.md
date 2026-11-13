@@ -77,7 +77,13 @@
 
 ## 阶段 6：一个 SaaS 功能
 
-- [ ] 多租户加 API Key 鉴权（中间件加 context 传值）
-- [ ] 拆分 `cmd/redirector` 和 `cmd/console`
+- [x] 多租户加 API Key 鉴权（中间件加 context 传值）
+  - 只包 `POST /api/v1/links`。`Authorization: Bearer slk_` 加 64 位十六进制，库存 SHA-256。租户放进 context，创建时写入 `links.tenant_id`。`/r/{code}`、`/healthz`、`/metrics` 不鉴权
+  - 还没有签发入口。能写数据库的运维人员才能插入哈希；持有密钥的调用方不能再签发
+- [ ] 拆分 `cmd/redirector` 和 `cmd/console`（[ADR 0009](adr/0009-process-split-and-credentials.md)）
+  - 两个 `main`、两套部署，共用 PostgreSQL、Redis 和 `internal/`，进程之间不调用。redirector 只做公开跳转、缓存和点击；console 做管理 API
+- [x] console 的管理员命令：创建租户并签发一把 API Key
+  - `cmd/console key issue` 明文只打印一次。`expires_at` 为空表示不过期，`revoked_at` 表示吊销；过期或吊销仍返回 401。`key list` 只显示状态，`key revoke` 按密钥 ID 吊销。没有公开的签发 HTTP 接口
 - [ ] （可选）缓存击穿的多副本方案：有了多个 redirector 副本、回源次数真的成为压力之后，比较 Redis 分布式锁（`SET NX PX` 加 Lua 释放）和逻辑过期加后台刷新，按回源次数和可接受的一致性取舍
 - [ ] （可选）OpenTelemetry 追踪：拆分后两个进程互不调用，追踪看的是单个请求内部各环节的耗时，等指标解释不了慢请求时再加
+- 用户操作短链的平台不在本阶段。人的登录和 API Key 以后都写成 context 里的同一个租户，见 ADR 0009

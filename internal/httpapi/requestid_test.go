@@ -70,7 +70,7 @@ func TestRequestIDDiffersAcrossRequests(t *testing.T) {
 
 func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 	var buf bytes.Buffer
-	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), failingStore{err: errors.New("db down")}, 5*time.Second, newTestRegistry(), nil)
+	srv := testServer(slog.New(slog.NewJSONHandler(&buf, nil)), failingStore{err: errors.New("db down")}, 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))

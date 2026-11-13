@@ -32,7 +32,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// /metrics 用注入的 Registry；promhttp.Handler() 抓的是 DefaultGatherer，注入的指标不会出现。
 	mux.Handle("GET "+metricsPath, promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
-	mux.HandleFunc("POST "+apiV1Prefix+"/links", s.handleCreate)
+	// 鉴权只包管理 API。公开跳转、健康检查和指标不认密钥。
+	mux.Handle("POST "+apiV1Prefix+"/links", s.authenticate(http.HandlerFunc(s.handleCreate)))
 	mux.HandleFunc("GET "+redirectPrefix+"{code}", s.handleRedirect)
 	return chain(mux,
 		requestID(),

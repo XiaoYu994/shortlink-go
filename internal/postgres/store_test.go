@@ -12,13 +12,14 @@ import (
 
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
+	"shortlink/internal/tenant"
 )
 
 /*
-newTestStore 每次测试前清空 TEST_DATABASE_URL 指向的 links 表。
+newTestStore 每次测试前清空测试库里的租户、密钥和链接，再插入一个租户。
 没有设置 TEST_DATABASE_URL 时跳过；库名不以 _test 结尾时失败，避免误清开发库。
 */
-func newTestStore(t *testing.T) *Store {
+func newTestStore(t *testing.T) (*Store, int64) {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -41,26 +42,31 @@ func newTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if _, err := db.ExecContext(ctx, "TRUNCATE "+linksTable+" RESTART IDENTITY"); err != nil {
-		t.Fatalf("truncate %s: %v", linksTable, err)
+	if _, err := db.ExecContext(ctx, "TRUNCATE tenants RESTART IDENTITY CASCADE"); err != nil {
+		t.Fatalf("truncate tenants: %v", err)
 	}
-	return NewStore(db)
+	var tenantID int64
+	if err := db.QueryRowContext(ctx, `INSERT INTO tenants (name) VALUES ('test') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	return NewStore(db), tenantID
 }
 
-func mustLink(t *testing.T, rawURL string) *link.Link {
+func mustLink(t *testing.T, rawURL string, tenantID int64) *link.Link {
 	t.Helper()
 	l, err := link.NewLink(rawURL, nil)
 	if err != nil {
 		t.Fatalf("NewLink(%q): %v", rawURL, err)
 	}
+	l.TenantID = tenantID
 	return l
 }
 
 func TestStoreCreateAndGetByCode(t *testing.T) {
-	store := newTestStore(t)
+	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 
-	l := mustLink(t, "https://example.com/path?q=1")
+	l := mustLink(t, "https://example.com/path?q=1", tenantID)
 	if err := store.Create(ctx, l); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -78,13 +84,13 @@ func TestStoreCreateAndGetByCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByCode: %v", err)
 	}
-	if got.ID != l.ID || got.Code != l.Code || got.URL != l.URL || !got.CreatedAt.Equal(l.CreatedAt) || got.ExpiresAt != nil {
+	if got.ID != l.ID || got.Code != l.Code || got.URL != l.URL || got.TenantID != l.TenantID || !got.CreatedAt.Equal(l.CreatedAt) || got.ExpiresAt != nil {
 		t.Errorf("GetByCode = %+v, want %+v", got, l)
 	}
 }
 
 func TestGetByCodeHonorsExpiresAt(t *testing.T) {
-	store := newTestStore(t)
+	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 
 	// timestamptz 的精度是微秒，纳秒会在往返里丢掉。
@@ -93,6 +99,7 @@ func TestGetByCodeHonorsExpiresAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLink: %v", err)
 	}
+	l.TenantID = tenantID
 	if err := store.Create(ctx, l); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -115,7 +122,7 @@ func TestGetByCodeHonorsExpiresAt(t *testing.T) {
 }
 
 func TestStoreGetByCodeNotFound(t *testing.T) {
-	store := newTestStore(t)
+	store, _ := newTestStore(t)
 
 	_, err := store.GetByCode(context.Background(), "missing")
 	if !errors.Is(err, link.ErrNotFound) {
@@ -124,7 +131,7 @@ func TestStoreGetByCodeNotFound(t *testing.T) {
 }
 
 func TestStoreCreateRetriesOnCollision(t *testing.T) {
-	store := newTestStore(t)
+	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 
 	codes := []string{"collis01", "collis01", "collis02"}
@@ -137,11 +144,11 @@ func TestStoreCreateRetriesOnCollision(t *testing.T) {
 		return code, nil
 	}
 
-	first := mustLink(t, "https://example.com/1")
+	first := mustLink(t, "https://example.com/1", tenantID)
 	if err := store.Create(ctx, first); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	second := mustLink(t, "https://example.com/2")
+	second := mustLink(t, "https://example.com/2", tenantID)
 	if err := store.Create(ctx, second); err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
@@ -151,13 +158,13 @@ func TestStoreCreateRetriesOnCollision(t *testing.T) {
 }
 
 func TestStoreConcurrentCreate(t *testing.T) {
-	store := newTestStore(t)
+	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 	const n = 50
 
 	links := make([]*link.Link, n)
 	for i := range links {
-		links[i] = mustLink(t, "https://example.com/concurrent")
+		links[i] = mustLink(t, "https://example.com/concurrent", tenantID)
 	}
 
 	var wg sync.WaitGroup
@@ -182,24 +189,60 @@ func TestStoreConcurrentCreate(t *testing.T) {
 }
 
 func TestStoreContextCanceled(t *testing.T) {
-	store := newTestStore(t)
+	store, tenantID := newTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	l := mustLink(t, "https://example.com")
+	l := mustLink(t, "https://example.com", tenantID)
 	if err := store.Create(ctx, l); !errors.Is(err, context.Canceled) {
 		t.Errorf("Create error = %v, want context.Canceled", err)
 	}
 	if _, err := store.GetByCode(ctx, "missing"); !errors.Is(err, context.Canceled) {
 		t.Errorf("GetByCode error = %v, want context.Canceled", err)
 	}
+	if _, err := store.Authenticate(ctx, "slk_"+strings.Repeat("ab", 32)); !errors.Is(err, context.Canceled) {
+		t.Errorf("Authenticate error = %v, want context.Canceled", err)
+	}
+}
+
+func TestAuthenticate(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	plaintext, hash, err := tenant.GenerateAPIKey()
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO api_keys (tenant_id, key_hash) VALUES ($1, $2)`, tenantID, hash); err != nil {
+		t.Fatalf("insert api key: %v", err)
+	}
+
+	got, err := store.Authenticate(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if got.ID != tenantID {
+		t.Errorf("tenant ID = %d, want %d", got.ID, tenantID)
+	}
+
+	other, _, err := tenant.GenerateAPIKey()
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+	if _, err := store.Authenticate(ctx, other); !errors.Is(err, tenant.ErrUnauthenticated) {
+		t.Errorf("unknown key error = %v, want ErrUnauthenticated", err)
+	}
+	if _, err := store.Authenticate(ctx, "not-a-key"); !errors.Is(err, tenant.ErrUnauthenticated) {
+		t.Errorf("malformed key error = %v, want ErrUnauthenticated", err)
+	}
 }
 
 func TestAddClicks(t *testing.T) {
-	store := newTestStore(t)
+	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 
-	l := mustLink(t, "https://example.com/clicks")
+	l := mustLink(t, "https://example.com/clicks", tenantID)
 	if err := store.Create(ctx, l); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

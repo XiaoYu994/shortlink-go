@@ -35,6 +35,7 @@ type ClickRecorder interface {
 type Server struct {
 	logger         *slog.Logger
 	store          LinkStore
+	keys           APIKeyAuthenticator
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
@@ -49,11 +50,14 @@ registry 由 main 创建并注入，/metrics 从这里收集；测试每次传�
 避免同名指标重复注册。HTTP 指标也在这个构造函数里注册一次，Routes() 只组装中间件。
 clicks 为 nil 时跳转不记点击。传入的必须是未装箱的 nil：
 带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
+keys 是管理 API 的鉴权。跳转不使用它。传入的同样必须是未装箱的 nil，
+nil 接口会让创建接口返回 500，而不是把接口放开。
 */
-func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
+func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder, keys APIKeyAuthenticator) *Server {
 	return &Server{
 		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
 		store:          store,
+		keys:           keys,
 		requestTimeout: requestTimeout,
 		registry:       registry,
 		metrics:        newHTTPMetrics(registry),

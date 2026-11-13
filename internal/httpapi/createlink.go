@@ -83,6 +83,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 租户来自鉴权中间件。请求 JSON 里没有这个字段，客户端传了会被当成未知字段拒绝。
+	tn, ok := principalFrom(r.Context())
+	if !ok {
+		s.logger.ErrorContext(r.Context(), "create link", "err", errors.New("missing tenant"))
+		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	l.TenantID = tn.ID
+
 	if err := s.store.Create(r.Context(), l); err != nil {
 		s.handleStoreError(w, r, "create link", err)
 		return

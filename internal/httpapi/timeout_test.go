@@ -50,7 +50,7 @@ TestRoutesGatewayTimeout 验证慢查询到点后 handler 返回 504 和 JSON �
 */
 func TestRoutesGatewayTimeout(t *testing.T) {
 	var buf bytes.Buffer
-	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), timeoutStore{}, 20*time.Millisecond, newTestRegistry(), nil)
+	srv := testServer(slog.New(slog.NewJSONHandler(&buf, nil)), timeoutStore{}, 20*time.Millisecond, newTestRegistry(), nil)
 	handler := srv.Routes()
 
 	tests := []struct {
@@ -67,7 +67,11 @@ func TestRoutesGatewayTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			buf.Reset()
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body)))
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			if tt.method == http.MethodPost {
+				authorize(req)
+			}
+			handler.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusGatewayTimeout {
 				t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusGatewayTimeout, rec.Body.String())

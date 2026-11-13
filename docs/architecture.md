@@ -8,10 +8,12 @@
 
 ```txt
 shortlink/
-├── cmd/server/          # 程序入口，只做组装和启动
+├── cmd/server/          # HTTP 入口：创建短链和跳转
+├── cmd/console/         # 租户和 API Key 的运维命令
 ├── internal/
 │   ├── httpapi/         # handler、路由、中间件；定义 LinkStore 接口
 │   ├── link/            # 领域模型：Link、NewLink、错误、URL 校验
+│   ├── tenant/          # 租户和 API Key 的明文格式、哈希
 │   ├── idgen/           # 随机短码生成
 │   ├── memorystore/     # 内存存储，仅测试和本地开发
 │   ├── postgres/        # PostgreSQL 存储，生产使用
@@ -31,9 +33,10 @@ shortlink/
 
 ```txt
 cmd/server   -> httpapi, postgres, storemetrics, cache, click, config
+cmd/console  -> postgres
 config       -> postgres
-httpapi      -> link, idgen
-postgres     -> link, idgen
+httpapi      -> link, idgen, tenant
+postgres     -> link, idgen, tenant
 memorystore  -> link, idgen
 storemetrics -> link
 cache        -> link
@@ -42,7 +45,7 @@ link         -> 标准库
 idgen        -> 标准库
 ```
 
-`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。
+`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator` 也定义在 `httpapi`，由同一个 `postgres.Store` 实现；缓存不参与鉴权。
 
 ## 请求流程
 
@@ -55,10 +58,12 @@ POST /api/v1/links
   -> metrics
   -> recoverer
   -> timeout
+  -> authenticate：Bearer API Key，哈希换租户，放进 context
   -> handleCreate
   -> 读取并限制请求体
   -> json.Unmarshal
   -> link.NewLink 校验
+  -> TenantID 取自 context
   -> store.Create 生成随机短码并写库
   -> 201 + Location: /r/{code}
 ```
@@ -94,7 +99,7 @@ GET 模式同时匹配 HEAD。HEAD 返回同样的 302，但不记点击。
 - `internal/cache`：`GetByCode` 的 Redis 读缓存装饰器。key 是 `shortlink:link:<code>`，value 是完整 `link.Link` 的 JSON；正缓存 TTL 取剩余寿命和 1 小时里更短的那个，没有到期时间时是 1 小时，负缓存（JSON `null`）TTL 1 分钟。命中到已经过期的正缓存时删掉 key 并返回找不到。URL 为空或 Code 对不上的 JSON 也删掉，按未命中回源。并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源数据库，读失败且回源并发已满时返回 503。创建成功后写穿正缓存，负缓存用 `SET NX`，避免创建和查找并发时后到的负缓存覆盖正缓存。查找结果记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存结果记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示 `SET NX` 没写进去），缓存操作耗时记在 `shortlink_cache_operation_duration_seconds`（`operation` 为 `get`、`set`）。正、负缓存 TTL 向下随机抖动最多 10%；`singleflight` 的共享回源不跟随领头请求取消；Redis 读失败时同一进程最多 8 个回源，超出的返回 503。设计见 [ADR 0006](adr/0006-redis-cache-design.md)。
 - `internal/click`：GET 跳转成功后把链接 ID 放进缓冲 channel，一条 goroutine 按 100 条或 1 秒把点击加成一批，直接写 `postgres.Store`。缓冲满时 `shortlink_clicks_dropped_total` 加一；写出结果记在 `shortlink_clicks_written_total{result="success|error"}`。设计见 [ADR 0007](adr/0007-async-click-recording.md)。
 - 进程指标由 `collectors.NewProcessCollector` 暴露为 `process_*`，连接池指标由 `collectors.NewDBStatsCollector` 暴露为 `go_sql_*`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`。
-- 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`；`code` 格式和 `url` 长度由 CHECK 约束兜底。`expires_at` 为 NULL 表示永不过期，查询只返回 `expires_at IS NULL OR expires_at > now()` 的行。
+- 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`、`tenant_id`；`code` 格式和 `url` 长度由 CHECK 约束兜底。`expires_at` 为 NULL 表示永不过期，查询只返回 `expires_at IS NULL OR expires_at > now()` 的行。`tenant_id` 指向 `tenants`。API Key 的 SHA-256 存在 `api_keys.key_hash`，明文不入库。`api_keys.expires_at` 为空表示不过期，到期时刻本身算过期；`api_keys.revoked_at` 非空表示已吊销。鉴权把过期和吊销看成密钥无效。`tenants.external_id` 可空，留给以后的平台租户编号。运维命令在 `cmd/console`：`key issue`、`key list`、`key revoke`。
 - 短码是 8 位 Base62 随机码，`crypto/rand` 生成；碰撞由唯一索引和最多 5 次重试处理。
 
 ## 配置
@@ -120,5 +125,5 @@ GET 模式同时匹配 HEAD。HEAD 返回同样的 302，但不记点击。
 
 ## 尚未实现
 
-- 多租户和 API Key 鉴权，拆分 `cmd/redirector` 与 `cmd/console`（阶段 6）
+- 拆分 HTTP 进程（阶段 6，[ADR 0009](adr/0009-process-split-and-credentials.md)）。运维命令已经在 `cmd/console`；`cmd/server` 仍同时提供跳转和管理 API。拆开后 redirector 只做公开跳转，管理 HTTP 迁到 console。用户、登录和页面不在这次拆分里
 - OpenTelemetry 追踪（可选，ADR 0005）：等指标解释不了慢请求再加

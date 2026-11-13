@@ -25,6 +25,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0006](0006-redis-cache-design.md) | Redis 读缓存的设计 | Accepted |
 | [0007](0007-async-click-recording.md) | 异步批量记录点击 | Accepted |
 | [0008](0008-cold-cache-read-path.md) | 冷缓存和长尾短码的读路径保护 | Proposed |
+| [0009](0009-process-split-and-credentials.md) | 两个进程、一种租户身份 | Accepted |
 
 ## 模板
 
