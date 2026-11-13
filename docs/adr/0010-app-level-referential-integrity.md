@@ -5,7 +5,7 @@
 
 ## 背景
 
-`links.tenant_id` 和 `api_keys.tenant_id` 目前由数据库外键约束到 `tenants.id`：
+决策时，`links.tenant_id` 和 `api_keys.tenant_id` 由数据库外键约束到 `tenants.id`：
 `links` 上是显式命名的 `fk_links_tenant`，`api_keys` 上是内联外键，默认名
 `api_keys_tenant_id_fkey`，都没有使用级联。
 
@@ -23,8 +23,9 @@ PostgreSQL 的外键由系统触发器实现，成本与 MySQL 的 InnoDB 不完
 
 ## 决策
 
-- 删除 `fk_links_tenant` 和 `api_keys_tenant_id_fkey`，不使用
-  `ON DELETE/UPDATE CASCADE`。由后续迁移完成，已提交的迁移文件不再修改。
+- 删除外键，不使用 `ON DELETE/UPDATE CASCADE`。`migrations/002_add_tenants.up.sql`
+  直接建成没有外键的表，并加上 `idx_links_tenant_id`、`idx_api_keys_tenant_id`。
+  接入迁移工具时还没有任何库记录过版本，所以没有保留先建外键再删除的后续文件。
 - `tenant_id` 保持 `NOT NULL`，字段含义不变：由鉴权决定，不从请求 JSON 读取。
 - 引用完整性由应用层保证，现有代码已经满足：
   - 创建短链时，`tenant_id` 只来自鉴权中间件写入 context 的租户

@@ -20,4 +20,4 @@
 
 - 本地启动需要一个可用的 PostgreSQL；`.env` 不提交。
 - 集成测试使用独立的 `TEST_DATABASE_URL`（库名以 `_test` 结尾），不使用应用的 `DATABASE_URL`；原先“清空开发库”的做法已废弃。
-- 表结构变更后续用迁移工具管理，不手改生产库。
+- 表结构用 golang-migrate 管理，不手改生产库。`make migrate` 执行 `migrations/` 里的 up SQL，版本记在 `schema_migrations`。HTTP 进程启动时不迁移。

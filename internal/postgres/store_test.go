@@ -42,8 +42,12 @@ func newTestStore(t *testing.T) (*Store, int64) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if _, err := db.ExecContext(ctx, "TRUNCATE tenants RESTART IDENTITY CASCADE"); err != nil {
-		t.Fatalf("truncate tenants: %v", err)
+	/*
+		没有外键之后，TRUNCATE tenants CASCADE 不会再带上 links 和 api_keys。
+		三张表写在同一条语句里，有没有外键都能清空。
+	*/
+	if _, err := db.ExecContext(ctx, "TRUNCATE links, api_keys, tenants RESTART IDENTITY"); err != nil {
+		t.Fatalf("truncate: %v", err)
 	}
 	var tenantID int64
 	if err := db.QueryRowContext(ctx, `INSERT INTO tenants (name) VALUES ('test') RETURNING id`).Scan(&tenantID); err != nil {
@@ -276,5 +280,57 @@ func TestAddClicks(t *testing.T) {
 
 	if err := store.AddClicks(ctx, nil); err != nil {
 		t.Errorf("AddClicks(nil): %v", err)
+	}
+}
+
+/*
+TestTenantReferenceShape 锁住 ADR 0010 的表结构。
+外键删除后，不存在的 tenant_id 也能写入；NOT NULL 和 (tenant_id, id) 索引还在。
+*/
+func TestTenantReferenceShape(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	var foreignKeys int
+	if err := store.db.QueryRowContext(ctx, `
+SELECT count(*)
+FROM pg_constraint
+WHERE contype = 'f'
+  AND conrelid IN ('links'::regclass, 'api_keys'::regclass)`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("count foreign keys: %v", err)
+	}
+	if foreignKeys != 0 {
+		t.Errorf("foreign keys = %d, want 0", foreignKeys)
+	}
+
+	for _, table := range []string{"links", "api_keys"} {
+		var notNull bool
+		err := store.db.QueryRowContext(ctx, `
+SELECT attnotnull
+FROM pg_attribute
+WHERE attrelid = $1::regclass AND attname = 'tenant_id' AND NOT attisdropped`, table).Scan(&notNull)
+		if err != nil {
+			t.Fatalf("tenant_id nullability on %s: %v", table, err)
+		}
+		if !notNull {
+			t.Errorf("%s.tenant_id allows NULL", table)
+		}
+	}
+
+	for _, index := range []string{"idx_links_tenant_id", "idx_api_keys_tenant_id"} {
+		var exists bool
+		if err := store.db.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, index).Scan(&exists); err != nil {
+			t.Fatalf("index %s: %v", index, err)
+		}
+		if !exists {
+			t.Errorf("missing index %s", index)
+		}
+	}
+
+	orphan := mustLink(t, "https://example.com/no-tenant", tenantID)
+	orphan.TenantID = tenantID + 1_000_000
+	if err := store.Create(ctx, orphan); err != nil {
+		t.Fatalf("Create with missing tenant: %v", err)
 	}
 }

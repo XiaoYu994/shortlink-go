@@ -5,7 +5,7 @@ export
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
-.PHONY: help run build console test test-unit cover vet lint fmt fmt-check check verify selfcheck \
+.PHONY: help run build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
 	test-db test-integration smoke deps-up up prometheus down psql redis-cli
 
 help: ## 列出所有命令
@@ -20,6 +20,9 @@ build: ## 编译到 bin/server 和 bin/console
 
 console: ## 运维命令。例如 make console ARGS="key issue --name acme"
 	go run ./cmd/console $(ARGS)
+
+migrate: ## 把 DATABASE_URL 迁到最新。拒绝库名 si_crm
+	go run ./cmd/migrate up
 
 test: ## 跑全部测试，使用当前 .env 里的 TEST_*（带竞争检测，不使用缓存）
 	go test -race -count=1 ./...
@@ -55,7 +58,7 @@ verify: check lint build ## 完整代码检查：check + golangci-lint + build
 deps-up: ## 只启动 compose 的 PostgreSQL 和 Redis（本机已有依赖时不要执行）
 	docker compose up -d --wait postgres redis
 
-test-db: ## 创建测试库（如不存在）、重建表并执行全部迁移
+test-db: ## 创建测试库（如不存在）、重建 schema 并执行迁移
 	./scripts/prepare-test-db.sh
 
 test-integration: test-db ## 跑全部测试，包含需要 PostgreSQL/Redis 的集成测试

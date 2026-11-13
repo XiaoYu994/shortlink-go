@@ -1,6 +1,6 @@
 #!/bin/sh
-# 准备 TEST_DATABASE_URL 指向的测试库：库不存在就创建，然后删掉
-# links、api_keys、tenants，再按文件名顺序执行 migrations/。
+# 准备 TEST_DATABASE_URL 指向的测试库：库不存在就创建，然后清掉 public
+# 并执行 migrations/。先 up、再 down、再 up，确认回滚 SQL 也能用。
 # 只动测试库：库名必须以 _test 结尾。
 #
 # 不负责启动 PostgreSQL/Redis：用项目自带的 compose 时先 make deps-up，
@@ -25,6 +25,19 @@ if [ -n "$explicit_redis" ]; then TEST_REDIS_URL=$explicit_redis; fi
 
 [ -n "${TEST_DATABASE_URL:-}" ] || { echo "TEST_DATABASE_URL 未设置，先 cp .env.example .env" >&2; exit 1; }
 [ -n "${TEST_REDIS_URL:-}" ] || { echo "TEST_REDIS_URL 未设置，先 cp .env.example .env" >&2; exit 1; }
+
+# 查询参数里的 dbname 会改掉实际连上的库，只检查路径拦不住。
+case $TEST_DATABASE_URL in
+	*\?*)
+		rest=${TEST_DATABASE_URL#*\?}
+		case "&${rest}&" in
+			*"&dbname="*)
+				echo "TEST_DATABASE_URL 的库名要写在路径里，不要用 dbname 查询参数" >&2
+				exit 1
+				;;
+		esac
+		;;
+esac
 
 # 从 URL 里取库名：postgres://user:pass@host:port/dbname?params
 db=${TEST_DATABASE_URL#*://}
@@ -68,10 +81,22 @@ if [ "$exists" != 1 ]; then
 	}
 fi
 
-{
-	echo 'DROP TABLE IF EXISTS links, api_keys, tenants CASCADE;'
-	cat migrations/*.sql
-} | psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -1 || {
+# heredoc 必须紧跟命令。失败处理写在后面，避免 } 被吃进 SQL。
+if ! psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -1 <<'SQL'
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
+SQL
+then
 	echo "准备测试库失败：检查 TEST_DATABASE_URL 和数据库是否可连" >&2
 	exit 1
+fi
+
+migrate() { # up|down
+	go run ./cmd/migrate "$1" -database "$TEST_DATABASE_URL" || {
+		echo "测试库迁移失败：$1" >&2
+		exit 1
+	}
 }
+migrate up
+migrate down
+migrate up

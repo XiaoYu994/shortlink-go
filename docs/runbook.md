@@ -14,25 +14,43 @@ REDIS_URL=redis://localhost:6379/0
 
 `.env` 已被 gitignore，不会提交。
 
-- 数据库里已经执行过 `migrations/001_create_links.sql`、`002_add_links_constraints.sql` 和 `003_add_tenants.sql`，存在 `links`、`tenants` 和 `api_keys` 表。
+- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants` 和 `api_keys`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
 
 如果使用项目自带的 `docker-compose.yml`：
 
 ```bash
 cp .env.example .env
 make up
+make migrate
 make run
 ```
 
-如果本机已经有 PostgreSQL，可以把 `DATABASE_URL` 指向它，并执行一次迁移：
+`make up` 只启动数据库，不执行 SQL。以前用初始化脚本建过表、但没有 `schema_migrations` 的数据卷，`make migrate` 会在 `CREATE TABLE links` 处失败。学习用的 compose 库可以删掉数据卷再来一次（这会清空该卷里的数据）：
 
 ```bash
-set -a; . ./.env; set +a
-psql "$DATABASE_URL" -f migrations/001_create_links.sql
-psql "$DATABASE_URL" -f migrations/002_add_links_constraints.sql
-psql "$DATABASE_URL" -f migrations/003_add_tenants.sql
+docker compose down -v
+make deps-up
+make migrate
+```
+
+如果本机已经有 PostgreSQL，把 `DATABASE_URL` 指向它，在仓库根目录执行：
+
+```bash
+make migrate
 make run
 ```
+
+`up`、`down` 和 `version` 都读同一个地址，并且都拒绝库名 `si_crm`。查看当前版本：
+
+```bash
+go run ./cmd/migrate version
+```
+
+`down` 会把业务表一路降到没有，只允许库名以 `_test` 结尾。测试库由 `make test-db` 自己做 up、down、up，平时不用手跑 down。
+
+连接串用 `postgres://` 或 `postgresql://`，库名写在路径里。这个命令用 lib/pq：不写 `sslmode` 时按 `require` 连接，也不接受 `prefer`。`.env.example` 写的是 `sslmode=disable`。
+
+迁移执行到一半失败时，表结构会回滚，但 `schema_migrations` 会留在 dirty。下一次 `up` 会停住。测试库再跑一次 `make test-db` 即可。学习库先确认失败的那一版没有留下表，再把版本改回上一版且 `dirty = false`；还没有任何成功的版本时删掉那一行。不要把失败的那一版标成已完成。
 
 这种情况下不要再执行 `make up` 或 `make deps-up`：它们会尝试启动 compose 的
 PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，启动时 Ping 失败进程会退出。
@@ -279,8 +297,8 @@ make selfcheck        # test-db + verify + test-integration + smoke
 `make selfcheck` 不负责启动依赖；用 compose 时先 `make deps-up`，用自己的实例时
 确认 `.env` 指向的服务可连。
 
-`make test-integration` 连接 `.env` 里的 `TEST_DATABASE_URL`，删掉该库的
-`links`、`api_keys`、`tenants`，再执行 `migrations/` 下的全部文件，然后带 `TEST_*` 跑 `go test -race`。
+`make test-integration` 连接 `.env` 里的 `TEST_DATABASE_URL`，删掉 public schema，
+再用迁移工具升到最新、降到空、再升到最新，确认 down SQL 可用，然后带 `TEST_*` 跑 `go test -race`。
 测试库每次都会被清空，所以库名必须以 `_test` 结尾，防止误清开发库；应用的
 `DATABASE_URL` 不会被测试使用。准备测试库不依赖 compose：本机没有 psql 时会用
 `postgres:17-alpine` 镜像里的客户端。使用项目自带的 compose 时先跑 `make deps-up`；
@@ -301,7 +319,7 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 结束后只删除自己写入的 key，不会清空 Redis。
 
 使用自己的 PostgreSQL 时，把 `TEST_DATABASE_URL` 指过去即可；准备脚本会自动创建
-不存在的 `_test` 库（数据库用户需要 CREATEDB 权限），然后重建 `links` 表。Redis
+不存在的 `_test` 库（数据库用户需要 CREATEDB 权限），然后重建 schema。Redis
 同样用 `TEST_REDIS_URL` 指向自己的实例。
 
 ## CI
@@ -326,6 +344,8 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
 | 跳转大量 503 | Redis 读失败且回源并发已满；先查 Redis 和 `shortlink_cache_gets_total{result="fallback"}`，回源上限是每进程 8 个 |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
-| `relation "links" does not exist` | 按顺序执行 `migrations/001`、`002`、`003` |
+| `relation "links" does not exist` | 在仓库根目录执行 `make migrate` |
+| `relation "links" already exists` | 库是旧初始化脚本建的，没有 `schema_migrations`。学习用的 compose 库可以 `docker compose down -v`，再 `make deps-up` 和 `make migrate` |
+| `refusing to migrate database si_crm` | 迁移命令不处理库名 `si_crm` |
 | `make up` / `make deps-up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `.env` 指向已有实例 |
 | 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |

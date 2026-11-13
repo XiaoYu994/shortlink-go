@@ -75,10 +75,10 @@
 
 - `make verify`：gofmt 校验（只检查、不改文件）、go vet、go test -race（单测）、
   golangci-lint、build，必须全部通过。不依赖 Docker。
-- `make selfcheck`：重建 `TEST_DATABASE_URL` 的 `links` 表，跑完整检查、集成测试
-  和真实进程冒烟测试。需要 PostgreSQL/Redis 可连；用项目自带的 compose 时先跑
-  `make deps-up`。agent 报告完成前必须跑这一条；只跑 `make verify` 没有验证真实
-  HTTP 行为。
+- `make selfcheck`：重建 `TEST_DATABASE_URL` 的 schema（迁移升到最新、降到空、再升到最新），
+  跑完整检查、集成测试和真实进程冒烟测试。需要 PostgreSQL/Redis 可连；用项目自带的
+  compose 时先跑 `make deps-up`。agent 报告完成前必须跑这一条；只跑 `make verify`
+  没有验证真实 HTTP 行为。
 - 改了 HTTP 行为，同步更新 `docs/api.md` 和对应的 handler 测试。
 - 推送、开 PR 是对外动作，除非用户明确要求，不要自己推。
 - AI review：提交前把 `git diff --staged` 从头读一遍。AI 写代码容易顺着当前思路走到局部最优，

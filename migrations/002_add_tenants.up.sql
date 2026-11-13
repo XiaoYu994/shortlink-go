@@ -1,6 +1,8 @@
 -- 租户和 API Key。管理 API 用密钥哈希换租户，跳转接口不鉴权。
 -- 明文密钥不入库。expires_at 为空表示不过期，revoked_at 为空表示仍有效。
 -- 鉴权不区分过期、吊销和密钥不存在。external_id 留给以后的平台租户，现在可以为空。
+-- 不建外键，引用完整性在应用层（ADR 0010）。
+-- PostgreSQL 不会给引用列自动建索引，按租户列表需要 (tenant_id, id)。
 -- 已有链接挂到 legacy 租户上，避免 tenant_id 设成 NOT NULL 时失败。
 
 CREATE TABLE tenants (
@@ -11,12 +13,14 @@ CREATE TABLE tenants (
 
 CREATE TABLE api_keys (
     id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant_id  BIGINT NOT NULL REFERENCES tenants (id),
+    tenant_id  BIGINT NOT NULL,
     key_hash   BYTEA  NOT NULL UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ
 );
+
+CREATE INDEX idx_api_keys_tenant_id ON api_keys (tenant_id, id);
 
 ALTER TABLE links ADD COLUMN tenant_id BIGINT;
 
@@ -29,8 +33,9 @@ SET tenant_id = (SELECT id FROM tenants WHERE name = 'legacy')
 WHERE tenant_id IS NULL;
 
 ALTER TABLE links
-    ALTER COLUMN tenant_id SET NOT NULL,
-    ADD CONSTRAINT fk_links_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id);
+    ALTER COLUMN tenant_id SET NOT NULL;
+
+CREATE INDEX idx_links_tenant_id ON links (tenant_id, id);
 
 COMMENT ON TABLE tenants IS '短链租户';
 COMMENT ON COLUMN tenants.external_id IS '外部系统的租户编号，没有时为空';

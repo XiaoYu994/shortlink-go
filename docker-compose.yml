@@ -8,9 +8,9 @@ services:
       POSTGRES_DB: shortlink
     ports:
       - "127.0.0.1:5432:5432"
+    # 表结构不在容器第一次启动时执行。数据卷起来之后，在仓库根目录 make migrate。
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U shortlink -d shortlink"]
       interval: 5s

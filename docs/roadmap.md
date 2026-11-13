@@ -24,6 +24,8 @@
 - [x] 短码改为随机生成（8 位 Base62），id 仅作内部主键
 - [x] 表名按 PostgreSQL 习惯使用 `links`
 - [x] 连接池参数从 `.env` 读取（`DB_MAX_OPEN_CONNS` 等）
+- [x] 接入迁移工具（golang-migrate）
+  - `cmd/migrate`，`make migrate`。版本记在 `schema_migrations`。每个版本一对 `NNN_name.up.sql` / `.down.sql`，不用 `IF NOT EXISTS`。compose 不再把 `migrations/` 挂进初始化目录。HTTP 进程启动时不迁移。没有选 goose：up 和 down 分文件，避免把整份 SQL 交给 psql 时把回滚也执行掉
 
 ## 阶段 4：配置、日志、中间件、优雅退出（第 8 课）
 
