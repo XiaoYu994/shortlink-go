@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func newTestRegistry() *prometheus.Registry {
 // newTestServer 返回一个不输出日志、使用内存存储的 Server，供各个测试复用。
 // 请求超时给得足够宽，只有专门测超时的用例才用短时限。
 func newTestServer() *Server {
-	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry())
+	return NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil)
 }
 
 /*
@@ -143,7 +144,7 @@ TestRedirectInvalidCode 验证非法短码在进入存储之前就被拒绝。
 */
 func TestRedirectInvalidCode(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{}}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry())
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
 	handler := srv.Routes()
 
 	tests := []struct {
@@ -167,6 +168,107 @@ func TestRedirectInvalidCode(t *testing.T) {
 	if store.calls != 0 {
 		t.Errorf("store GetByCode calls = %d, want 0", store.calls)
 	}
+}
+
+type recordSink struct {
+	mu  sync.Mutex
+	ids []int64
+}
+
+func (s *recordSink) Record(id int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ids = append(s.ids, id)
+}
+
+func TestRedirectRecordsClick(t *testing.T) {
+	store := &stubStore{links: map[string]*link.Link{
+		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/recorded"},
+	}}
+	sink := &recordSink{}
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
+	handler := srv.Routes()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/missing1", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.ids) != 1 || sink.ids[0] != 42 {
+		t.Errorf("recorded = %v, want [42]", sink.ids)
+	}
+}
+
+func TestRedirectHeadDoesNotRecordClick(t *testing.T) {
+	store := &stubStore{links: map[string]*link.Link{
+		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/recorded"},
+	}}
+	sink := &recordSink{}
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/r/AbC123xy", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "https://example.com/recorded" {
+		t.Errorf("Location = %q, want %q", loc, "https://example.com/recorded")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.ids) != 0 {
+		t.Errorf("recorded = %v, want none", sink.ids)
+	}
+}
+
+/*
+TestRedirectCanceledDuringGetDoesNotRecordClick 模拟查询返回时客户端已经断开。
+singleflight 的等待者会遇到这个窗口：存储仍返回链接，但响应已经没人接收。
+*/
+func TestRedirectCanceledDuringGetDoesNotRecordClick(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &cancelOnGetStore{
+		l:      &link.Link{ID: 7, Code: "AbC123xy", URL: "https://example.com/x"},
+		cancel: cancel,
+	}
+	sink := &recordSink{}
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
+
+	req := httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusFound {
+		t.Errorf("status = %d, want request to stop before the redirect", rec.Code)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.ids) != 0 {
+		t.Errorf("recorded = %v, want none", sink.ids)
+	}
+}
+
+// cancelOnGetStore 在查出链接的同时取消请求，用来覆盖查询期间客户端断开的窗口。
+type cancelOnGetStore struct {
+	l      *link.Link
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnGetStore) Create(context.Context, *link.Link) error { return nil }
+
+func (s *cancelOnGetStore) GetByCode(context.Context, string) (*link.Link, error) {
+	s.cancel()
+	return s.l, nil
 }
 
 // stubStore 只实现测试需要的读取能力，用来构造指定短码的链接。
@@ -194,7 +296,7 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{
 		"healthz1": {Code: "healthz1", URL: "https://example.com/healthz"},
 	}}
-	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry())
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
 	handler := srv.Routes()
 
 	rec := httptest.NewRecorder()

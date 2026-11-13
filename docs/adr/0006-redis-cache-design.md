@@ -67,7 +67,7 @@
 - 创建成功会写穿正缓存，负缓存用 `SET NX`，避免创建和查找并发时后到的负缓存覆盖正缓存。缓存写失败时仍可能残留负缓存，最多 1 分钟。
 - 测试需要可用的 Redis；没有 `TEST_REDIS_URL` 时 cache 测试跳过，其余测试不受影响。
 - 生产上需要给缓存 Redis 配置 `maxmemory` 和淘汰策略，并尽量使用独立实例；默认的 `noeviction` 配置不适合缓存场景。
-- 缓存查找记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示负缓存的 `SET NX` 发现 key 已存在），缓存操作耗时记在 `shortlink_cache_operation_duration_seconds`（`operation` 为 `get`、`set`）。压测对比沿用 `docs/runbook.md` 的基线方法，2026-11-12 的结果已记入 runbook（客户端 19,077 req/s，服务端跳转 p50 1.4ms / p99 4.7ms，数据库连接池未被使用）。`ClickRecorder` 的 dropped 计数仍待接入 `/metrics`（[ADR 0005](0005-prometheus-before-tracing.md)）。
+- 缓存查找记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示负缓存的 `SET NX` 发现 key 已存在），缓存操作耗时记在 `shortlink_cache_operation_duration_seconds`（`operation` 为 `get`、`set`）。压测对比沿用 `docs/runbook.md` 的基线方法，2026-11-12 的结果已记入 runbook（客户端 19,077 req/s，服务端跳转 p50 1.4ms / p99 4.7ms，数据库连接池未被使用）。`ClickRecorder` 的 dropped 计数已接入 `/metrics`，见 [ADR 0007](0007-async-click-recording.md)。
 
 ## 参考
 

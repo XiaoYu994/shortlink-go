@@ -162,3 +162,44 @@ func TestStoreContextCanceled(t *testing.T) {
 		t.Errorf("GetByCode error = %v, want context.Canceled", err)
 	}
 }
+
+func TestAddClicks(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	l := mustLink(t, "https://example.com/clicks")
+	if err := store.Create(ctx, l); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	err := store.AddClicks(ctx, map[int64]int64{
+		l.ID:           3,
+		l.ID + 999_999: 1, // 不存在的 id 应被忽略
+	})
+	if err != nil {
+		t.Fatalf("AddClicks: %v", err)
+	}
+
+	var clicks int64
+	if err := store.db.QueryRowContext(ctx, "SELECT clicks FROM "+linksTable+" WHERE id = $1", l.ID).Scan(&clicks); err != nil {
+		t.Fatalf("select clicks: %v", err)
+	}
+	if clicks != 3 {
+		t.Errorf("clicks = %d, want 3", clicks)
+	}
+
+	// 再加一次。若 SQL 写成 SET clicks = data.n，这里会停在 4，覆盖而不是累加。
+	if err := store.AddClicks(ctx, map[int64]int64{l.ID: 4}); err != nil {
+		t.Fatalf("AddClicks again: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT clicks FROM "+linksTable+" WHERE id = $1", l.ID).Scan(&clicks); err != nil {
+		t.Fatalf("select clicks: %v", err)
+	}
+	if clicks != 7 {
+		t.Errorf("clicks = %d, want 7", clicks)
+	}
+
+	if err := store.AddClicks(ctx, nil); err != nil {
+		t.Errorf("AddClicks(nil): %v", err)
+	}
+}

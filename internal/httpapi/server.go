@@ -23,6 +23,14 @@ type LinkStore interface {
 	GetByCode(ctx context.Context, code string) (*link.Link, error)
 }
 
+/*
+ClickRecorder 接收一次成功的跳转。
+Record 必须马上返回。nil 表示这个 Server 不记点击，现有测试走这条路径。
+*/
+type ClickRecorder interface {
+	Record(id int64)
+}
+
 // Server 持有 handler 需要的依赖。
 type Server struct {
 	logger         *slog.Logger
@@ -30,6 +38,7 @@ type Server struct {
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
+	clicks         ClickRecorder
 }
 
 /*
@@ -38,14 +47,17 @@ logger 包上一层 requestIDHandler：带请求 context 的日志会自动写�
 requestTimeout 是每个请求的处理时限，由 timeout 中间件执行，必须为正。
 registry 由 main 创建并注入，/metrics 从这里收集；测试每次传一个新的 Registry，
 避免同名指标重复注册。HTTP 指标也在这个构造函数里注册一次，Routes() 只组装中间件。
+clicks 为 nil 时跳转不记点击。传入的必须是未装箱的 nil：
+带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
 */
-func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry) *Server {
+func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
 	return &Server{
 		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
 		store:          store,
 		requestTimeout: requestTimeout,
 		registry:       registry,
 		metrics:        newHTTPMetrics(registry),
+		clicks:         clicks,
 	}
 }
 

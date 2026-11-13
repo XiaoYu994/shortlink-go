@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"shortlink/internal/cache"
+	"shortlink/internal/click"
 	"shortlink/internal/config"
 	"shortlink/internal/httpapi"
 	"shortlink/internal/postgres"
@@ -71,10 +72,27 @@ func run() error {
 		collectors.NewDBStatsCollector(db, "shortlink"),
 	)
 
+	/*
+		点击写出直接用 pgStore，不经过缓存，也不算进存储耗时。
+		这个 defer 注册在 db.Close 和 rdb.Close 之后，run 返回时会先执行：
+		先把缓冲里的点击写完，再关 Redis 和数据库。
+		排空共用这一份 SHUTDOWN_TIMEOUT。已经开始的普通批次不跟着取消，
+		最多再占一次写入超时。进程在排空结束前被杀掉的话，缓冲区里的点击会丢掉。
+	*/
+	pgStore := postgres.NewStore(db)
+	clicks := click.New(pgStore, logger, registry, click.Options{})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := clicks.Close(closeCtx); err != nil {
+			logger.Error("close click recorder", "err", err)
+		}
+	}()
+
 	// 组合顺序：HTTP -> cache -> storemetrics -> postgres。
 	// 指标装饰器贴着数据库，缓存命中不会计入存储耗时。
-	store := cache.New(storemetrics.New(postgres.NewStore(db), registry), rdb, registry)
-	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry)
+	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry)
+	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry, clicks)
 
 	/*
 		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。
@@ -101,7 +119,8 @@ func run() error {
 		正在处理的请求有自己的 REQUEST_TIMEOUT 兜底，慢查询不会把退出拖满。
 		收到信号后马上 stop，第二次信号恢复默认行为，进程会立刻退出。
 		Shutdown 使用新的超时 context：信号 context 此时已经取消。
-		数据库在 Shutdown 返回、run 退出时由上面的 defer 关闭。
+		Shutdown 返回、run 退出后，defer 先排空点击缓冲，再关闭 Redis 和数据库。
+		排空另有一份 SHUTDOWN_TIMEOUT。进程在这之前被杀掉的话，缓冲区里的点击会丢掉。
 	*/
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

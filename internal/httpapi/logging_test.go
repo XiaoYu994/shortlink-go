@@ -85,7 +85,7 @@ func TestLoggingRecordsStatus(t *testing.T) {
 
 func TestRoutesLogRequest(t *testing.T) {
 	var buf bytes.Buffer
-	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), memorystore.New(), 5*time.Second, newTestRegistry())
+	srv := NewServer(slog.New(slog.NewJSONHandler(&buf, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))

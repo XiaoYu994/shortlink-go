@@ -55,7 +55,7 @@ curl -i localhost:8080/healthz
 
 ```bash
 curl -s -o /dev/null localhost:8080/healthz
-curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|go_sql_)'
+curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|shortlink_clicks_|go_sql_)'
 ```
 
 计数发生在响应写完之后，没出现过的 label 也不会输出。刚启动后直接抓 `/metrics`，正文里还没有 `shortlink_http_*`，所以上面先访问一次 `/healthz`。
@@ -70,6 +70,8 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
 - `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。创建和回源写缓存都会计数；`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
 - `shortlink_cache_operation_duration_seconds`：缓存操作耗时，`operation` 为 `get`、`set`，用来区分慢在 Redis 还是数据库
+- `shortlink_clicks_dropped_total`：点击缓冲满了没记下的次数。一启动就是 0
+- `shortlink_clicks_written_total`：交给存储的点击数，`result` 为 `success` 或 `error`。一启动两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`
 
 Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志和 HTTP 指标。
 
@@ -279,7 +281,7 @@ TEST_REDIS_URL=redis://localhost:6379/0
 
 ## 停止
 
-前台 `make run` 用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。再按一次 `Ctrl+C` 会立刻退出。`make down` 只停止项目自带的 compose 服务。
+前台 `make run` 用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。请求结束后再把点击缓冲写完，最多再等一份 `SHUTDOWN_TIMEOUT`；若当时有一批正在写，那一批还会用完自己的写入超时（默认 2s）。然后关闭 Redis 和数据库。再按一次 `Ctrl+C` 会立刻退出。进程崩溃或被 SIGKILL 时，缓冲区里还没写完的点击会丢掉。`make down` 只停止项目自带的 compose 服务。
 
 ## 常见问题
 
