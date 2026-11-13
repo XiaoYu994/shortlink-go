@@ -69,7 +69,8 @@
 - [x] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
   - `shortlink_clicks_dropped_total`：缓冲满时加一。`shortlink_clicks_written_total{result}` 记录写出成功和失败的点击数。关停时排空 channel，受一份 `SHUTDOWN_TIMEOUT` 限制，再关数据库。设计见 [ADR 0007](adr/0007-async-click-recording.md)
 - [x] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间
-- [ ] 用泛型的 `doTyped` 去掉类型断言
+- [x] 用泛型的 `doTyped` 去掉类型断言
+  - `singleflight.Group.Do` 仍返回 `any`。`doTyped` 把断言收在一处；回调先返回 `*link.Link`，nil 指针装进 `any` 后仍带着类型，断言得到零值
 
 ## 阶段 6：一个 SaaS 功能
 

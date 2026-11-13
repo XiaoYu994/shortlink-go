@@ -136,20 +136,35 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		return cached, nil
 	}
 
-	v, err, _ := s.group.Do(key, func() (any, error) {
+	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数。
+	l, err, _ := doTyped[*link.Link](&s.group, key, func() (*link.Link, error) {
 		fetchCtx, cancel := fetchContext(ctx)
 		defer cancel()
 
-		l, err := s.readStore(fetchCtx, code, result == resultFallback)
+		found, err := s.readStore(fetchCtx, code, result == resultFallback)
 		if err != nil && !errors.Is(err, link.ErrNotFound) {
 			return nil, err // 真正的错误不写缓存，下次请求应该重试
 		}
-		s.writeCache(fetchCtx, key, l)
-		return l, err
+		s.writeCache(fetchCtx, key, found)
+		return found, err
 	})
-
-	l, _ := v.(*link.Link)
 	return l, err
+}
+
+/*
+doTyped 把 singleflight.Do 的 any 收成 T。
+
+Group.Do 的结果类型是 any。回调返回 T，断言只留在这里；
+失败说明包装写错了，直接 panic，避免把类型错误变成静默的 nil。
+
+回调先返回 T，再装进 any。T 是 nil 指针时，any 里仍带着 T 的类型，
+断言得到 T 的零值。
+*/
+func doTyped[T any](g *singleflight.Group, key string, fn func() (T, error)) (T, error, bool) {
+	v, err, shared := g.Do(key, func() (any, error) {
+		return fn()
+	})
+	return v.(T), err, shared
 }
 
 /*

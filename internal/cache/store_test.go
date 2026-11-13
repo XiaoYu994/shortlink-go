@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 
 	"shortlink/internal/link"
 )
@@ -228,6 +229,116 @@ func TestStoreGetByCodeSingleflight(t *testing.T) {
 	}
 	if n := next.calls.Load(); n != 1 {
 		t.Errorf("store calls = %d, want 1", n)
+	}
+}
+
+func TestDoTyped(t *testing.T) {
+	errNotFound := errors.New("not found")
+	errDB := errors.New("db down")
+	found := &link.Link{Code: "abc", URL: "https://example.com"}
+
+	tests := []struct {
+		name    string
+		fn      func() (*link.Link, error)
+		want    *link.Link
+		wantErr error
+	}{
+		{
+			name: "hit",
+			fn: func() (*link.Link, error) {
+				return found, nil
+			},
+			want: found,
+		},
+		{
+			name: "nil pointer with sentinel",
+			fn: func() (*link.Link, error) {
+				return nil, errNotFound
+			},
+			wantErr: errNotFound,
+		},
+		{
+			name: "nil pointer with error",
+			fn: func() (*link.Link, error) {
+				return nil, errDB
+			},
+			wantErr: errDB,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var g singleflight.Group
+			got, err, shared := doTyped[*link.Link](&g, tt.name, tt.fn)
+			if shared {
+				t.Fatalf("shared = true, want false")
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("link = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDoTypedShared(t *testing.T) {
+	var g singleflight.Group
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	fn := func() (*link.Link, error) {
+		once.Do(func() { close(started) })
+		<-release
+		return &link.Link{Code: "abc"}, nil
+	}
+
+	const goroutines = 8
+	type result struct {
+		shared bool
+		err    error
+	}
+	results := make(chan result, goroutines)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range goroutines {
+		wg.Go(func() {
+			<-start
+			got, err, shared := doTyped[*link.Link](&g, "k", fn)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			if got == nil || got.Code != "abc" {
+				results <- result{err: fmt.Errorf("link = %+v", got)}
+				return
+			}
+			results <- result{shared: shared}
+		})
+	}
+
+	close(start)
+	<-started
+	// 领头请求卡在 fn 里，等其余 goroutine 进入 Do 再放行。
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(results)
+
+	var sharedN int
+	for r := range results {
+		if r.err != nil {
+			t.Error(r.err)
+			continue
+		}
+		if r.shared {
+			sharedN++
+		}
+	}
+	if sharedN == 0 {
+		t.Fatal("shared was never true")
 	}
 }
 
