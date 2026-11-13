@@ -259,44 +259,83 @@ func TestStoreGetByCodeFallsBackWhenRedisFails(t *testing.T) {
 	}
 }
 
-func TestStoreGetByCodeRepairsCorruptedValue(t *testing.T) {
-	rdb := newTestRedis(t)
-	code := newTestCode(t)
-	cleanupTestKey(t, rdb, code)
-	ctx := context.Background()
+func TestStoreGetByCodeRepairsUnusableValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   func(code string) string
+		wantHit bool
+	}{
+		{name: "not json", value: func(string) string { return "not json" }},
+		{name: "empty object", value: func(string) string { return "{}" }},
+		{name: "empty url", value: func(code string) string {
+			return fmt.Sprintf(`{"Code":%q,"URL":""}`, code)
+		}},
+		{name: "wrong code", value: func(string) string {
+			return `{"Code":"xxxxxxxx","URL":"https://example.com/evil"}`
+		}},
+		{name: "lower case fields", wantHit: true, value: func(code string) string {
+			return fmt.Sprintf(`{"id":3,"code":%q,"url":"https://example.com/ok"}`, code)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdb := newTestRedis(t)
+			code := newTestCode(t)
+			cleanupTestKey(t, rdb, code)
+			ctx := context.Background()
 
-	key := keyPrefix + code
-	if err := rdb.Set(ctx, key, "not json", time.Hour).Err(); err != nil {
-		t.Fatalf("seed corrupted value: %v", err)
-	}
+			key := keyPrefix + code
+			if err := rdb.Set(ctx, key, tt.value(code), time.Hour).Err(); err != nil {
+				t.Fatalf("seed value: %v", err)
+			}
 
-	want := &link.Link{ID: 9, Code: code, URL: "https://example.com/9"}
-	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
-		return want, nil
-	}}
-	s := newTestStore(t, next, rdb)
+			want := &link.Link{ID: 9, Code: code, URL: "https://example.com/9"}
+			next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+				return want, nil
+			}}
+			s := newTestStore(t, next, rdb)
 
-	got, err := s.GetByCode(ctx, code)
-	if err != nil {
-		t.Fatalf("GetByCode: %v", err)
-	}
-	if got.ID != want.ID {
-		t.Errorf("ID = %d, want %d", got.ID, want.ID)
-	}
-	if n := next.calls.Load(); n != 1 {
-		t.Errorf("store calls = %d, want 1", n)
-	}
+			got, err := s.GetByCode(ctx, code)
+			if err != nil {
+				t.Fatalf("GetByCode: %v", err)
+			}
+			if tt.wantHit {
+				if got.URL != "https://example.com/ok" || got.Code != code {
+					t.Fatalf("GetByCode = %+v, want cached link", got)
+				}
+				if n := next.calls.Load(); n != 0 {
+					t.Errorf("store calls = %d, want 0", n)
+				}
+				if n := testutil.ToFloat64(s.gets.WithLabelValues(resultHit)); n != 1 {
+					t.Errorf("gets{result=hit} = %v, want 1", n)
+				}
+				return
+			}
+			if got.ID != want.ID {
+				t.Errorf("ID = %d, want %d", got.ID, want.ID)
+			}
+			if n := next.calls.Load(); n != 1 {
+				t.Errorf("store calls = %d, want 1", n)
+			}
+			if n := testutil.ToFloat64(s.gets.WithLabelValues(resultMiss)); n != 1 {
+				t.Errorf("gets{result=miss} = %v, want 1", n)
+			}
+			if n := testutil.ToFloat64(s.gets.WithLabelValues(resultHit)); n != 0 {
+				t.Errorf("gets{result=hit} = %v, want 0", n)
+			}
 
-	data, err := rdb.Get(ctx, key).Bytes()
-	if err != nil {
-		t.Fatalf("get repaired value: %v", err)
-	}
-	var cached *link.Link
-	if err := json.Unmarshal(data, &cached); err != nil {
-		t.Fatalf("cached value was not repaired: %v", err)
-	}
-	if cached == nil || cached.ID != want.ID {
-		t.Errorf("cached value = %+v, want ID %d", cached, want.ID)
+			data, err := rdb.Get(ctx, key).Bytes()
+			if err != nil {
+				t.Fatalf("get repaired value: %v", err)
+			}
+			var cached *link.Link
+			if err := json.Unmarshal(data, &cached); err != nil {
+				t.Fatalf("cached value was not repaired: %v", err)
+			}
+			if cached == nil || cached.ID != want.ID {
+				t.Errorf("cached value = %+v, want ID %d", cached, want.ID)
+			}
+		})
 	}
 }
 
@@ -501,19 +540,39 @@ func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 }
 
 func TestCacheTTL(t *testing.T) {
-	if got := cacheTTL(&link.Link{}); got != positiveTTL {
-		t.Errorf("cacheTTL(no expiry) = %v, want %v", got, positiveTTL)
-	}
-
 	soon := time.Now().Add(30 * time.Minute)
-	got := cacheTTL(&link.Link{ExpiresAt: &soon})
-	if got <= 0 || got > 30*time.Minute {
-		t.Errorf("cacheTTL(30m) = %v, want in (0, 30m]", got)
-	}
-
 	past := time.Now().Add(-time.Second)
-	if got := cacheTTL(&link.Link{ExpiresAt: &past}); got > 0 {
-		t.Errorf("cacheTTL(past) = %v, want <= 0", got)
+	long := time.Now().Add(2 * time.Hour)
+	tests := []struct {
+		name       string
+		at         *time.Time
+		wantExact  time.Duration
+		exact      bool
+		upperBound time.Duration
+	}{
+		{name: "no expiry", wantExact: positiveTTL, exact: true},
+		{name: "longer than an hour", at: &long, wantExact: positiveTTL, exact: true},
+		{name: "thirty minutes", at: &soon, upperBound: 30 * time.Minute},
+		{name: "past", at: &past},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cacheTTL(&link.Link{ExpiresAt: tt.at})
+			switch {
+			case tt.exact:
+				if got != tt.wantExact {
+					t.Errorf("cacheTTL = %v, want %v", got, tt.wantExact)
+				}
+			case tt.upperBound > 0:
+				if got <= 0 || got > tt.upperBound {
+					t.Errorf("cacheTTL = %v, want in (0, %v]", got, tt.upperBound)
+				}
+			default:
+				if got > 0 {
+					t.Errorf("cacheTTL = %v, want <= 0", got)
+				}
+			}
+		})
 	}
 }
 

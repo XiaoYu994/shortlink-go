@@ -123,9 +123,10 @@ Redis 读失败时限制回源并发，超过上限快速返回临时过载错�
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	key := keyPrefix + code
 
-	cached, result := s.readCache(ctx, key)
+	cached, result := s.readCache(ctx, key, code)
 	if result == resultHit {
-		// Redis 惰性删除，到期后的正缓存可能还在。删掉后按找不到返回。
+		// TTL 到点后 GET 读不到这个 key。这里再看一次 ExpiresAt：
+		// 时钟前跳，或 key 的 TTL 比链接寿命更长时，仍然不跳过期链接。
 		if cached == nil || cached.Expired(time.Now()) {
 			if cached != nil {
 				_ = s.rdb.Del(ctx, key).Err()
@@ -157,9 +158,10 @@ readCache 在调用方 ctx 已结束时返回 resultSkipped，不计数也不记
 
 看 ctx.Err()，不看错误里的 DeadlineExceeded：go-redis 拨号用子 context，
 超时也是这个错误，但调用方的 ctx 还活着，那是 Redis 没连上。
-坏数据删掉后按未命中，让回源重新写入。
+坏数据删掉后按未命中，让回源重新写入。合法 JSON 缺字段不会报错，
+字段名也不区分大小写，所以 URL 为空或 Code 对不上也算坏数据。
 */
-func (s *Store) readCache(ctx context.Context, key string) (cached *link.Link, result string) {
+func (s *Store) readCache(ctx context.Context, key, code string) (cached *link.Link, result string) {
 	start := time.Now()
 	defer func() {
 		if result == resultSkipped {
@@ -172,7 +174,7 @@ func (s *Store) readCache(ctx context.Context, key string) (cached *link.Link, r
 	data, err := s.rdb.Get(ctx, key).Bytes()
 	switch {
 	case err == nil:
-		if err := json.Unmarshal(data, &cached); err != nil {
+		if err := json.Unmarshal(data, &cached); err != nil || !usableCachedLink(cached, code) {
 			_ = s.rdb.Del(ctx, key).Err()
 			return nil, resultMiss
 		}
@@ -184,6 +186,18 @@ func (s *Store) readCache(ctx context.Context, key string) (cached *link.Link, r
 	default:
 		return nil, resultFallback
 	}
+}
+
+/*
+usableCachedLink 判断命中的值能不能用。
+JSON null 是负缓存，解出来是 nil。
+零值 Link 会让跳转 302 到空的 Location，短码对不上则会把别的链接拿去跳。
+*/
+func usableCachedLink(cached *link.Link, code string) bool {
+	if cached == nil {
+		return true
+	}
+	return cached.URL != "" && cached.Code == code
 }
 
 /*

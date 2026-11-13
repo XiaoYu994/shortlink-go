@@ -43,7 +43,7 @@ func (e *ValidationError) Error() string {
 /*
 Link 是一条短链。
 
-ID 和 Code 由 Store 在创建时分配，NewLink 只负责校验 URL；
+ID 和 Code 由 Store 在创建时分配，NewLink 负责校验 URL 和到期时间；
 CreatedAt 也由存储层设置，因为数据库和内存实现的时钟来源可能不同。
 */
 type Link struct {

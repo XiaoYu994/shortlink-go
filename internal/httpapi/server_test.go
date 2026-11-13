@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -128,20 +129,24 @@ func TestCreateBadRequest(t *testing.T) {
 	handler := srv.Routes()
 
 	tests := []struct {
-		name string
-		body string
-		want int
+		name   string
+		body   string
+		want   int
+		errSub string
 	}{
-		{"empty body", "", http.StatusBadRequest},
-		{"invalid json", `{`, http.StatusBadRequest},
-		{"missing url", `{}`, http.StatusBadRequest},
-		{"invalid url", `{"url":"ftp://example.com"}`, http.StatusBadRequest},
-		{"expired", `{"url":"https://example.com","expires_at":"2000-01-01T00:00:00Z"}`, http.StatusBadRequest},
-		{"url with space", `{"url":"https://example.com/a b"}`, http.StatusBadRequest},
-		{"trailing garbage", `{"url":"https://example.com"}x`, http.StatusBadRequest},
-		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, http.StatusBadRequest},
-		{"too large", `{"url":"` + strings.Repeat("a", maxBodyBytes) + `"}`, http.StatusRequestEntityTooLarge},
-		{"valid prefix + oversized tail", `{"url":"https://example.com/ok"}` + strings.Repeat(" ", maxBodyBytes), http.StatusRequestEntityTooLarge},
+		{"empty body", "", http.StatusBadRequest, "invalid JSON body"},
+		{"invalid json", `{`, http.StatusBadRequest, "invalid JSON body"},
+		{"missing url", `{}`, http.StatusBadRequest, ""},
+		{"invalid url", `{"url":"ftp://example.com"}`, http.StatusBadRequest, ""},
+		{"expired", `{"url":"https://example.com","expires_at":"2000-01-01T00:00:00Z"}`, http.StatusBadRequest, "must be in the future"},
+		{"expires_at not a time", `{"url":"https://example.com","expires_at":"tomorrow"}`, http.StatusBadRequest, "invalid expires_at"},
+		{"expires_at number", `{"url":"https://example.com","expires_at":1}`, http.StatusBadRequest, "invalid expires_at"},
+		{"unknown field", `{"url":"https://example.com","expire_at":"2030-01-01T00:00:00Z"}`, http.StatusBadRequest, `unknown field`},
+		{"url with space", `{"url":"https://example.com/a b"}`, http.StatusBadRequest, ""},
+		{"trailing garbage", `{"url":"https://example.com"}x`, http.StatusBadRequest, "invalid JSON body"},
+		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, http.StatusBadRequest, "invalid JSON body"},
+		{"too large", `{"url":"` + strings.Repeat("a", maxBodyBytes) + `"}`, http.StatusRequestEntityTooLarge, ""},
+		{"valid prefix + oversized tail", `{"url":"https://example.com/ok"}` + strings.Repeat(" ", maxBodyBytes), http.StatusRequestEntityTooLarge, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,7 +157,31 @@ func TestCreateBadRequest(t *testing.T) {
 			if rec.Code != tt.want {
 				t.Errorf("status = %d, want %d, body = %s", rec.Code, tt.want, rec.Body.String())
 			}
+			if tt.errSub != "" && !strings.Contains(rec.Body.String(), tt.errSub) {
+				t.Errorf("body = %s, want substring %q", rec.Body.String(), tt.errSub)
+			}
 		})
+	}
+}
+
+func TestCreateFullyEscapedURLWithExpiresAt(t *testing.T) {
+	const prefix = "https://example.com/"
+	raw := prefix + strings.Repeat("a", link.MaxURLLength-len(prefix))
+	var b strings.Builder
+	b.WriteString(`{"url":"`)
+	for i := 0; i < len(raw); i++ {
+		fmt.Fprintf(&b, `\u%04x`, raw[i])
+	}
+	b.WriteString(`","expires_at":"2030-01-01T00:00:00.000000000+00:00"}`)
+	b.WriteString(strings.Repeat(" ", 32))
+
+	srv := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(b.String()))
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d, body bytes = %d, limit = %d, resp = %s",
+			rec.Code, http.StatusCreated, b.Len(), maxBodyBytes, rec.Body.String())
 	}
 }
 

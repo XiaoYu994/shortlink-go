@@ -138,45 +138,68 @@ func TestStoreContextCanceled(t *testing.T) {
 }
 
 func TestStoreExpiresAt(t *testing.T) {
-	store := New()
-	ctx := context.Background()
+	tests := []struct {
+		name           string
+		expiresIn      time.Duration
+		mutateCaller   bool
+		mutateReturned bool
+		wantNotFound   bool
+	}{
+		{"caller mutation stays stored", time.Hour, true, false, false},
+		{"returned mutation stays stored", time.Hour, false, true, false},
+		{"past is not found", -time.Minute, false, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := New()
+			ctx := context.Background()
+			at := time.Now().Add(tt.expiresIn).UTC()
 
-	future := time.Now().Add(time.Hour).UTC()
-	l, err := link.NewLink("https://example.com/future", &future)
-	if err != nil {
-		t.Fatalf("NewLink: %v", err)
-	}
-	if err := store.Create(ctx, l); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	*l.ExpiresAt = l.ExpiresAt.Add(-2 * time.Hour)
+			var l *link.Link
+			var err error
+			if tt.wantNotFound {
+				l, err = link.NewLink("https://example.com/past", nil)
+				if err != nil {
+					t.Fatalf("NewLink: %v", err)
+				}
+				l.ExpiresAt = &at
+			} else {
+				l, err = link.NewLink("https://example.com/future", &at)
+				if err != nil {
+					t.Fatalf("NewLink: %v", err)
+				}
+			}
+			if err := store.Create(ctx, l); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if tt.mutateCaller {
+				*l.ExpiresAt = l.ExpiresAt.Add(-2 * time.Hour)
+			}
 
-	got, err := store.GetByCode(ctx, l.Code)
-	if err != nil {
-		t.Fatalf("GetByCode: %v", err)
-	}
-	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(future) {
-		t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, future)
-	}
-	*got.ExpiresAt = time.Now().Add(-time.Hour)
-	again, err := store.GetByCode(ctx, l.Code)
-	if err != nil {
-		t.Fatalf("second GetByCode: %v", err)
-	}
-	if again.ExpiresAt == nil || !again.ExpiresAt.Equal(future) {
-		t.Errorf("stored ExpiresAt = %v, want %v", again.ExpiresAt, future)
-	}
-
-	past := time.Now().Add(-time.Minute)
-	expired, err := link.NewLink("https://example.com/past", nil)
-	if err != nil {
-		t.Fatalf("NewLink: %v", err)
-	}
-	expired.ExpiresAt = &past
-	if err := store.Create(ctx, expired); err != nil {
-		t.Fatalf("Create expired: %v", err)
-	}
-	if _, err := store.GetByCode(ctx, expired.Code); !errors.Is(err, link.ErrNotFound) {
-		t.Errorf("GetByCode expired error = %v, want link.ErrNotFound", err)
+			got, err := store.GetByCode(ctx, l.Code)
+			if tt.wantNotFound {
+				if !errors.Is(err, link.ErrNotFound) {
+					t.Errorf("GetByCode error = %v, want link.ErrNotFound", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetByCode: %v", err)
+			}
+			if got.ExpiresAt == nil || !got.ExpiresAt.Equal(at) {
+				t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, at)
+			}
+			if !tt.mutateReturned {
+				return
+			}
+			*got.ExpiresAt = time.Now().Add(-time.Hour)
+			again, err := store.GetByCode(ctx, l.Code)
+			if err != nil {
+				t.Fatalf("second GetByCode: %v", err)
+			}
+			if again.ExpiresAt == nil || !again.ExpiresAt.Equal(at) {
+				t.Errorf("stored ExpiresAt = %v, want %v", again.ExpiresAt, at)
+			}
+		})
 	}
 }
