@@ -499,3 +499,153 @@ func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 		t.Errorf("writes{result=error} = %v, want 0", n)
 	}
 }
+
+func TestJitteredTTL(t *testing.T) {
+	const ttl = time.Hour
+	seen := make(map[time.Duration]struct{})
+	for range 100 {
+		got := jitteredTTL(ttl)
+		if got < ttl*9/10 || got > ttl {
+			t.Fatalf("jitteredTTL(%v) = %v, want in [%v, %v]", ttl, got, ttl*9/10, ttl)
+		}
+		seen[got] = struct{}{}
+	}
+	if len(seen) == 1 {
+		t.Error("jitteredTTL returned the same value 100 times; jitter is not applied")
+	}
+}
+
+/*
+TestStoreGetByCodeSingleflightSurvivesLeaderCancel 固定共享回源不跟随领头取消：
+领头请求断开后，还在等待的请求应该拿到链接，而不是 context.Canceled。
+*/
+func TestStoreGetByCodeSingleflightSurvivesLeaderCancel(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	want := &link.Link{ID: 8, Code: code, URL: "https://example.com/8"}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	next := &fakeStore{get: func(ctx context.Context, _ string) (*link.Link, error) {
+		enteredOnce.Do(func() { close(entered) })
+		select {
+		case <-release:
+			return want, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	s := newTestStore(t, next, rdb)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+
+	type result struct {
+		l   *link.Link
+		err error
+	}
+	leaderCh := make(chan result, 1)
+	go func() {
+		l, err := s.GetByCode(leaderCtx, code)
+		leaderCh <- result{l: l, err: err}
+	}()
+	<-entered
+
+	waiterCh := make(chan result, 1)
+	go func() {
+		l, err := s.GetByCode(context.Background(), code)
+		waiterCh <- result{l: l, err: err}
+	}()
+	// 让等待者进入 singleflight，再模拟领头请求断开。
+	time.Sleep(100 * time.Millisecond)
+	cancelLeader()
+	// 旧实现里回源会在这里被取消；新实现继续等 release。
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	if got := <-leaderCh; got.err != nil {
+		t.Fatalf("leader GetByCode: %v", got.err)
+	}
+	waiter := <-waiterCh
+	if waiter.err != nil {
+		t.Fatalf("waiter GetByCode: %v", waiter.err)
+	}
+	if waiter.l.ID != want.ID {
+		t.Errorf("waiter ID = %d, want %d", waiter.l.ID, want.ID)
+	}
+	if n := next.calls.Load(); n != 1 {
+		t.Errorf("store calls = %d, want 1", n)
+	}
+}
+
+/*
+TestStoreFallbackShedsWhenConcurrencyFull 验证 Redis 读失败时的回源上限：
+最多 fallbackConcurrency 个请求进入下一层存储，其余立即收到临时过载错误。
+*/
+func TestStoreFallbackShedsWhenConcurrencyFull(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	_ = rdb.Close()
+
+	var current, peak atomic.Int32
+	release := make(chan struct{})
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		n := current.Add(1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		<-release
+		current.Add(-1)
+		return &link.Link{ID: 1, URL: "https://example.com"}, nil
+	}}
+	s := newTestStore(t, next, rdb)
+
+	const shed = 4
+	const total = fallbackConcurrency + shed
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var busy atomic.Int32
+	errs := make(chan error, total)
+	for i := range total {
+		wg.Go(func() {
+			_, err := s.GetByCode(ctx, fmt.Sprintf("busy-%d", i))
+			if err == nil {
+				return
+			}
+			var temp interface{ Temporary() bool }
+			if errors.As(err, &temp) && temp.Temporary() {
+				busy.Add(1)
+				return
+			}
+			errs <- err
+		})
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for int(current.Load()+busy.Load()) < total && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := peak.Load(); got != fallbackConcurrency {
+		close(release)
+		wg.Wait()
+		t.Fatalf("peak concurrent store calls = %d, want %d", got, fallbackConcurrency)
+	}
+	if got := busy.Load(); got != shed {
+		close(release)
+		wg.Wait()
+		t.Fatalf("shed requests = %d, want %d", got, shed)
+	}
+
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}

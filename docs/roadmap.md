@@ -62,6 +62,9 @@
 - [x] 缓存指标：命中、未命中、降级次数；同样的压测再跑一轮，和基线对比
   - `shortlink_cache_gets_total{result}`：`hit`（含负缓存）、`miss`（含坏数据）、`fallback`（Redis 读失败）。`shortlink_cache_writes_total{result}` 记录 `success`、`skipped`（`SET NX` 没写进去）、`error`。`shortlink_cache_operation_duration_seconds{operation,result}` 记录缓存操作耗时（`operation` 为 `get`、`set`）。请求取消不计入
   - 2026-11-12 缓存压测：客户端 19,077 req/s（基线 10,105）、服务端跳转 p50 1.4ms / p99 4.7ms（基线 3.2 / 21.5ms），数据库连接池零使用，详见 runbook
+- [x] 缓存雪崩防护：正、负缓存 TTL 向下随机抖动最多 10%；Redis 读失败时限制回源并发，超出的快速返回 503
+- [x] singleflight 的共享回源改用独立 ctx，领头请求取消不再连累等待者
+  - 回源用 `context.WithoutCancel` 派生 ctx 并保留原 deadline；回源许可只包住数据库调用，见 ADR 0006
 - [x] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
 - [x] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
   - `shortlink_clicks_dropped_total`：缓冲满时加一。`shortlink_clicks_written_total{result}` 记录写出成功和失败的点击数。关停时排空 channel，受一份 `SHUTDOWN_TIMEOUT` 限制，再关数据库。设计见 [ADR 0007](adr/0007-async-click-recording.md)
@@ -72,4 +75,5 @@
 
 - [ ] 多租户加 API Key 鉴权（中间件加 context 传值）
 - [ ] 拆分 `cmd/redirector` 和 `cmd/console`
+- [ ] （可选）缓存击穿的多副本方案：有了多个 redirector 副本、回源次数真的成为压力之后，比较 Redis 分布式锁（`SET NX PX` 加 Lua 释放）和逻辑过期加后台刷新，按回源次数和可接受的一致性取舍
 - [ ] （可选）OpenTelemetry 追踪：拆分后两个进程互不调用，追踪看的是单个请求内部各环节的耗时，等指标解释不了慢请求时再加

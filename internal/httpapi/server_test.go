@@ -365,3 +365,29 @@ func TestCreateMaxLengthURLAccepted(t *testing.T) {
 		t.Errorf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 }
+
+// TestStoreOverloadedReturns503 验证存储层的临时过载错误映射成 503，而不是 500。
+func TestStoreOverloadedReturns503(t *testing.T) {
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), overloadedStore{}, 5*time.Second, newTestRegistry(), nil)
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+// overloadedStore 模拟存储层临时过载：错误实现 Temporary()，应该映射成 503。
+type overloadedStore struct{}
+
+func (overloadedStore) Create(context.Context, *link.Link) error { return nil }
+
+func (overloadedStore) GetByCode(context.Context, string) (*link.Link, error) {
+	return nil, overloadedError{}
+}
+
+type overloadedError struct{}
+
+func (overloadedError) Error() string   { return "overloaded" }
+func (overloadedError) Temporary() bool { return true }

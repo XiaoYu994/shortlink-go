@@ -30,11 +30,13 @@
 - 组合顺序固定为 `HTTP -> cache -> storemetrics -> postgres`。缓存命中不进入存储指标，`shortlink_store_*` 只统计真正打到数据库的调用；缓存效果和数据库耗时可以分开看。
 - `Create` 成功后写穿正缓存，覆盖可能存在的负缓存；查找回源写负缓存用 `SET NX`，避免和创建并发时后到的负缓存覆盖正缓存。
 - 并发未命中用 `singleflight` 按 cache key 合并，同一个短码同时只有一个请求回源。
-- `singleflight` 里的回源函数使用第一个请求的 ctx。领头请求被取消时，等待中的请求会一起拿到 `context.Canceled`。回源很快，暂时接受；以后需要再给回源派生独立的 context。
+- `singleflight` 的共享回源用 `context.WithoutCancel` 派生独立 ctx，并保留原来的 deadline。领头请求取消时，等待者不再跟着拿到 `context.Canceled`；回源仍受 `REQUEST_TIMEOUT` 约束。
+- 正、负缓存 TTL 都向下随机抖动最多 10%，避免同一批写入的 key 在同一时间集中失效。
+- Redis 读失败时最多 8 个请求同时回源，取不到许可的直接返回实现了 `Temporary()` 的错误，HTTP 层映射成 503。许可只包住数据库调用，写缓存不占着它。
 
 ### Redis 故障 fail-open
 
-- 读 Redis 出错（`redis.Nil` 除外）或写 Redis 出错都只影响命中率，请求照常回源数据库。
+- 读 Redis 出错（`redis.Nil` 除外）或写 Redis 出错都只影响命中率，请求照常回源数据库；读失败时回源并发超过上限的请求返回 503，属于限流，不是失败关闭。
 - 启动时 `Ping` 失败仍然让进程退出：连不上 Redis 属于部署配置错误，应该在启动阶段暴露，而不是带病运行。
 - 客户端超时和重试调短：`DialTimeout` 500ms、`ReadTimeout`/`WriteTimeout` 200ms、`MaxRetries` 1。go-redis 默认读超时 5 秒、重试 3 次，Redis 挂掉时一次 GET 可能超过 `REQUEST_TIMEOUT`，降级还没走到数据库请求就先超时了。
 - 连接参数只保留 `REDIS_URL`：`redis://`、`rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。不再单独维护 `REDIS_ADDR`，避免两条配置路径和优先级规则。超时和重试在 URL 解析后统一覆盖。
@@ -65,6 +67,7 @@
 - 跳转命中缓存时不再占用数据库连接，效果用同一轮压测和基线对比验收（见 `docs/runbook.md`）。
 - 缓存值格式和 `link.Link` 绑定。以后给 `Link` 加字段或改序列化格式，需要升 key 前缀版本，或者依赖“解码失败按未命中”自愈。
 - 创建成功会写穿正缓存，负缓存用 `SET NX`，避免创建和查找并发时后到的负缓存覆盖正缓存。缓存写失败时仍可能残留负缓存，最多 1 分钟。
+- Redis 故障时请求降级回源；回源并发超过上限的请求得到 503，可以稍后重试。TTL 抖动让过期时间分散，代价是实际 TTL 比标称值短最多 10%。
 - 测试需要可用的 Redis；没有 `TEST_REDIS_URL` 时 cache 测试跳过，其余测试不受影响。
 - 生产上需要给缓存 Redis 配置 `maxmemory` 和淘汰策略，并尽量使用独立实例；默认的 `noeviction` 配置不适合缓存场景。
 - 缓存查找记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示负缓存的 `SET NX` 发现 key 已存在），缓存操作耗时记在 `shortlink_cache_operation_duration_seconds`（`operation` 为 `get`、`set`）。压测对比沿用 `docs/runbook.md` 的基线方法，2026-11-12 的结果已记入 runbook（客户端 19,077 req/s，服务端跳转 p50 1.4ms / p99 4.7ms，数据库连接池未被使用）。`ClickRecorder` 的 dropped 计数已接入 `/metrics`，见 [ADR 0007](0007-async-click-recording.md)。

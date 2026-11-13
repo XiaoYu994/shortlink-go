@@ -98,11 +98,19 @@ func (s *Server) writeError(ctx context.Context, w http.ResponseWriter, status i
 }
 
 /*
+temporaryError 由临时过载错误实现，比如 cache 在 Redis 故障时回源并发已满。
+HTTP 层不认识具体存储实现，只看这个能力；这类失败返回 503，让客户端稍后重试。
+*/
+type temporaryError interface {
+	Temporary() bool
+}
+
+/*
 handleStoreError 把存储调用的失败映射成响应。
-客户端断开时什么都不写；请求超时返回 504；其余情况记错误日志并返回 500。
+客户端断开时什么都不写；请求超时返回 504；临时过载返回 503；其余情况记错误日志并返回 500。
 attrs 是额外的日志字段。跳转失败时带上短码；创建失败时短码还没生成，不传。
 
-超时是 timeout 中间件的 deadline 正常生效，不是存储故障，所以记 Warn：
+超时和过载是正常生效的机制，不是存储故障，所以记 Warn：
 数据库慢或负载高时这类日志会成片出现，不该和真正的 bug 混在一个级别。
 */
 func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op string, err error, attrs ...any) {
@@ -113,6 +121,13 @@ func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op str
 		args := append([]any{"op", op, "err", err}, attrs...)
 		s.logger.WarnContext(r.Context(), "request timed out", args...)
 		s.writeError(r.Context(), w, http.StatusGatewayTimeout, "request timed out")
+		return
+	}
+	var temp temporaryError
+	if errors.As(err, &temp) && temp.Temporary() {
+		args := append([]any{"op", op, "err", err}, attrs...)
+		s.logger.WarnContext(r.Context(), "store overloaded", args...)
+		s.writeError(r.Context(), w, http.StatusServiceUnavailable, "service temporarily overloaded")
 		return
 	}
 	args := append([]any{"err", err}, attrs...)

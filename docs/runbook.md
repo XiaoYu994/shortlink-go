@@ -82,7 +82,7 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
 - 正缓存 TTL 1 小时；查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
 - 创建成功后写穿正缓存；负缓存用 `SET NX`，避免和创建并发时后到的负缓存覆盖正缓存。
-- 并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源 PostgreSQL，请求不受影响。启动时 Ping 失败进程会退出，属于部署配置错误。
+- 并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源 PostgreSQL，读失败且回源并发已满时返回 503。启动时 Ping 失败进程会退出，属于部署配置错误。
 - 查看某个短码的缓存：
 
 ```bash
@@ -291,6 +291,7 @@ TEST_REDIS_URL=redis://localhost:6379/0
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
+| 跳转大量 503 | Redis 读失败且回源并发已满；先查 Redis 和 `shortlink_cache_gets_total{result="fallback"}`，回源上限是每进程 8 个 |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 执行 `migrations/001_create_links.sql` 和 `002_add_links_constraints.sql` |
 | `make up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `DATABASE_URL` 指向已有实例 |
