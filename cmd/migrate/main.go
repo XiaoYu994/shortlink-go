@@ -32,9 +32,10 @@ const usageText = `用法:
   migrate down [-database URL]
   migrate version [-database URL]
 
+只允许库名 shortlink 或以 shortlink_ 开头的库：
+shortlink 是默认库，shortlink_test 是测试库，部署可用 shortlink_ 前缀区分环境。
 up 把库迁到最新。down 只允许库名以 _test 结尾，会把业务表一路降到没有。
-未写 -database 时用 DATABASE_URL。拒绝库名 si_crm。
-在仓库根目录执行，SQL 在 migrations/。
+未写 -database 时用 DATABASE_URL。在仓库根目录执行，SQL 在 migrations/。
 `
 
 type direction int
@@ -134,18 +135,12 @@ func databaseName(dsn string) (string, error) {
 	if strings.Contains(pathName, "/") {
 		return "", errors.New("database url has no database name")
 	}
-	if pathName == "si_crm" {
-		return pathName, nil
-	}
 
 	queryName := ""
 	seenQuery := false
 	for _, n := range u.Query()["dbname"] {
 		if n == "" {
 			continue
-		}
-		if n == "si_crm" {
-			return n, nil
 		}
 		if seenQuery && n != queryName {
 			return "", errors.New("database url has conflicting dbname")
@@ -167,12 +162,13 @@ func databaseName(dsn string) (string, error) {
 }
 
 /*
-allow 拦住不该动的库。
-si_crm 是开发库，不走这套迁移。down 会删表，只留给名字以 _test 结尾的测试库。
+allow 只放行本项目的库。
+项目库叫 shortlink，测试库叫 shortlink_test，部署环境用 shortlink_ 前缀区分。
+down 会删表，只留给名字以 _test 结尾的测试库。
 */
 func allow(dir direction, name string) error {
-	if name == "si_crm" {
-		return errors.New("refusing to migrate database si_crm")
+	if name != "shortlink" && !strings.HasPrefix(name, "shortlink_") {
+		return fmt.Errorf("refusing to migrate %q: not a shortlink database", name)
 	}
 	if dir == dirDown && !strings.HasSuffix(name, "_test") {
 		return fmt.Errorf("down only allows a database name ending in _test, got %q", name)

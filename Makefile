@@ -21,7 +21,7 @@ build: ## 编译到 bin/server 和 bin/console
 console: ## 运维命令。例如 make console ARGS="key issue --name acme"
 	go run ./cmd/console $(ARGS)
 
-migrate: ## 把 DATABASE_URL 迁到最新。拒绝库名 si_crm
+migrate: ## 把 DATABASE_URL 迁到最新。只允许 shortlink 库
 	go run ./cmd/migrate up
 
 test: ## 跑全部测试，使用当前 .env 里的 TEST_*（带竞争检测，不使用缓存）
