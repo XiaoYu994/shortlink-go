@@ -1,0 +1,4 @@
+{
+  // 打开仓库时提示安装，避免新机器上缺 Go 扩展。
+  "recommendations": ["golang.go"]
+}

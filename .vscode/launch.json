@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  // 调试时复用 .env 里的 DATABASE_URL、REDIS_URL 等配置，和 make run 一致。
+  "configurations": [
+    {
+      "name": "server",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/server",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "console",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/console",
+      // 改这里模拟 make console ARGS="key issue --name acme"
+      "args": [],
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ]
+}

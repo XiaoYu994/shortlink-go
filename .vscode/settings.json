@@ -3,10 +3,15 @@
   "go.enableCodeLens": {
     "runtest": true
   },
+  // make test 会加载 .env；CodeLens 跑测试也读同一份，否则集成测试因缺 TEST_* 被跳过。
+  "go.testEnvFile": "${workspaceFolder}/.env",
   "go.testFlags": ["-race"],
   "[go]": {
     "editor.defaultFormatter": "golang.go",
     "editor.formatOnSave": true,
+    // gofmt 用 tab 缩进，编辑时保持一致。
+    "editor.insertSpaces": false,
+    "editor.tabSize": 4,
     "editor.codeActionsOnSave": {
       "source.organizeImports": "explicit"
     }
