@@ -73,9 +73,10 @@
 - [x] 链接过期：`expires_at` 生效，查询过滤过期链接，缓存 TTL 取剩余时间
 - [x] 用泛型的 `doTyped` 去掉类型断言
   - `singleflight.Group.Do` 仍返回 `any`。`doTyped` 把断言收在一处；回调先返回 `*link.Link`，nil 指针装进 `any` 后仍带着类型，断言得到零值
-- [ ] 冷缓存/长尾短码的读路径保护（[ADR 0008](adr/0008-cold-cache-read-path.md)，Proposed）
-  - 正常 cache miss 没有回源并发上限，只受 `DB_MAX_OPEN_CONNS`（默认 10）约束；大量不同短码时请求在连接池排队到 `REQUEST_TIMEOUT` 后 504
-  - 计划：在 singleflight 内加正常 miss 的 bulkhead、独立回源超时、增加 shed 指标；先做多 key 压测再定参数
+- [x] 冷缓存/长尾短码的读路径保护（[ADR 0008](adr/0008-cold-cache-read-path.md)，Accepted）
+  - 正常 miss 的 bulkhead（`CACHE_MISS_CONCURRENCY`，默认 8）、独立回源超时（`CACHE_FETCH_TIMEOUT`，默认 1s）和 `shortlink_cache_shed_total{path}` 已实现
+  - 2026-11-14 多 key 压测：50 万短码、24 万次全部 miss 时，并发 8 的连接池峰值 8、等待 0，503 快速返回且无 504；并发 16 把连接池顶满 10 并产生 94,007 次等待，所以保持 8。数据见 runbook
+  - `CACHE_FETCH_TIMEOUT=1s` 相对正常存储 p99（约 20ms）留有余量，四轮压测都没有 504，暂不调整
 
 ## 阶段 6：一个 SaaS 功能
 

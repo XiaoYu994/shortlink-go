@@ -24,7 +24,7 @@ func TestGetByCodeCountsMissThenHit(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return &link.Link{ID: 1, Code: code, URL: "https://example.com/1"}, nil
 	}}
-	s := New(next, rdb, reg)
+	s := New(next, rdb, reg, Options{})
 	ctx := context.Background()
 
 	if _, err := s.GetByCode(ctx, code); err != nil {
@@ -52,7 +52,7 @@ func TestGetByCodeCountsNegativeAsHit(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return nil, link.ErrNotFound
 	}}
-	s := New(next, rdb, reg)
+	s := New(next, rdb, reg, Options{})
 	ctx := context.Background()
 
 	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
@@ -81,7 +81,7 @@ func TestGetByCodeCountsCorruptAsMiss(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return &link.Link{ID: 9, Code: code, URL: "https://example.com/9"}, nil
 	}}
-	s := New(next, rdb, reg)
+	s := New(next, rdb, reg, Options{})
 
 	if _, err := s.GetByCode(ctx, code); err != nil {
 		t.Fatalf("GetByCode: %v", err)
@@ -99,7 +99,7 @@ func TestGetByCodeCountsFallback(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return &link.Link{URL: "https://example.com/down"}, nil
 	}}
-	s := New(next, rdb, reg)
+	s := New(next, rdb, reg, Options{})
 
 	if _, err := s.GetByCode(context.Background(), "down"); err != nil {
 		t.Fatalf("GetByCode: %v", err)
@@ -118,7 +118,7 @@ func TestGetByCodeCanceledDoesNotCount(t *testing.T) {
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
 		return &link.Link{URL: "https://example.com/canceled"}, nil
 	}}
-	s := New(next, rdb, reg)
+	s := New(next, rdb, reg, Options{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -153,7 +153,7 @@ func TestGetByCodeSingleflightCountsEachMiss(t *testing.T) {
 		return &link.Link{ID: 7, Code: code, URL: "https://example.com/7"}, nil
 	}}
 	reg := prometheus.NewRegistry()
-	s := New(next, rdb, reg)
+	s := New(next, rdb, reg, Options{})
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -194,7 +194,7 @@ func TestCreateDoesNotCount(t *testing.T) {
 	_ = rdb.Close()
 
 	reg := prometheus.NewRegistry()
-	s := New(&fakeStore{}, rdb, reg)
+	s := New(&fakeStore{}, rdb, reg, Options{})
 	if err := s.Create(context.Background(), &link.Link{Code: "x", URL: "https://example.com"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestWriteCanceledDuringSetDoesNotCount(t *testing.T) {
 	rdb.AddHook(&blockSetHook{started: started})
 
 	reg := prometheus.NewRegistry()
-	s := New(&fakeStore{}, rdb, reg)
+	s := New(&fakeStore{}, rdb, reg, Options{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

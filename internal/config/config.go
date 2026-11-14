@@ -2,7 +2,8 @@
 Package config 从环境变量加载进程配置，并在启动时校验。
 
 未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时或关机超时不合法时，LoadConfig 返回错误，由 main 终止启动。
+连接池参数、请求超时、关机超时或回源保护参数不合法时，LoadConfig 返回错误，
+由 main 终止启动。
 */
 package config
 
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"shortlink/internal/cache"
 	"shortlink/internal/postgres"
 )
 
@@ -24,6 +26,9 @@ const (
 	// defaultRequestTimeout 是单个请求的处理时限。main 让读写超时比它宽松，
 	// 保证读完 body，并在超时后还有时间把 504 写回客户端。
 	defaultRequestTimeout = 5 * time.Second
+	// 回源保护的默认值和 cache 包共用，避免两处漂移。
+	defaultCacheMissConcurrency = cache.DefaultMissConcurrency
+	defaultCacheFetchTimeout    = cache.DefaultFetchTimeout
 )
 
 /*
@@ -38,23 +43,30 @@ type Config struct {
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
 	LogLevel        slog.Level    // 日志级别，默认 info
+
+	// CacheMissConcurrency 是普通缓存未命中的回源并发上限。
+	CacheMissConcurrency int
+	// CacheFetchTimeout 是单次回源超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
+	CacheFetchTimeout time.Duration
 }
 
 /*
 LoadConfig 从环境变量读取进程配置。
 未设置的可选项使用默认值；DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时或关机超时不合法时返回错误。
+连接池参数、请求超时、关机超时或回源保护参数不合法时返回错误。
 
 REDIS_URL 是完整的连接串：redis://localhost:6379/0，没有密码也可以；
 需要 TLS 用 rediss://，需要密码和 DB 编号就写进 URL。
 */
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		Addr:            defaultAddr,
-		Pool:            postgres.DefaultPoolConfig(),
-		RequestTimeout:  defaultRequestTimeout,
-		ShutdownTimeout: defaultShutdownTimeout,
-		LogLevel:        slog.LevelInfo,
+		Addr:                 defaultAddr,
+		Pool:                 postgres.DefaultPoolConfig(),
+		RequestTimeout:       defaultRequestTimeout,
+		ShutdownTimeout:      defaultShutdownTimeout,
+		LogLevel:             slog.LevelInfo,
+		CacheMissConcurrency: defaultCacheMissConcurrency,
+		CacheFetchTimeout:    defaultCacheFetchTimeout,
 	}
 
 	if addr := os.Getenv("ADDR"); addr != "" {
@@ -94,6 +106,12 @@ func LoadConfig() (Config, error) {
 	if cfg.ShutdownTimeout, err = envDuration("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
 		return Config{}, err
 	}
+	if cfg.CacheMissConcurrency, err = envInt("CACHE_MISS_CONCURRENCY", cfg.CacheMissConcurrency); err != nil {
+		return Config{}, err
+	}
+	if cfg.CacheFetchTimeout, err = envDuration("CACHE_FETCH_TIMEOUT", cfg.CacheFetchTimeout); err != nil {
+		return Config{}, err
+	}
 
 	if err := validate(cfg); err != nil {
 		return Config{}, err
@@ -116,6 +134,15 @@ func validate(cfg Config) error {
 	}
 	if cfg.ShutdownTimeout <= 0 {
 		return errors.New("SHUTDOWN_TIMEOUT must be positive")
+	}
+	if cfg.CacheMissConcurrency <= 0 {
+		return errors.New("CACHE_MISS_CONCURRENCY must be positive")
+	}
+	if cfg.CacheFetchTimeout <= 0 {
+		return errors.New("CACHE_FETCH_TIMEOUT must be positive")
+	}
+	if cfg.CacheFetchTimeout > cfg.RequestTimeout {
+		return errors.New("CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT")
 	}
 	return nil
 }

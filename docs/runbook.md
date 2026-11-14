@@ -88,6 +88,7 @@ curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 只有 `GET`、`HEAD`、`POST`、`other`
 - `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。`/healthz` 不访问数据库，要创建或打开过短链才看得到
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
+- `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
 - `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。创建和回源写缓存都会计数；`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
 - `shortlink_cache_operation_duration_seconds`：缓存操作耗时，`operation` 为 `get`、`set`，用来区分慢在 Redis 还是数据库
 - `shortlink_clicks_dropped_total`：点击缓冲满了没记下的次数。一启动就是 0
@@ -102,7 +103,7 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
 - 正缓存 TTL 取剩余寿命和 1 小时里更短的那个；没有到期时间时是 1 小时。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
 - 创建成功后写穿正缓存；负缓存用 `SET NX`，避免和创建并发时后到的负缓存覆盖正缓存。
-- 并发未命中用 singleflight 合并回源；Redis 读写失败时直接回源 PostgreSQL，读失败且回源并发已满时返回 503。启动时 Ping 失败进程会退出，属于部署配置错误。
+- 并发未命中用 singleflight 合并回源。普通未命中和 Redis 读失败（fallback）各有一条回源限流：许可数分别是 `CACHE_MISS_CONCURRENCY`（默认 8）和固定 8，拿不到许可立即返回 503。单次回源超时由 `CACHE_FETCH_TIMEOUT`（默认 1s）控制，独立于 `REQUEST_TIMEOUT`。启动时 Ping 失败进程会退出，属于部署配置错误。
 - 查看某个短码的缓存：
 
 ```bash
@@ -169,6 +170,7 @@ Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:80
    rate(go_sql_wait_duration_seconds_total{db_name="shortlink"}[30s])
    sum(rate(go_sql_wait_count_total{db_name="shortlink"}[30s]))
    sum by (result) (rate(shortlink_cache_gets_total[30s]))
+   sum by (path) (rate(shortlink_cache_shed_total[30s]))
    histogram_quantile(0.99, sum by (le) (rate(shortlink_cache_operation_duration_seconds_bucket{operation="get",result="hit"}[30s])))
    histogram_quantile(0.99, sum by (le) (rate(shortlink_cache_operation_duration_seconds_bucket{operation="set",result="success"}[30s])))
    ```
@@ -225,6 +227,77 @@ Prometheus（服务端，30 秒窗口）：
 - 只压一个热 key，不能据此推断多 key、缓存过期或 Redis 故障时的表现。
 - 缓存命中时 `shortlink_store_*` 没有样本，存储 p50/p99 查出来是空值，这是预期结果。
 - 和基线一样，app、Redis、PostgreSQL、Prometheus、hey 共享同一台 WSL2 VM，绝对数字只用于本机前后对比。
+
+## 多 key 压测（2026-11-14）
+
+目标：验证 ADR 0008 的冷缓存保护，用数字确定 `CACHE_MISS_CONCURRENCY` 和
+`CACHE_FETCH_TIMEOUT`。之前的压测只压一个热 key，不能说明大量不同短码时的表现。
+
+### 压测环境
+
+| 项目 | 配置 |
+| --- | --- |
+| CPU | AMD Ryzen 7 5700U，8 核 16 线程 |
+| 内存 | 14 GiB（压测前约 6.1 GiB 已用，8.8 GiB available） |
+| OS | Linux 6.18.63-2-lts |
+| Go | go1.27.4 linux/amd64 |
+| Docker | 29.9.3 / Compose 5.7.1 |
+| PostgreSQL | 17.12（Docker），`max_connections=100` |
+| Redis | 7.4.12（Docker） |
+| 压测工具 | vegeta v12.13.0，`-redirects=-1` |
+| 应用配置 | `DB_MAX_OPEN_CONNS=10`、`DB_MAX_IDLE_CONNS=5`、`REQUEST_TIMEOUT=5s`、`CACHE_FETCH_TIMEOUT=1s`、`LOG_LEVEL=warn` |
+| 隔离 | 独立库 `shortlink_bench` 和 Redis DB 15，压测后删除；主库未写入 |
+| 拓扑 | app、PostgreSQL、Redis、vegeta 在同一台机器上，共享 16 vCPU |
+
+### 方法
+
+1. 在独立库造 50 万条短链，短码是 `md5(g)` 的前 8 位；另造 50 万个不与现有短码冲突的随机码，用来测不存在的链接。
+2. 用 vegeta 按目标文件发 `HEAD /r/{code}`，`-redirects=-1`。用 HEAD 是为了不触发 `ClickRecorder`，只看读路径；GET 会额外产生点击写入。
+3. 三种流量，每轮 20 秒：
+   - 全部命中：1 万条热短码，先以 2,000 req/s 预热 1 万次，再以 20,000 req/s 压 20 秒；
+   - 全部 miss：清空 Redis，50 万条不同短码按顺序使用，12,000 req/s 压 20 秒，共 24 万次，窗口内不重复；
+   - 大量不存在：清空 Redis，50 万个不同的不存在短码，同样 12,000 req/s、20 秒。
+4. 每 0.5 秒抓一次 `/metrics`；压测前后各抓一次完整快照，计算计数器增量、直方图分位数和连接池峰值。
+
+### 结果
+
+客户端 vegeta：
+
+| 场景 | 请求数 | 2xx/3xx | 503 | 404 | 客户端成功吞吐 | 客户端 p50 / p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 全部命中 | 400,000 | 400,000（302） | 0 | 0 | 19,999/s | 0.53 / 7.55 ms |
+| 全部 miss，并发 8 | 239,999 | 97,221（302） | 142,778 | 0 | 4,859/s | 2.09 / 14.35 ms |
+| 大量不存在，并发 8 | 240,001 | 0 | 141,793 | 98,208 | —（404 不计成功） | 2.10 / 14.60 ms |
+| 全部 miss，并发 16 | 240,001 | 117,895（302） | 122,106 | 0 | 5,894/s | 3.29 / 19.04 ms |
+
+服务端（`/metrics` 快照，20 秒窗口）：
+
+| 场景 | HTTP p50 / p99 | 存储 p50 / p99 | 连接池使用峰值 | 等待计数 | 等待累计 | goroutine 峰值 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 全部命中 | 0.33 / 5.15 ms | 无样本 | 0 | 0 | 0 | 305 |
+| 全部 miss，并发 8 | 1.46 / 15.21 ms | 0.83 / 18.86 ms | 8 | 0 | 0 | 211 |
+| 大量不存在，并发 8 | 1.48 / 15.64 ms | 0.80 / 19.14 ms | 8 | 0 | 0 | 364 |
+| 全部 miss，并发 16 | 2.48 / 18.78 ms | 1.57 / 20.73 ms | 10 | 94,007（4,700/s） | 80.39 s | 480 |
+
+缓存指标：miss 场景 `shortlink_cache_gets_total{result="miss"}` 等于请求数，
+`result="fallback"` 为 0；`shortlink_cache_shed_total{path="miss"}` 分别为
+142,778（并发 8）和 122,106（并发 16）。命中场景 400,000 次全部 `hit`，没有
+`miss`、`fallback` 或 `shed`。四轮都没有 504，说明 `CACHE_FETCH_TIMEOUT=1s`
+没有误伤正常查询。
+
+### 结论
+
+- **`CACHE_MISS_CONCURRENCY=8` 作为默认值**：连接池使用峰值 8、等待为 0，给创建等写请求留了 2 个连接；过载时 503 是快速拒绝，没有请求排到 5 秒超时。
+- `16` 把成功吞吐从 4,859 提到 5,894 req/s，但连接池被顶满 10，20 秒内出现 94,007 次等待、累计 80.39 秒，p99 升到 19ms。这是用数据库排队换吞吐，不符合“数据库不被打穿”的目标；多副本时连接数还会按副本数放大，所以不选 16。
+- **`CACHE_FETCH_TIMEOUT=1s` 保持不变**：正常存储 p99 约 20ms，1s 留了两个数量级的余量；四轮都没有 504。等数据库 p99 明显上升时再重新评估。
+- 命中场景 20k req/s、服务端 p99 5.15ms、连接池零使用，说明缓存命中路径没有受这次保护影响。
+
+### 读数注意
+
+- app、PostgreSQL、Redis、vegeta 共享同一台机器，绝对数字只用于本机前后对比，不是容量规划依据。
+- 使用 HEAD 避免点击写入；GET 会多一条异步点击写路径，数字会更差。
+- miss 和不存在场景每轮使用不同的短码，窗口内每个短码只访问一次；同一短码重复访问会命中刚写入的缓存。
+- 503 是 bulkhead 主动拒绝，不是故障；客户端应退避重试。当前 503 响应没有 `Retry-After`，后续可以补。
 
 ## 签发 API Key
 
@@ -342,7 +415,7 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
-| 跳转大量 503 | Redis 读失败且回源并发已满；先查 Redis 和 `shortlink_cache_gets_total{result="fallback"}`，回源上限是每进程 8 个 |
+| 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `CACHE_MISS_CONCURRENCY` |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 在仓库根目录执行 `make migrate` |
 | `relation "links" already exists` | 库是旧初始化脚本建的，没有 `schema_migrations`。学习用的 compose 库可以 `docker compose down -v`，再 `make deps-up` 和 `make migrate` |

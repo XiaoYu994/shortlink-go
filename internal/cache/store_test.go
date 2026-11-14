@@ -70,7 +70,7 @@ func newTestRedis(t *testing.T) *redis.Client {
 // newTestStore 给不关心指标的测试一个用完即弃的 Registry。
 func newTestStore(t *testing.T, next LinkStore, rdb *redis.Client) *Store {
 	t.Helper()
-	return New(next, rdb, prometheus.NewRegistry())
+	return New(next, rdb, prometheus.NewRegistry(), Options{})
 }
 
 // newTestCode 生成每个测试独有的短码，避免测试之间和残留 key 互相影响。
@@ -914,11 +914,130 @@ func TestStoreFallbackShedsWhenConcurrencyFull(t *testing.T) {
 		wg.Wait()
 		t.Fatalf("shed requests = %d, want %d", got, shed)
 	}
+	if got := testutil.ToFloat64(s.shed.WithLabelValues(resultFallback)); got != shed {
+		close(release)
+		wg.Wait()
+		t.Fatalf("shed{path=%q} = %v, want %d", resultFallback, got, shed)
+	}
 
 	close(release)
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+/*
+TestStoreMissShedsWhenConcurrencyFull 验证普通未命中的回源上限：
+最多 MissConcurrency 个请求进入下一层存储，其余立即收到临时过载错误。
+Redis 是真实的，所有短码都不同，每个请求都会 miss 并各走一次 singleflight。
+*/
+func TestStoreMissShedsWhenConcurrencyFull(t *testing.T) {
+	rdb := newTestRedis(t)
+
+	const concurrency = 2
+	const shed = 4
+	const total = concurrency + shed
+
+	var current, peak atomic.Int32
+	release := make(chan struct{})
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		n := current.Add(1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		<-release
+		current.Add(-1)
+		return &link.Link{ID: 1, URL: "https://example.com"}, nil
+	}}
+	reg := prometheus.NewRegistry()
+	s := New(next, rdb, reg, Options{MissConcurrency: concurrency})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	codePrefix := newTestCode(t)
+	var cleanup []string
+	t.Cleanup(func() {
+		for _, code := range cleanup {
+			_ = rdb.Del(context.Background(), keyPrefix+code).Err()
+		}
+	})
+
+	var wg sync.WaitGroup
+	var busy atomic.Int32
+	errs := make(chan error, total)
+	for i := range total {
+		code := fmt.Sprintf("%s-%d", codePrefix, i)
+		cleanup = append(cleanup, code)
+		wg.Go(func() {
+			_, err := s.GetByCode(ctx, code)
+			if err == nil {
+				return
+			}
+			var temp interface{ Temporary() bool }
+			if errors.As(err, &temp) && temp.Temporary() {
+				busy.Add(1)
+				return
+			}
+			errs <- err
+		})
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for int(current.Load()+busy.Load()) < total && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := peak.Load(); got != concurrency {
+		close(release)
+		wg.Wait()
+		t.Fatalf("peak concurrent store calls = %d, want %d", got, concurrency)
+	}
+	if got := busy.Load(); got != shed {
+		close(release)
+		wg.Wait()
+		t.Fatalf("shed requests = %d, want %d", got, shed)
+	}
+	if got := testutil.ToFloat64(s.shed.WithLabelValues(resultMiss)); got != shed {
+		close(release)
+		wg.Wait()
+		t.Fatalf("shed{path=%q} = %v, want %d", resultMiss, got, shed)
+	}
+
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+/*
+TestStoreGetByCodeUsesFetchTimeout 验证回源超时独立于请求时限：
+请求 ctx 没有 deadline，回源仍然在 FetchTimeout 到点后取消，而不是等 REQUEST_TIMEOUT。
+*/
+func TestStoreGetByCodeUsesFetchTimeout(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	next := &fakeStore{get: func(ctx context.Context, _ string) (*link.Link, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	const fetchTimeout = 100 * time.Millisecond
+	s := New(next, rdb, prometheus.NewRegistry(), Options{FetchTimeout: fetchTimeout})
+
+	start := time.Now()
+	_, err := s.GetByCode(context.Background(), code)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetByCode error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("GetByCode took %v, fetch timeout %v was not applied", elapsed, fetchTimeout)
 	}
 }

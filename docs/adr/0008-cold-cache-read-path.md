@@ -1,7 +1,8 @@
 # 0008. 冷缓存和长尾短码的读路径保护
 
-- 状态：Proposed
+- 状态：Accepted
 - 日期：2026-11-13
+- 实施：2026-11-14
 
 ## 背景
 
@@ -15,32 +16,41 @@
 
 ## 决策
 
-先做读路径保护，不改变缓存格式和命中逻辑。状态是 Proposed；实施前先完成多 key 压测，用数字确认许可数和超时。
+先做读路径保护，不改变缓存格式和命中逻辑。2026-11-14 实现并完成多 key
+压测：`CACHE_MISS_CONCURRENCY=8`、`CACHE_FETCH_TIMEOUT=1s` 作为默认值，
+压测数据见 [runbook](../runbook.md)。
 
 ### 正常未命中加独立的 bulkhead
 
-- 在 `CachedStore` 里增加 `missSlots`（名字待定），与 Redis 故障时的 `fallbackSlots` 分开计数。普通 `miss` 回源也要先拿许可，拿不到直接返回临时过载错误，HTTP 层映射成 503。
+- 在 `cache.Store` 里增加 `missSlots`，与 Redis 故障时的 `fallbackSlots` 分开计数。普通 `miss` 回源也要先拿许可，拿不到直接返回临时过载错误，HTTP 层映射成 503。
 - 许可必须在 singleflight 回调内部获取，只包住数据库调用：同一短码的等待者共享领头的查询结果，不消耗额外许可；写缓存不占许可。和现有 `readStore` 的 fallback 实现保持一致。
-- 许可数先取与连接池同量级的值（例如 8–16），通过 `CACHE_MISS_CONCURRENCY` 配置；默认值在多 key 压测后确定。进程内许可乘以副本数才是数据库的总并发，多副本部署时要和连接池/PgBouncer 一起算。
-- 新增指标区分“被限流”和真实 miss/fallback，例如在 `shortlink_cache_gets_total` 增加 `shed`，或单独的 counter。计数口径按请求而不是按回源：singleflight 的等待者也会收到同一个错误，应该算一次 shed；不要只记领头请求。不要复用 `error`，否则看不出是主动拒绝还是数据库故障。
+- 许可数通过 `CACHE_MISS_CONCURRENCY` 配置，默认 8。多 key 压测对比了 8 和 16：8 让连接池使用峰值停在 8、等待为 0；16 把连接池顶满 10，20 秒内出现 94,007 次等待。多副本部署时进程内许可乘以副本数才是数据库总并发，要和连接池/PgBouncer 一起算。
+- 新增指标区分“被限流”和真实 miss/fallback。实现使用单独的
+  `shortlink_cache_shed_total{path="miss|fallback"}`，不把 `shed` 混进
+  `shortlink_cache_gets_total`，否则同一个请求会既是 `miss` 又是 `shed`。
+  计数口径按请求而不是按回源：singleflight 的等待者也会收到同一个错误，
+  应该各算一次 shed；不要只记领头请求。不要复用 `error`，否则看不出是主动拒绝
+  还是数据库故障。请求 ctx 已取消时不计数，和缓存操作耗时的口径一致。
 
 ### 回源超时独立于请求时限
 
-- 正常 miss 的回源使用单独的超时（例如 `CACHE_FETCH_TIMEOUT`，默认 1s），不再把 `REQUEST_TIMEOUT`（5s）当成排队上限。数据库正常 p99 在 20ms 量级，1s 足够；超时后快速返回 504/503，避免请求在连接池队列里挂满 5 秒。
+- 正常 miss 的回源使用单独的超时 `CACHE_FETCH_TIMEOUT`（默认 1s），不再把 `REQUEST_TIMEOUT`（5s）当成排队上限。数据库正常 p99 在 20ms 量级，1s 足够；超时后快速返回 504/503，避免请求在连接池队列里挂满 5 秒。配置校验要求它不超过 `REQUEST_TIMEOUT`，否则请求已经超时，共享回源还在后台占着数据库连接。
 - singleflight 的共享回源仍用独立 ctx（`context.WithoutCancel` 加 deadline），但 deadline 取上述回源超时，而不是原来的请求 deadline。领头请求取消不应连累等待者；超时必须对所有等待者一致。
 - 需要注意：缩短回源超时会让慢查询更早失败。先看 `shortlink_store_operation_duration_seconds` 的 p99 再定值；如果数据库正常 p99 已接近 1s，先查数据库，而不是调大超时。
 
-### 多 key 压测作为验收
+### 多 key 压测结果（2026-11-14）
 
-- 准备 N 个不同短码（例如 1 万条），在 Redis 为空时随机访问，分别测缓存命中、全部 miss、大量不存在的短码三种流量。记录 `shortlink_cache_gets_total{result}`、`go_sql_in_use_connections`、`go_sql_wait_count_total`、`go_sql_wait_duration_seconds_total`、HTTP 5xx 比例和 p99。
-- 用压测结果确定 `CACHE_MISS_CONCURRENCY` 和 `CACHE_FETCH_TIMEOUT`，把数据和结论补进 `docs/runbook.md`。没有数字之前不把默认值当作结论。
-- 验收标准是：数据库连接池不再长时间顶满、503 是快速返回而不是 5 秒后超时、进程在过载时内存和 goroutine 数量有界。命中率本身不是这项的验收指标。
+- 独立库 50 万条短链，vegeta 发 HEAD 请求（不触发点击写入），每轮 20 秒。全部命中场景 20k req/s、400,000 次请求，服务端 p99 5.15ms、连接池零使用。
+- 全部 miss 场景 12k req/s、24 万次不同短码：`CACHE_MISS_CONCURRENCY=8` 时 97,221 次 302、142,778 次 503，连接池使用峰值 8、等待 0，客户端 p99 14.35ms；并发 16 时成功吞吐从 4,859 提到 5,894 req/s，但连接池顶满 10，20 秒内等待 94,007 次，p99 升到 19ms。
+- 大量不存在场景同样 24 万次不同短码：98,208 次 404、141,793 次 503，连接池峰值 8、等待 0。
+- 四轮都没有 504；`CACHE_FETCH_TIMEOUT=1s` 相对正常存储 p99（约 20ms）留了足够余量，暂不调整。
+- 验收标准满足：连接池不再长时间顶满、503 快速返回、goroutine 峰值有界（最高 480，出现在并发 16）。详细数据和读数注意见 [runbook](../runbook.md)。
 
 ### 暂不做
 
 - L1 进程内缓存：只对热 key 有效，解决不了长尾；先不加一层一致性和内存管理成本。
 - 分布式锁/逻辑过期：解决同一个热 key 的多副本击穿，和大量不同 key 的问题不同；仍留在路线图的可选项里。
-- 只读副本、PgBouncer、CDN/边缘缓存：属于容量和部署层方案。先完成 bulkhead 和多 key 压测，确认数据库仍是瓶颈后再上；多副本部署前尤其要先解决连接数放大问题。
+- 只读副本、PgBouncer、CDN/边缘缓存：属于容量和部署层方案。bulkhead 和多 key 压测已完成；读路径在并发 8 时已经能守住连接池，这些方案等数据库再次成为瓶颈、或者要多副本部署时再评估。
 - Bloom filter：可以挡随机扫描，但维护一致性成本高；负缓存和入口限流先做。
 
 ## 后果
@@ -54,7 +64,8 @@
 
 ## 参考
 
-- `internal/cache/store.go`：`GetByCode`、`readStore`、`fallbackSlots`
+- `internal/cache/store.go`：`GetByCode`、`readStore`、`fetchContext`、`missSlots`、`fallbackSlots`
+- `internal/config/config.go`：`CACHE_MISS_CONCURRENCY`、`CACHE_FETCH_TIMEOUT`
 - `internal/cache/client.go`：Redis 超时和重试
 - `internal/httpapi/timeout.go`：`REQUEST_TIMEOUT`
 - `docs/runbook.md`：无缓存基线、缓存压测和读数注意

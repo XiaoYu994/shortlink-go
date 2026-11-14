@@ -25,12 +25,23 @@ const (
 	// 比默认连接池上限 10 小，给创建等其他查询留余量；超出就快速失败，不排队。
 	fallbackConcurrency = 8
 
-	// defaultFetchTimeout 只在请求 ctx 没有 deadline 时兜底。正常请求由 timeout 中间件设置。
-	defaultFetchTimeout = 5 * time.Second
+	/*
+		DefaultMissConcurrency 是普通未命中回源的默认并发上限。
+		多 key 压测确认 8 能让连接池留出余量、不产生等待；见 ADR 0008。
+	*/
+	DefaultMissConcurrency = 8
+
+	/*
+		DefaultFetchTimeout 是单次回源超时的默认值。
+		数据库正常 p99 在 20ms 量级，1s 足够挡掉排队；
+		它独立于 REQUEST_TIMEOUT，见 ADR 0008。
+	*/
+	DefaultFetchTimeout = time.Second
 
 	getsMetricName     = "shortlink_cache_gets_total"
 	writesMetricName   = "shortlink_cache_writes_total"
 	durationMetricName = "shortlink_cache_operation_duration_seconds"
+	shedMetricName     = "shortlink_cache_shed_total"
 
 	operationGet = "get"
 	operationSet = "set"
@@ -62,10 +73,30 @@ type LinkStore interface {
 }
 
 /*
+Options 控制回源保护。零值换成默认值，测试可以只改关心的一项。
+MissConcurrency 是普通未命中的回源许可数；FetchTimeout 是单次回源的超时。
+*/
+type Options struct {
+	MissConcurrency int
+	FetchTimeout    time.Duration
+}
+
+func (o Options) withDefaults() Options {
+	if o.MissConcurrency <= 0 {
+		o.MissConcurrency = DefaultMissConcurrency
+	}
+	if o.FetchTimeout <= 0 {
+		o.FetchTimeout = DefaultFetchTimeout
+	}
+	return o
+}
+
+/*
 Store 是带 Redis 读缓存的 LinkStore。
 
 Create 成功后写穿，盖掉负缓存，否则新短码会在 TTL 内继续 404。
-必须用指针：singleflight.Group 和 fallbackSlots 都是共享状态，复制之后就各记各的。
+必须用指针：singleflight.Group、missSlots 和 fallbackSlots 都是共享状态，
+复制之后就各记各的。
 */
 type Store struct {
 	next     LinkStore
@@ -74,13 +105,21 @@ type Store struct {
 	gets     *prometheus.CounterVec
 	writes   *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+	shed     *prometheus.CounterVec
 
+	// missSlots 是普通未命中的回源许可。和 fallbackSlots 分开：
+	// 长尾短码和 Redis 故障是两种压力，不能互相占满配额。
+	missSlots chan struct{}
 	// fallbackSlots 是 Redis 读失败时的回源许可。满了直接拒绝，排队只会一起超时。
 	fallbackSlots chan struct{}
+
+	// fetchTimeout 是单次回源的上限，独立于请求时限。
+	fetchTimeout time.Duration
 }
 
 // New 把指标注册到 registry。测试每次传新的，避免重复注册 panic。
-func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry) *Store {
+func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts Options) *Store {
+	opts = opts.withDefaults()
 	s := &Store{
 		next: next,
 		rdb:  rdb,
@@ -97,9 +136,15 @@ func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry) *Stor
 			Help:    "Cache operation duration in seconds by operation and result.",
 			Buckets: durationBuckets,
 		}, []string{"operation", "result"}),
+		shed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: shedMetricName,
+			Help: "Total number of cache fetches rejected by the concurrency limit, by path.",
+		}, []string{"path"}),
+		missSlots:     make(chan struct{}, opts.MissConcurrency),
 		fallbackSlots: make(chan struct{}, fallbackConcurrency),
+		fetchTimeout:  opts.FetchTimeout,
 	}
-	registry.MustRegister(s.gets, s.writes, s.duration)
+	registry.MustRegister(s.gets, s.writes, s.duration, s.shed)
 	return s
 }
 
@@ -115,10 +160,11 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 /*
 GetByCode 未命中或 Redis 故障时回源。负缓存的 value 是 JSON null。
 
-singleflight 的共享回源用独立 ctx：领头请求取消时，等待者不再跟着拿到
-context.Canceled。回源保留原来的 deadline，仍受 REQUEST_TIMEOUT 约束。
-Redis 读失败时限制回源并发，超过上限快速返回临时过载错误，由 HTTP 层映射成 503。
+普通未命中和 Redis 读失败（fallback）各有回源并发上限，超过上限快速返回
+临时过载错误，由 HTTP 层映射成 503。回源用独立 ctx 和独立超时：
+领头请求取消不再连累等待者，排队上限也不再是 REQUEST_TIMEOUT。
 每个请求按自己的读取结果计数，包括等在 singleflight 里的；计数和耗时都在 readCache 里记。
+被限流的请求按请求计一次 shed，等待者也会收到同一个错误，见 ADR 0008。
 */
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	key := keyPrefix + code
@@ -138,16 +184,22 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 
 	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数。
 	l, err, _ := doTyped[*link.Link](&s.group, key, func() (*link.Link, error) {
-		fetchCtx, cancel := fetchContext(ctx)
+		fetchCtx, cancel := fetchContext(ctx, s.fetchTimeout)
 		defer cancel()
 
-		found, err := s.readStore(fetchCtx, code, result == resultFallback)
+		found, err := s.readStore(fetchCtx, code, result)
 		if err != nil && !errors.Is(err, link.ErrNotFound) {
 			return nil, err // 真正的错误不写缓存，下次请求应该重试
 		}
 		s.writeCache(fetchCtx, key, found)
 		return found, err
 	})
+	if ctx.Err() == nil {
+		var shedErr fetchShedError
+		if errors.As(err, &shedErr) {
+			s.shed.WithLabelValues(shedErr.path).Inc()
+		}
+	}
 	return l, err
 }
 
@@ -271,32 +323,37 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 }
 
 /*
-fetchContext 给 singleflight 的共享回源派生独立 ctx。
-WithoutCancel 去掉取消信号、保留 value；deadline 单独加回来，
-回源仍然不能超过请求的处理时限。正常请求由 timeout 中间件设置 deadline，
-没有 deadline 时（测试、直接调用）用 defaultFetchTimeout 兜底。
+fetchContext 给 singleflight 的共享回源派生独立 ctx 和独立超时。
+WithoutCancel 去掉取消信号、保留 value；deadline 用回源超时，
+不再借用请求的 REQUEST_TIMEOUT。领头请求取消时，等待者仍能拿到结果；
+排队等待数据库的时间也不会再挂满整个请求时限。
 */
-func fetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	detached := context.WithoutCancel(ctx)
-	if deadline, ok := ctx.Deadline(); ok {
-		return context.WithDeadline(detached, deadline)
-	}
-	return context.WithTimeout(detached, defaultFetchTimeout)
+func fetchContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
 /*
-readStore 回源。limited 为 true（Redis 读失败）时先抢一个回源许可，
-抢不到立即返回临时过载错误，不排队：Redis 故障时让请求快速失败，
-比把数据库连接池排满后一起超时好。许可只包住数据库调用，写缓存不占着它。
+readStore 回源。path 决定走哪条限流：普通 miss 用 missSlots，
+Redis 读失败（fallback）用 fallbackSlots。两条路径分开，
+Redis 故障不会把正常回源的配额占满。
+
+抢不到许可立即返回临时过载错误，不排队：长尾短码或 Redis 故障时
+让请求快速失败，比把数据库连接池排满后一起超时好。
+许可只包住数据库调用，写缓存不占着它。
 */
-func (s *Store) readStore(ctx context.Context, code string, limited bool) (*link.Link, error) {
-	if limited {
-		select {
-		case s.fallbackSlots <- struct{}{}:
-			defer func() { <-s.fallbackSlots }()
-		default:
-			return nil, fallbackBusyError{}
-		}
+func (s *Store) readStore(ctx context.Context, code, path string) (*link.Link, error) {
+	slots := s.missSlots
+	if path == resultFallback {
+		slots = s.fallbackSlots
+	} else {
+		// resultSkipped 是 ctx 已取消，仍然按普通回源处理。
+		path = resultMiss
+	}
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		return nil, fetchShedError{path: path}
 	}
 	return s.next.GetByCode(ctx, code)
 }
@@ -331,9 +388,16 @@ func jitteredTTL(ttl time.Duration) time.Duration {
 	return ttl - rand.N(step)
 }
 
-// fallbackBusyError 表示 Redis 读失败，同时回源的请求数已达上限。
-// Temporary 让 HTTP 层返回 503 而不是 500：这是临时过载，不是程序错误。
-type fallbackBusyError struct{}
+/*
+fetchShedError 表示回源并发已达上限。path 区分普通未命中和 Redis 故障降级。
+Temporary 让 HTTP 层返回 503 而不是 500：这是临时过载，不是程序错误。
+*/
+type fetchShedError struct {
+	path string
+}
 
-func (fallbackBusyError) Error() string   { return "cache fallback concurrency limit reached" }
-func (fallbackBusyError) Temporary() bool { return true }
+func (e fetchShedError) Error() string {
+	return "cache " + e.path + " fetch concurrency limit reached"
+}
+
+func (fetchShedError) Temporary() bool { return true }

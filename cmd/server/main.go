@@ -91,7 +91,10 @@ func run() error {
 
 	// 组合顺序：HTTP -> cache -> storemetrics -> postgres。
 	// 指标装饰器贴着数据库，缓存命中不会计入存储耗时。
-	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry)
+	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
+		MissConcurrency: cfg.CacheMissConcurrency,
+		FetchTimeout:    cfg.CacheFetchTimeout,
+	})
 	// pgStore 同时负责查链接和用 API Key 哈希换租户。缓存不参与鉴权。
 	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry, clicks, pgStore)
 
