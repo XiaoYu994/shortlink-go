@@ -23,8 +23,10 @@ const (
 	defaultAddr = ":8080"
 	// defaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
 	defaultShutdownTimeout = 10 * time.Second
-	// defaultRequestTimeout 是单个请求的处理时限。main 让读写超时比它宽松，
-	// 保证读完 body，并在超时后还有时间把 504 写回客户端。
+	/*
+		defaultRequestTimeout 是单个请求的处理时限。main 让读写超时比它宽松，
+		保证读完 body，并在超时后还有时间把 504 写回客户端。
+	*/
 	defaultRequestTimeout = 5 * time.Second
 	// 回源保护的默认值和 cache 包共用，避免两处漂移。
 	defaultCacheMissConcurrency = cache.DefaultMissConcurrency
@@ -49,11 +51,15 @@ type Config struct {
 	// CacheFetchTimeout 是单次回源超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
 	CacheFetchTimeout time.Duration
 
-	// VisitorSalt 是按天访客哈希的 HMAC 密钥。redirector 启动时要求非空；
-	// console 不用盐。盐不能提交到仓库，生产从密钥管理注入。
+	/*
+		VisitorSalt 是按天访客哈希的 HMAC 密钥。redirector 启动时要求非空；
+		console 不用盐。盐不能提交到仓库，生产从密钥管理注入。
+	*/
 	VisitorSalt string
-	// TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
-	// 只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+	/*
+		TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
+		只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+	*/
 	TrustProxyHeaders bool
 }
 

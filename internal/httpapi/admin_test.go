@@ -407,5 +407,3 @@ func TestAdminStoreErrorIs500(t *testing.T) {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
-
-// slices 用于比较类别顺序辅助函数的输出；放在这里避免测试文件之间重复导入。

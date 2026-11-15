@@ -23,8 +23,10 @@ const (
 	// negativeTTL 更短：不存在的短码不该久占内存，又要挡住随机短码打数据库。
 	negativeTTL = time.Minute
 
-	// fallbackConcurrency 是 Redis 读失败时同时回源的最大请求数。
-	// 比默认连接池上限 10 小，给创建等其他查询留余量；超出就快速失败，不排队。
+	/*
+		fallbackConcurrency 是 Redis 读失败时同时回源的最大请求数。
+		比默认连接池上限 10 小，给创建等其他查询留余量；超出就快速失败，不排队。
+	*/
 	fallbackConcurrency = 8
 
 	/*
@@ -136,8 +138,10 @@ type Store struct {
 	duration *prometheus.HistogramVec
 	shed     *prometheus.CounterVec
 
-	// missSlots 是普通未命中的回源许可。和 fallbackSlots 分开：
-	// 长尾短码和 Redis 故障是两种压力，不能互相占满配额。
+	/*
+		missSlots 是普通未命中的回源许可。和 fallbackSlots 分开：
+		长尾短码和 Redis 故障是两种压力，不能互相占满配额。
+	*/
 	missSlots chan struct{}
 	// fallbackSlots 是 Redis 读失败时的回源许可。满了直接拒绝，排队只会一起超时。
 	fallbackSlots chan struct{}
@@ -206,8 +210,10 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 
 	cached, result := s.readCache(ctx, key, code)
 	if result == resultHit {
-		// TTL 到点后 GET 读不到这个 key。这里再看一次 ExpiresAt：
-		// 时钟前跳，或 key 的 TTL 比链接寿命更长时，仍然不跳过期链接。
+		/*
+			TTL 到点后 GET 读不到这个 key。这里再看一次 ExpiresAt：
+			时钟前跳，或 key 的 TTL 比链接寿命更长时，仍然不跳过期链接。
+		*/
 		if cached == nil || cached.Expired(time.Now()) {
 			if cached != nil {
 				_ = s.rdb.Del(ctx, key).Err()
@@ -226,8 +232,10 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		if err != nil && !errors.Is(err, link.ErrNotFound) {
 			return nil, err // 真正的错误不写缓存，下次请求应该重试
 		}
-		// 回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
-		// 这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
+		/*
+			回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
+			这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
+		*/
 		s.writeCache(fetchCtx, key, found, writeNX)
 		return found, err
 	})

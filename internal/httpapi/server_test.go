@@ -41,7 +41,7 @@ func authorize(req *http.Request) {
 }
 
 // testServer 用测试密钥组装 Server，避免每个用例都传一遍 authenticator。
-// 只注入 LinkStore；需要管理路由的用例用 newAdminServer 或 NewConsole。
+// 只注入 LinkStore；需要管理路由的用例用 newAdminTestServer 或 NewConsole。
 func testServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
 	return newServer(serverDeps{
 		logger:         logger,

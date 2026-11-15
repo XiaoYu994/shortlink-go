@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"shortlink/internal/link"
 )
@@ -116,29 +115,33 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 	}
 
 	var (
-		rows *sql.Rows
-		err  error
+		rows   *sql.Rows
+		err    error
+		cursor link.ListCursor
 	)
+	if opts.Cursor != nil {
+		cursor = *opts.Cursor
+	}
 	switch opts.Sort {
 	case link.SortID:
 		if opts.Cursor == nil {
 			rows, err = s.db.QueryContext(ctx, listLinksFirstByIDSQL, opts.TenantID, opts.Limit)
 		} else {
-			rows, err = s.db.QueryContext(ctx, listLinksAfterIDSQL, opts.TenantID, opts.Cursor.ID, opts.Limit)
+			rows, err = s.db.QueryContext(ctx, listLinksAfterIDSQL, opts.TenantID, cursor.ID, opts.Limit)
 		}
 	case link.SortClicks:
 		if opts.Cursor == nil {
 			rows, err = s.db.QueryContext(ctx, listLinksFirstByClicksSQL, opts.TenantID, opts.Limit)
 		} else {
 			rows, err = s.db.QueryContext(ctx, listLinksAfterClicksSQL,
-				opts.TenantID, opts.Cursor.Clicks, opts.Cursor.ID, opts.Limit)
+				opts.TenantID, cursor.Clicks, cursor.ID, opts.Limit)
 		}
 	case link.SortClicksToday:
 		if opts.Cursor == nil {
 			rows, err = s.db.QueryContext(ctx, listLinksFirstByClicksTodaySQL, opts.TenantID, opts.Limit)
 		} else {
 			rows, err = s.db.QueryContext(ctx, listLinksAfterClicksTodaySQL,
-				opts.TenantID, opts.Cursor.ClicksToday, opts.Cursor.ID, opts.Limit)
+				opts.TenantID, cursor.ClicksToday, cursor.ID, opts.Limit)
 		}
 	default:
 		return nil, fmt.Errorf("list links: unknown sort %q", opts.Sort)
@@ -256,9 +259,4 @@ func scanAdminLink(scanner rowScanner) (*link.AdminLink, error) {
 	}
 	got.CreatedAt = got.CreatedAt.UTC()
 	return &got, nil
-}
-
-// dayString 把时间归一到 UTC 日期，用作 DATE 列和日聚合的键。
-func dayString(t time.Time) string {
-	return t.UTC().Format("2006-01-02")
 }

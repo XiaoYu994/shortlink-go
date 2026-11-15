@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
@@ -50,11 +49,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := s.admin.Update(r.Context(), tn.ID, code, update)
 	if err != nil {
-		if errors.Is(err, link.ErrNotFound) {
-			s.writeLinkNotFound(r, w)
-			return
-		}
-		s.handleStoreError(w, r, "update link", err, "code", code)
+		s.handleAdminStoreError(w, r, "update link", err, code)
 		return
 	}
 	s.writeJSON(r.Context(), w, http.StatusOK, newLinkResponse(*updated))
@@ -68,19 +63,8 @@ decodeUpdateRequest 解析 PATCH 语义：
   - 两个字段都没出现、空对象和未知字段都返回 400。
 */
 func decodeUpdateRequest(body []byte) (link.Update, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-
 	var req updateLinkRequest
-	if err := dec.Decode(&req); err != nil {
-		return link.Update{}, err
-	}
-	// 和创建一样，Decoder 只消费第一个 JSON 值，要确认后面没有第二个。
-	var extra json.RawMessage
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return link.Update{}, errExtraJSON
-		}
+	if err := decodeStrict(body, &req); err != nil {
 		return link.Update{}, err
 	}
 
@@ -134,5 +118,5 @@ func (s *Server) writeDecodeError(w http.ResponseWriter, r *http.Request, err er
 		s.writeError(r.Context(), w, http.StatusBadRequest, string(bad))
 		return
 	}
-	s.writeError(r.Context(), w, http.StatusBadRequest, createRequestMessage(err))
+	s.writeError(r.Context(), w, http.StatusBadRequest, requestMessage(err))
 }

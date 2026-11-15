@@ -57,13 +57,17 @@ type ClickRecorder interface {
 
 // RedirectOptions 是跳转进程的额外依赖。
 type RedirectOptions struct {
-	// Clicks 为 nil 时跳转不记点击。传入的必须是未装箱的 nil：
-	// 带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
+	/*
+		Clicks 为 nil 时跳转不记点击。传入的必须是未装箱的 nil：
+		带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
+	*/
 	Clicks ClickRecorder
 	// VisitorSalt 是按天访客哈希的 HMAC 密钥；为空时不记访客，点击本身照常记录。
 	VisitorSalt []byte
-	// TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
-	// 只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+	/*
+		TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
+		只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+	*/
 	TrustProxyHeaders bool
 }
 
@@ -224,4 +228,16 @@ func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op str
 	args := append([]any{"err", err}, attrs...)
 	s.logger.ErrorContext(r.Context(), op, args...)
 	s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+}
+
+/*
+handleAdminStoreError 统一管理接口的存储错误映射：
+找不到（包括其他租户）一律 404，其余交给 handleStoreError。
+*/
+func (s *Server) handleAdminStoreError(w http.ResponseWriter, r *http.Request, op string, err error, code string) {
+	if errors.Is(err, link.ErrNotFound) {
+		s.writeLinkNotFound(r, w)
+		return
+	}
+	s.handleStoreError(w, r, op, err, "code", code)
 }

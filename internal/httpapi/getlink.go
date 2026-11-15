@@ -1,11 +1,9 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 
 	"shortlink/internal/idgen"
-	"shortlink/internal/link"
 )
 
 /*
@@ -27,11 +25,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	got, err := s.admin.GetForTenant(r.Context(), tn.ID, code)
 	if err != nil {
-		if errors.Is(err, link.ErrNotFound) {
-			s.writeLinkNotFound(r, w)
-			return
-		}
-		s.handleStoreError(w, r, "get link", err, "code", code)
+		s.handleAdminStoreError(w, r, "get link", err, code)
 		return
 	}
 	s.writeJSON(r.Context(), w, http.StatusOK, newLinkResponse(*got))

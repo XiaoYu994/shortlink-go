@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,11 +37,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts, pageLimit, err := parseListOptions(r, tn.ID)
+	opts, err := parseListOptions(r, tn.ID)
 	if err != nil {
 		s.writeError(r.Context(), w, http.StatusBadRequest, err.Error())
 		return
 	}
+	pageLimit := opts.Limit - 1
 
 	// 多要一条用来判断有没有下一页，不额外查询总数。
 	items, err := s.admin.List(r.Context(), opts)
@@ -65,18 +65,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(r.Context(), w, http.StatusOK, resp)
 }
 
-/*
-parseListOptions 解析 limit、sort 和 cursor，并把 limit 加一交给存储。
-返回的 pageLimit 是客户端看到的页大小，opts.Limit 是实际查询条数。
-*/
-func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, int, error) {
+// parseListOptions 解析 limit、sort 和 cursor；Limit 已经加一，用来判断有没有下一页。
+func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, error) {
 	query := r.URL.Query()
 
 	pageLimit := defaultListLimit
 	if raw := query.Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n <= 0 || n > maxListLimit {
-			return link.ListOptions{}, 0, badRequestError("invalid limit")
+			return link.ListOptions{}, badRequestError("invalid limit")
 		}
 		pageLimit = n
 	}
@@ -87,13 +84,13 @@ func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, int, e
 		case link.SortID, link.SortClicks, link.SortClicksToday:
 			sort = link.Sort(raw)
 		default:
-			return link.ListOptions{}, 0, badRequestError("invalid sort")
+			return link.ListOptions{}, badRequestError("invalid sort")
 		}
 	}
 
 	cursor, err := decodeListCursor(query.Get("cursor"), sort)
 	if err != nil {
-		return link.ListOptions{}, 0, err
+		return link.ListOptions{}, err
 	}
 
 	return link.ListOptions{
@@ -101,7 +98,7 @@ func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, int, e
 		Limit:    pageLimit + 1,
 		Sort:     sort,
 		Cursor:   cursor,
-	}, pageLimit, nil
+	}, nil
 }
 
 /*
@@ -130,8 +127,8 @@ func decodeListCursor(raw string, sort link.Sort) (*link.ListCursor, error) {
 
 	switch sort {
 	case link.SortID:
-		id, err := parseNonNegative(raw)
-		if err != nil || id <= 0 {
+		id, ok := parseNonNegative(raw)
+		if !ok || id <= 0 {
 			return nil, badRequestError("invalid cursor")
 		}
 		return &link.ListCursor{ID: id}, nil
@@ -141,12 +138,12 @@ func decodeListCursor(raw string, sort link.Sort) (*link.ListCursor, error) {
 		if !ok {
 			return nil, badRequestError("invalid cursor")
 		}
-		key, err := parseNonNegative(keyPart)
-		if err != nil {
+		key, ok := parseNonNegative(keyPart)
+		if !ok {
 			return nil, badRequestError("invalid cursor")
 		}
-		id, err := parseNonNegative(idPart)
-		if err != nil || id <= 0 {
+		id, ok := parseNonNegative(idPart)
+		if !ok || id <= 0 {
 			return nil, badRequestError("invalid cursor")
 		}
 		if sort == link.SortClicks {
@@ -158,13 +155,13 @@ func decodeListCursor(raw string, sort link.Sort) (*link.ListCursor, error) {
 }
 
 // parseNonNegative 只接受十进制非负整数，拒绝前导加号、空格和溢出。
-func parseNonNegative(s string) (int64, error) {
+func parseNonNegative(s string) (int64, bool) {
 	if s == "" || strings.ContainsAny(s, "+- ") {
-		return 0, errors.New("not a non-negative integer")
+		return 0, false
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n < 0 {
-		return 0, errors.New("not a non-negative integer")
+		return 0, false
 	}
-	return n, nil
+	return n, true
 }

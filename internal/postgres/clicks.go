@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"shortlink/internal/click"
+	"shortlink/internal/link"
 )
 
 /*
@@ -52,6 +53,16 @@ ON CONFLICT DO NOTHING`
 SET clicks = l.clicks + data.n
 FROM unnest($1::bigint[], $2::bigint[]) AS data(id, n)
 WHERE l.id = data.id`
+)
+
+/*
+维度名同时用于写入和统计读取；两边共用常量，改名时不会一边改一边漏。
+取值和迁移里的 CHECK 约束保持一致。
+*/
+const (
+	dimensionReferrer = "referrer"
+	dimensionDevice   = "device"
+	dimensionClient   = "client"
 )
 
 type clickDayKey struct {
@@ -131,15 +142,15 @@ func aggregateClicks(clicks []click.Click) (
 			// Recorder 会补时间；直接调用存储的测试也兜底一次，避免落到公元 1 年。
 			at = time.Now().UTC()
 		}
-		day := dayString(at)
+		day := link.DayKey(at)
 		key := clickDayKey{linkID: c.LinkID, day: day}
 		daily[key]++
 		totals[c.LinkID]++
 
 		for _, dim := range [...]struct{ name, value string }{
-			{"referrer", c.Referrer},
-			{"device", c.Device},
-			{"client", c.Client},
+			{dimensionReferrer, c.Referrer},
+			{dimensionDevice, c.Device},
+			{dimensionClient, c.Client},
 		} {
 			if !validDimensionValue(dim.value) {
 				continue
@@ -158,8 +169,10 @@ func aggregateClicks(clicks []click.Click) (
 	return daily, dimensions, visitors, totals
 }
 
-// validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 255 字节。
-// 无效 UTF-8 会让 PostgreSQL 拒绝整批写入，直接在 Go 里跳过这一个维度。
+/*
+validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 255 字节。
+无效 UTF-8 会让 PostgreSQL 拒绝整批写入，直接在 Go 里跳过这一个维度。
+*/
 func validDimensionValue(v string) bool {
 	return v != "" && len(v) <= 255 && utf8.ValidString(v)
 }

@@ -1,10 +1,7 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
-
-	"shortlink/internal/link"
 )
 
 /*
@@ -26,11 +23,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.admin.Delete(r.Context(), tn.ID, code); err != nil {
-		if errors.Is(err, link.ErrNotFound) {
-			s.writeLinkNotFound(r, w)
-			return
-		}
-		s.handleStoreError(w, r, "delete link", err, "code", code)
+		s.handleAdminStoreError(w, r, "delete link", err, code)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

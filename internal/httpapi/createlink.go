@@ -29,7 +29,7 @@ var errExtraJSON = errors.New("extra JSON value")
 /*
 badRequestError 的文本就是要返回给客户端的短句。
 解码时已经能判断的错误（例如 PATCH 什么都没改）用它，
-不用再经过 createRequestMessage 的 JSON 语法映射。
+不用再经过 requestMessage 的 JSON 语法映射。
 */
 type badRequestError string
 
@@ -56,7 +56,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	req, err := decodeCreateRequest(body)
 	if err != nil {
-		s.writeError(r.Context(), w, http.StatusBadRequest, createRequestMessage(err))
+		s.writeError(r.Context(), w, http.StatusBadRequest, requestMessage(err))
 		return
 	}
 
@@ -72,10 +72,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 租户来自鉴权中间件。请求 JSON 里没有这个字段，客户端传了会被当成未知字段拒绝。
-	tn, ok := principalFrom(r.Context())
+	tn, ok := s.principal(w, r)
 	if !ok {
-		s.logger.ErrorContext(r.Context(), "create link", "err", errors.New("missing tenant"))
-		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	l.TenantID = tn.ID
@@ -97,23 +95,34 @@ DisallowUnknownFields 只在 Decoder 上，而 Decoder 只消费第一个 JSON �
 所以还要再读一次，确认后面没有另一个值。
 */
 func decodeCreateRequest(body []byte) (createLinkRequest, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-
 	var req createLinkRequest
-	if err := dec.Decode(&req); err != nil {
-		return createLinkRequest{}, err
-	}
-
-	// RawMessage 接住第二个值。解进空结构体会把对方的字段报成未知字段。
-	var extra json.RawMessage
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return createLinkRequest{}, errExtraJSON
-		}
+	if err := decodeStrict(body, &req); err != nil {
 		return createLinkRequest{}, err
 	}
 	return req, nil
+}
+
+/*
+decodeStrict 解码一个恰好完整的 JSON 值：
+未知字段返回错误，第一个值后面还有内容也返回错误。
+创建和修改共用这份规则。RawMessage 接住第二个值，
+解进空结构体会把对方的字段报成未知字段。
+*/
+func decodeStrict(body []byte, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errExtraJSON
+		}
+		return err
+	}
+	return nil
 }
 
 /*
@@ -142,11 +151,11 @@ func (s *Server) readSmallBody(w http.ResponseWriter, r *http.Request) ([]byte, 
 }
 
 /*
-createRequestMessage 把解码错误收成给客户端的短句。
+requestMessage 把解码错误收成给客户端的短句。
 expires_at 写成 "tomorrow" 时 JSON 本身是合法的，不能报成 invalid JSON body。
 encoding/json 把未知字段报成普通 error，文本以 json: unknown field 开头。
 */
-func createRequestMessage(err error) string {
+func requestMessage(err error) string {
 	var parseErr *time.ParseError
 	if errors.As(err, &parseErr) {
 		return "invalid expires_at"

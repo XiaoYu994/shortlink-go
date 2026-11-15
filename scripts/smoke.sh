@@ -134,6 +134,13 @@ request_as() { # key base method path [json]
 	fi
 }
 
+# request_redirect 发一次带 Referer/User-Agent 的跳转，用来验证点击元数据。
+# 和上面两个 helper 共用输出文件、超时和 NO_PROXY 设置。
+request_redirect() { # base path referer user-agent
+	curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+		-H "Referer: $3" -A "$4" "$1$2"
+}
+
 header() { # name
 	grep -i "^$1:" "$TMP/headers" | head -n 1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r'
 }
@@ -273,10 +280,9 @@ newurl="https://example.com/smoke-updated-$$-$(date +%s)"
 status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$code" "{\"url\":\"$newurl\"}")
 assert_eq "$status" 200 'PATCH /api/v1/links/{code} 状态码'
 grep -q "\"url\":\"$newurl\"" "$TMP/body" || fail 'PATCH 响应里没有新 URL'
-status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
-	-H 'Referer: https://news.ycombinator.com/item?id=1' \
-	-A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' \
-	"$REDIRECTOR_BASE/r/$code")
+status=$(request_redirect "$REDIRECTOR_BASE" "/r/$code" \
+	'https://news.ycombinator.com/item?id=1' \
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
 assert_eq "$status" 302 '修改后跳转状态码'
 assert_eq "$(header Location)" "$newurl" '修改后跳转 Location（console 应写穿缓存）'
 

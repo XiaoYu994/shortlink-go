@@ -129,3 +129,15 @@ func TestLinkExpired(t *testing.T) {
 		})
 	}
 }
+
+func TestDayStartAndKey(t *testing.T) {
+	// 本地已经是 11 月 16 日，UTC 还是 11 月 15 日；日聚合按 UTC 算。
+	at := time.Date(2026, 11, 16, 3, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	want := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	if got := DayStart(at); !got.Equal(want) {
+		t.Errorf("DayStart = %v, want %v", got, want)
+	}
+	if got, want := DayKey(at), "2026-11-15"; got != want {
+		t.Errorf("DayKey = %q, want %q", got, want)
+	}
+}

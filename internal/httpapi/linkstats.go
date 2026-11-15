@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 	"time"
 
@@ -87,11 +86,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	stats, err := s.stats.Stats(r.Context(), tn.ID, code, from, to)
 	if err != nil {
-		if errors.Is(err, link.ErrNotFound) {
-			s.writeLinkNotFound(r, w)
-			return
-		}
-		s.handleStoreError(w, r, "link stats", err, "code", code)
+		s.handleAdminStoreError(w, r, "link stats", err, code)
 		return
 	}
 	s.writeJSON(r.Context(), w, http.StatusOK, newLinkStatsResponse(stats))
@@ -114,7 +109,7 @@ func parseStatsRange(r *http.Request, now time.Time) (time.Time, time.Time, erro
 	}
 
 	if !hasTo {
-		to = dayStart(now)
+		to = link.DayStart(now)
 	}
 	if !hasFrom {
 		from = to.AddDate(0, 0, -defaultStatsDays)
@@ -128,8 +123,10 @@ func parseStatsRange(r *http.Request, now time.Time) (time.Time, time.Time, erro
 	return from, to, nil
 }
 
-// parseDayParam 把 RFC3339 时间转成 UTC 日期零点。第二个返回值表示参数是否出现，
-// 不用零值判断，避免把合法的公元 1 年当成没传。
+/*
+parseDayParam 把 RFC3339 时间转成 UTC 日期零点。第二个返回值表示参数是否出现，
+不用零值判断，避免把合法的公元 1 年当成没传。
+*/
 func parseDayParam(raw, name string) (time.Time, bool, error) {
 	if raw == "" {
 		return time.Time{}, false, nil
@@ -138,13 +135,7 @@ func parseDayParam(raw, name string) (time.Time, bool, error) {
 	if err != nil {
 		return time.Time{}, false, badRequestError("invalid " + name)
 	}
-	return dayStart(at), true, nil
-}
-
-// dayStart 取时间所在 UTC 日期的零点。和存储层的日聚合口径一致。
-func dayStart(t time.Time) time.Time {
-	y, m, d := t.UTC().Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	return link.DayStart(at), true, nil
 }
 
 // newLinkStatsResponse 把领域结果补零成 API 表示。

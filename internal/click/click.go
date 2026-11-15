@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"shortlink/internal/link"
 )
 
 /*
@@ -211,7 +213,7 @@ func visitorHash(salt []byte, at time.Time, clientIP, ua string) []byte {
 	}
 	mac := hmac.New(sha256.New, salt)
 	mac.Write([]byte("v1\x00"))
-	mac.Write([]byte(at.UTC().Format("2006-01-02")))
+	mac.Write([]byte(link.DayKey(at)))
 	mac.Write([]byte{0})
 	mac.Write([]byte(clientIP))
 	mac.Write([]byte{0})

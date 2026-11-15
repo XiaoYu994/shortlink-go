@@ -37,7 +37,7 @@ const (
 var durationBuckets = prometheus.ExponentialBuckets(0.0001, 2, 18)
 
 /*
-LinkStore 是装饰器需要的最小存储能力。接口由使用方定义，
+LinkStore 是装饰器需要透传的完整存储能力。接口由使用方定义，
 这样 storemetrics 不依赖 httpapi，也不依赖具体的 postgres 实现。
 */
 type LinkStore interface {

@@ -167,6 +167,20 @@ func (l *Link) Expired(now time.Time) bool {
 }
 
 /*
+DayStart 取时间所在 UTC 日期的零点。
+点击日聚合、统计范围和今日排序都用这个口径，避免各处按本地时区取整。
+*/
+func DayStart(t time.Time) time.Time {
+	y, m, d := t.UTC().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
+// DayKey 返回 UTC 日期字符串，格式 2006-01-02，用作日聚合的键。
+func DayKey(t time.Time) string {
+	return t.UTC().Format("2006-01-02")
+}
+
+/*
 ValidateURL 校验原始 URL，返回去掉首尾空白后的值。
 创建和修改共用这一份规则，避免两处漂移；失败返回 *ValidationError。
 */

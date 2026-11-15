@@ -29,8 +29,8 @@ func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to
 
 	stats := &link.Stats{
 		Code: code,
-		From: dayStart(from),
-		To:   dayStart(to),
+		From: link.DayStart(from),
+		To:   link.DayStart(to),
 	}
 	var linkID int64
 	err = tx.QueryRowContext(ctx,
@@ -43,7 +43,7 @@ func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to
 		return nil, fmt.Errorf("link stats: %w", err)
 	}
 
-	fromDay, toDay := dayString(stats.From), dayString(stats.To)
+	fromDay, toDay := link.DayKey(stats.From), link.DayKey(stats.To)
 	if err := readDailyClicks(ctx, tx, linkID, fromDay, toDay, stats); err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ ORDER BY day`, linkID, from, to)
 		if err := rows.Scan(&day, &clicks); err != nil {
 			return fmt.Errorf("link stats daily clicks: %w", err)
 		}
-		stats.Clicks = append(stats.Clicks, link.DayClicks{Day: dayStart(day), Clicks: clicks})
+		stats.Clicks = append(stats.Clicks, link.DayClicks{Day: link.DayStart(day), Clicks: clicks})
 		stats.RangeClicks += clicks
 	}
 	if err := rows.Err(); err != nil {
@@ -97,13 +97,13 @@ readDimensionClicks 分三次读三类维度。
 */
 func readDimensionClicks(ctx context.Context, tx *sql.Tx, linkID int64, from, to string, stats *link.Stats) error {
 	var err error
-	if stats.Referrers, err = readDimension(ctx, tx, linkID, from, to, "referrer", 10); err != nil {
+	if stats.Referrers, err = readDimension(ctx, tx, linkID, from, to, dimensionReferrer, 10); err != nil {
 		return err
 	}
-	if stats.Devices, err = readDimension(ctx, tx, linkID, from, to, "device", 0); err != nil {
+	if stats.Devices, err = readDimension(ctx, tx, linkID, from, to, dimensionDevice, 0); err != nil {
 		return err
 	}
-	stats.Clients, err = readDimension(ctx, tx, linkID, from, to, "client", 0)
+	stats.Clients, err = readDimension(ctx, tx, linkID, from, to, dimensionClient, 0)
 	return err
 }
 
@@ -161,17 +161,11 @@ ORDER BY day`, linkID, from, to)
 		if err := rows.Scan(&day, &visitors); err != nil {
 			return fmt.Errorf("link stats visitors: %w", err)
 		}
-		stats.DailyVisitors = append(stats.DailyVisitors, link.DayVisitors{Day: dayStart(day), Visitors: visitors})
+		stats.DailyVisitors = append(stats.DailyVisitors, link.DayVisitors{Day: link.DayStart(day), Visitors: visitors})
 		stats.UniqueVisitors += visitors
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("link stats visitors: %w", err)
 	}
 	return nil
-}
-
-// dayStart 取时间所在 UTC 日期的零点。
-func dayStart(t time.Time) time.Time {
-	y, m, d := t.UTC().Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
