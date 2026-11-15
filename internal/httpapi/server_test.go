@@ -41,7 +41,7 @@ func authorize(req *http.Request) {
 
 // testServer 用测试密钥组装 Server，避免每个用例都传一遍 authenticator。
 func testServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
-	return NewServer(logger, store, requestTimeout, registry, clicks, allowKey{})
+	return newServer(logger, store, requestTimeout, registry, clicks, allowKey{})
 }
 
 // newTestRegistry 返回一个独立的 Registry，并注册 Go 运行时指标。
@@ -66,7 +66,7 @@ func TestHealthz(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv.RedirectRoutes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -76,15 +76,91 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+/*
+TestProcessRoutes 验证两个进程的路由边界：
+redirector 只有公开跳转，console 只有管理 API，两边都暴露健康检查和指标。
+两个构造函数各自注册 HTTP 指标，所以这里用两个独立的 Registry。
+*/
+func TestProcessRoutes(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := &stubStore{links: map[string]*link.Link{
+		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/old"},
+	}}
+	redirector := NewRedirector(logger, store, 5*time.Second, newTestRegistry(), nil)
+	console := NewConsole(logger, store, 5*time.Second, newTestRegistry(), allowKey{})
+
+	t.Run("redirector redirects", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		redirector.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+		if rec.Code != http.StatusFound {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+		}
+	})
+
+	t.Run("console creates", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/new"}`))
+		authorize(req)
+		rec := httptest.NewRecorder()
+		console.ConsoleRoutes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+	})
+
+	t.Run("redirector has no admin route", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com"}`))
+		authorize(req)
+		rec := httptest.NewRecorder()
+		redirector.RedirectRoutes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("console has no redirect route", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		console.ConsoleRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("both expose operational endpoints", func(t *testing.T) {
+		handlers := map[string]http.Handler{
+			"redirector": redirector.RedirectRoutes(),
+			"console":    console.ConsoleRoutes(),
+		}
+		for name, handler := range handlers {
+			t.Run(name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+				if rec.Code != http.StatusOK {
+					t.Errorf("GET /healthz = %d, want %d", rec.Code, http.StatusOK)
+				}
+
+				rec = httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+				if rec.Code != http.StatusOK {
+					t.Errorf("GET %s = %d, want %d", metricsPath, rec.Code, http.StatusOK)
+				}
+				if !strings.Contains(rec.Body.String(), "go_goroutines") {
+					t.Errorf("GET %s body does not contain go_goroutines", metricsPath)
+				}
+			})
+		}
+	})
+}
+
 func TestCreateAndRedirect(t *testing.T) {
 	srv := newTestServer()
-	handler := srv.Routes()
+	console := srv.ConsoleRoutes()
+	redirect := srv.RedirectRoutes()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/path?q=1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	authorize(req)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	console.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -109,7 +185,7 @@ func TestCreateAndRedirect(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodGet, "/r/"+resp.Code, nil)
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	redirect.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusFound {
 		t.Fatalf("redirect status = %d, want %d", rec.Code, http.StatusFound)
@@ -121,14 +197,15 @@ func TestCreateAndRedirect(t *testing.T) {
 
 func TestCreateWithExpiresAt(t *testing.T) {
 	srv := newTestServer()
-	handler := srv.Routes()
+	console := srv.ConsoleRoutes()
+	redirect := srv.RedirectRoutes()
 
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	body := `{"url":"https://example.com/exp","expires_at":"` + expires.Format(time.RFC3339) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(body))
 	authorize(req)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	console.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -143,7 +220,7 @@ func TestCreateWithExpiresAt(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodGet, "/r/"+resp.Code, nil)
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	redirect.ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("redirect status = %d, want %d", rec.Code, http.StatusFound)
 	}
@@ -151,7 +228,7 @@ func TestCreateWithExpiresAt(t *testing.T) {
 
 func TestCreateBadRequest(t *testing.T) {
 	srv := newTestServer()
-	handler := srv.Routes()
+	handler := srv.ConsoleRoutes()
 
 	tests := []struct {
 		name   string
@@ -206,7 +283,7 @@ func TestCreateFullyEscapedURLWithExpiresAt(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(b.String()))
 	authorize(req)
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv.ConsoleRoutes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d, body bytes = %d, limit = %d, resp = %s",
 			rec.Code, http.StatusCreated, b.Len(), maxBodyBytes, rec.Body.String())
@@ -218,7 +295,7 @@ func TestRedirectNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil)
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv.RedirectRoutes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -235,7 +312,7 @@ TestRedirectInvalidCode 验证非法短码在进入存储之前就被拒绝。
 func TestRedirectInvalidCode(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{}}
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
-	handler := srv.Routes()
+	handler := srv.RedirectRoutes()
 
 	tests := []struct {
 		name string
@@ -277,7 +354,7 @@ func TestRedirectRecordsClick(t *testing.T) {
 	}}
 	sink := &recordSink{}
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
-	handler := srv.Routes()
+	handler := srv.RedirectRoutes()
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
@@ -306,7 +383,7 @@ func TestRedirectHeadDoesNotRecordClick(t *testing.T) {
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), sink)
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/r/AbC123xy", nil))
+	srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/r/AbC123xy", nil))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
@@ -336,7 +413,7 @@ func TestRedirectCanceledDuringGetDoesNotRecordClick(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv.RedirectRoutes().ServeHTTP(rec, req)
 
 	if rec.Code == http.StatusFound {
 		t.Errorf("status = %d, want request to stop before the redirect", rec.Code)
@@ -387,7 +464,7 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 		"healthz1": {Code: "healthz1", URL: "https://example.com/healthz"},
 	}}
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
-	handler := srv.Routes()
+	handler := srv.RedirectRoutes()
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -404,7 +481,8 @@ func TestCodeAndRouteNamespaces(t *testing.T) {
 
 func TestClientCanceled(t *testing.T) {
 	srv := newTestServer()
-	handler := srv.Routes()
+	redirect := srv.RedirectRoutes()
+	console := srv.ConsoleRoutes()
 
 	tests := []struct {
 		name   string
@@ -425,6 +503,10 @@ func TestClientCanceled(t *testing.T) {
 			cancel()
 			req = req.WithContext(ctx)
 
+			handler := redirect
+			if tt.method == http.MethodPost {
+				handler = console
+			}
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
@@ -453,7 +535,7 @@ func TestCreateMaxLengthURLAccepted(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"`+u+`"}`))
 	authorize(req)
 	rec := httptest.NewRecorder()
-	newTestServer().Routes().ServeHTTP(rec, req)
+	newTestServer().ConsoleRoutes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Errorf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -465,7 +547,7 @@ func TestStoreOverloadedReturns503(t *testing.T) {
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), overloadedStore{}, 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+	srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)

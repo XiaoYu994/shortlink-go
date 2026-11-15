@@ -1,8 +1,9 @@
 /*
-Command console 是租户和 API Key 的运维入口。
+Command console 是管理进程，也是租户和 API Key 的运维入口。
 
-HTTP 管理接口仍在 cmd/server。这里只签发密钥、列出状态和吊销。
-明文只写到标准输出，不进日志。进程拆分见 ADR 0009。
+console serve 提供 POST /api/v1/links、/healthz 和 /metrics；
+console key issue/list/revoke 签发密钥、列出状态和吊销，明文只写到标准输出，不进日志。
+密钥命令只连 PostgreSQL，不加载 Redis。进程拆分见 ADR 0009。
 */
 package main
 
@@ -18,7 +19,24 @@ import (
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr, openStore); err != nil {
+	args := os.Args[1:]
+	/*
+		serve 在加载配置前分派：密钥命令只需要 DATABASE_URL，
+		不能因为 HTTP 模式要连 Redis，就让 key issue/list/revoke 也依赖 Redis。
+	*/
+	if len(args) > 0 && args[0] == "serve" {
+		if len(args) > 1 {
+			writeUsage(os.Stderr)
+			os.Exit(2)
+		}
+		if err := runServe(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := run(args, os.Stdout, os.Stderr, openStore); err != nil {
 		if !errors.Is(err, errUsage) {
 			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
 		}

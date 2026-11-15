@@ -15,13 +15,15 @@ import (
 var errUsage = errors.New("usage")
 
 const usageText = `用法:
+  console serve
   console key issue --name NAME [--external-id ID] [--expires RFC3339]
   console key issue --tenant ID [--expires RFC3339]
   console key list --tenant ID
   console key revoke --id ID
 
+serve 启动管理 HTTP（POST /api/v1/links），需要 DATABASE_URL 和 REDIS_URL。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期。
---name 会新建租户；已有租户用 --tenant。DATABASE_URL 从环境变量读取。
+--name 会新建租户；已有租户用 --tenant。密钥命令只读 DATABASE_URL，不连接 Redis。
 `
 
 func writeUsage(w io.Writer) {

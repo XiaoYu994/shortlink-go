@@ -1,17 +1,30 @@
 {
   "version": "0.2.0",
-  // 调试时复用 .env 里的 DATABASE_URL、REDIS_URL 等配置，和 make run 一致。
+  // 调试时复用 .env 里的 DATABASE_URL、REDIS_URL 等配置，和 make run-* 一致。
   "configurations": [
     {
-      "name": "server",
+      "name": "redirector",
       "type": "go",
       "request": "launch",
       "mode": "auto",
-      "program": "${workspaceFolder}/cmd/server",
+      "program": "${workspaceFolder}/cmd/redirector",
       "envFile": "${workspaceFolder}/.env"
     },
     {
-      "name": "console",
+      "name": "console serve",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/console",
+      // 管理 HTTP 和 redirector 分开端口；env 覆盖 .env 里的 ADDR。
+      "args": ["serve"],
+      "env": {
+        "ADDR": ":8081"
+      },
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "console key",
       "type": "go",
       "request": "launch",
       "mode": "auto",

@@ -2,19 +2,21 @@
 
 ## 路由
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/healthz` | 健康检查，返回 `ok` |
-| `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| `POST` | `/api/v1/links` | 创建短链，需要 API Key |
-| `GET` | `/r/{code}` | 302 跳转到原始 URL |
+| 进程 | 方法 | 路径 | 说明 |
+| --- | --- | --- | --- |
+| redirector | `GET` | `/healthz` | 健康检查，返回 `ok` |
+| redirector | `GET` | `/metrics` | Prometheus 指标，运维端点 |
+| redirector | `GET` | `/r/{code}` | 302 跳转到原始 URL |
+| console | `GET` | `/healthz` | 健康检查，返回 `ok` |
+| console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
+| console | `POST` | `/api/v1/links` | 创建短链，需要 API Key |
 
-管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 是运维端点，不版本化。阶段 5 的 `/metrics` 同样是运维端点：不版本化，不对公网开放（由部署层的反向代理或网络策略限制）。
+本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放（由部署层的反向代理或网络策略限制）。
 
 ## 创建短链
 
 ```bash
-curl -i -X POST localhost:8080/api/v1/links \
+curl -i -X POST localhost:8081/api/v1/links \
   -H 'Authorization: Bearer slk_...' \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/path?q=1"}'
@@ -72,7 +74,8 @@ curl -i localhost:8080/r/AbC123xy
 ## 健康检查
 
 ```bash
-curl -i localhost:8080/healthz
+curl -i localhost:8080/healthz   # redirector
+curl -i localhost:8081/healthz   # console
 ```
 
 返回 200 和 `ok`。它是 liveness 探针，故意不访问数据库。
@@ -80,10 +83,11 @@ curl -i localhost:8080/healthz
 ## 指标
 
 ```bash
-curl -i localhost:8080/metrics
+curl -i localhost:8080/metrics   # redirector
+curl -i localhost:8081/metrics   # console
 ```
 
-返回 Prometheus 文本格式。目前暴露 Go 运行时、进程、HTTP、缓存、存储、连接池和点击指标：
+两个进程各自返回 Prometheus 文本格式，指标名相同，用 Prometheus 的 `job` 区分。redirector 暴露 Go 运行时、进程、HTTP、缓存、存储、连接池和点击指标；console 暴露 Go 运行时、进程、HTTP、存储和连接池指标，以及创建时写缓存的计数。目前暴露的指标：
 
 - `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 只有 `GET`、`HEAD`、`POST`、`other`）
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
@@ -92,8 +96,8 @@ curl -i localhost:8080/metrics
 - `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 - `process_*`（进程 CPU、内存、文件描述符）
-- `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label）
-- `shortlink_clicks_written_total`（交给存储的点击数，`result` 为 `success` 或 `error`。启动后两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`）
+- `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）
+- `shortlink_clicks_written_total`（交给存储的点击数，`result` 为 `success` 或 `error`。启动后两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`；只有 redirector 有）
 
 它是运维端点，不版本化，公网隔离由部署层保证。
 

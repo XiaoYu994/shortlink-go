@@ -4,12 +4,25 @@
 
 短链接服务：创建短链、按短码 302 跳转。当前是学习项目，优先把 HTTP、存储和错误处理写清楚。
 
+## 进程边界
+
+同一个 Go module 产出两个 HTTP 进程，共用 PostgreSQL、Redis 和 `internal/` 里的包，进程之间不调用：
+
+| 进程 | 路由 | 依赖 |
+| --- | --- | --- |
+| `redirector` | `GET /r/{code}`、`/healthz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
+| `console` | `POST /api/v1/links`、`/healthz`、`/metrics` | PostgreSQL、Redis（创建时写穿缓存）；`key` 命令只连 PostgreSQL |
+
+`redirector` 只挂公开跳转，不注册管理路由；API Key 鉴权只存在于 `console`。创建成功后 `console` 写穿正缓存，`redirector` 读同一份缓存，所以新短码不会在负缓存里继续 404。两个进程各自监听、各自扩容、各自暴露 `/metrics`，连接池也是各一份，总连接数是两边之和。部署时由反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console；短链公开地址不变。
+
+这是按流量和故障域把一个服务部署两次，不是微服务：数据所有权没有拆开，进程之间也没有 HTTP/RPC 调用。决策见 [ADR 0009](adr/0009-process-split-and-credentials.md)。
+
 ## 目录结构
 
 ```txt
 shortlink/
-├── cmd/server/          # HTTP 入口：创建短链和跳转
-├── cmd/console/         # 租户和 API Key 的运维命令
+├── cmd/redirector/      # 公开跳转进程：GET /r/{code}、/healthz、/metrics
+├── cmd/console/         # 管理进程：POST /api/v1/links；另有租户和 API Key 运维命令
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── internal/
 │   ├── httpapi/         # handler、路由、中间件；定义 LinkStore 接口
@@ -33,25 +46,25 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/server   -> httpapi, postgres, storemetrics, cache, click, config
-cmd/console  -> postgres
-cmd/migrate  -> golang-migrate
-config       -> postgres
-httpapi      -> link, idgen, tenant
-postgres     -> link, idgen, tenant
-memorystore  -> link, idgen
-storemetrics -> link
-cache        -> link
-click        -> 标准库、Prometheus
-link         -> 标准库
-idgen        -> 标准库
+cmd/redirector -> httpapi, postgres, storemetrics, cache, click, config
+cmd/console    -> httpapi, postgres, storemetrics, cache, config；key 命令只用 postgres
+cmd/migrate    -> golang-migrate
+config         -> postgres
+httpapi        -> link, idgen, tenant
+postgres       -> link, idgen, tenant
+memorystore    -> link, idgen
+storemetrics   -> link
+cache          -> link
+click          -> 标准库、Prometheus
+link           -> 标准库
+idgen          -> 标准库
 ```
 
 `LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator` 也定义在 `httpapi`，由同一个 `postgres.Store` 实现；缓存不参与鉴权。
 
 ## 请求流程
 
-### 创建短链
+### 创建短链（console）
 
 ```txt
 POST /api/v1/links
@@ -70,7 +83,7 @@ POST /api/v1/links
   -> 201 + Location: /r/{code}
 ```
 
-### 跳转
+### 跳转（redirector）
 
 ```txt
 GET /r/{code}
@@ -108,7 +121,7 @@ GET 模式同时匹配 HEAD。HEAD 返回同样的 302，但不记点击。
 
 `config.LoadConfig` 在启动时读取并校验：
 
-- `ADDR`：监听地址，默认 `:8080`
+- `ADDR`：监听地址，默认 `:8080`。两个 HTTP 进程各自读取自己的环境；本机开发时 console 由 Makefile 固定为 `:8081`
 - `DATABASE_URL`：必填
 - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS`
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
@@ -121,13 +134,13 @@ GET 模式同时匹配 HEAD。HEAD 返回同样的 302，但不记点击。
 
 ## 退出
 
-进程监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`。`run` 返回后 `defer` 先让 `ClickRecorder` 把缓冲里的点击写完（同样受一份新的 `SHUTDOWN_TIMEOUT` 限制；已经开始的那一批还会用完自己的写入超时，默认 2s），再关闭 Redis 客户端和数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，进程立刻退出。进程崩溃或收到 SIGKILL 时，缓冲区里还没写完的点击会丢掉。
+两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`。`run` 返回后 `defer` 先让 `ClickRecorder` 把缓冲里的点击写完（只有 redirector 有这一步；同样受一份新的 `SHUTDOWN_TIMEOUT` 限制，已经开始的那一批还会用完自己的写入超时，默认 2s），再关闭 Redis 客户端和数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，进程立刻退出。进程崩溃或收到 SIGKILL 时，缓冲区里还没写完的点击会丢掉。
 
 ## 监控
 
-`GET /metrics` 暴露 Go 运行时、进程、HTTP、缓存、存储、连接池和点击指标。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，抓取 `host.docker.internal:8080/metrics`，配置在 `deploy/prometheus.yml`。`/metrics` 与业务共用端口，公网隔离由部署层保证。
+两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，分别抓取 `host.docker.internal:8080/metrics`（redirector）和 `host.docker.internal:8081/metrics`（console），配置在 `deploy/prometheus.yml`；两个 job 的指标名相同，查询时用 `job` 区分。`/metrics` 与业务共用端口，公网隔离由部署层保证。
 
 ## 尚未实现
 
-- 拆分 HTTP 进程（阶段 6，[ADR 0009](adr/0009-process-split-and-credentials.md)）。运维命令已经在 `cmd/console`；`cmd/server` 仍同时提供跳转和管理 API。拆开后 redirector 只做公开跳转，管理 HTTP 迁到 console。用户、登录和页面不在这次拆分里
 - OpenTelemetry 追踪（可选，ADR 0005）：等指标解释不了慢请求再加
+- 用户、登录和短链管理页面（ADR 0009 把边界留出来，留到后续阶段）

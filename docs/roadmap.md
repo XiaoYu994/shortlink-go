@@ -39,7 +39,7 @@
 
 - [x] `go get github.com/prometheus/client_golang`；`GET /metrics` 暴露指标（运维端点，不版本化，不对公网开放）
   - Registry 自己建、由 `main` 注入：测试里会创建很多个 `Server`，往同一个 Registry 重复注册同名指标，`MustRegister` 会 panic
-  - HTTP 指标在 `NewServer` 里注册一次，`Routes()` 只组装中间件、不注册：现有测试会在同一个 `Server` 上多次调用 `Routes()`（`internal/httpapi/requestid_test.go`），在 `Routes()` 里注册第二次就 panic
+  - HTTP 指标在构造 `Server` 时注册一次，路由组装只套中间件、不注册：现有测试会在同一个 `Server` 上多次组装路由（`internal/httpapi/requestid_test.go`），第二次注册就 panic
   - 自建的 Registry 是空的，Go 运行时指标（`go_goroutines` 等）要自己注册
   - `/metrics` 用 `promhttp.HandlerFor(reg, promhttp.HandlerOpts{})` 暴露，不用 `promhttp.Handler()`（后者默认抓 `DefaultGatherer`）
   - 与业务共用 `ADDR` 端口；“不对公网开放”由部署层保证（反向代理不转发或网络策略限制），应用本身不做鉴权
@@ -83,8 +83,11 @@
 - [x] 多租户加 API Key 鉴权（中间件加 context 传值）
   - 只包 `POST /api/v1/links`。`Authorization: Bearer slk_` 加 64 位十六进制，库存 SHA-256。租户放进 context，创建时写入 `links.tenant_id`。`/r/{code}`、`/healthz`、`/metrics` 不鉴权
   - 还没有签发入口。能写数据库的运维人员才能插入哈希；持有密钥的调用方不能再签发
-- [ ] 拆分 `cmd/redirector` 和 `cmd/console`（[ADR 0009](adr/0009-process-split-and-credentials.md)）
+- [x] 拆分 `cmd/redirector` 和 `cmd/console`（[ADR 0009](adr/0009-process-split-and-credentials.md)）
   - 两个 `main`、两套部署，共用 PostgreSQL、Redis 和 `internal/`，进程之间不调用。redirector 只做公开跳转、缓存和点击；console 做管理 API
+  - `httpapi` 提供 `NewRedirector` / `NewConsole` 和 `RedirectRoutes` / `ConsoleRoutes`，两组路由各自注册运维端点；测试覆盖路由隔离
+  - 本机 redirector `:8080`、console `:8081`；`console serve` 启动管理 HTTP，`console key ...` 仍只连 PostgreSQL
+  - 两个进程各自注册 `/metrics` 和连接池指标，Prometheus 分成 `redirector`、`console` 两个 job；`make smoke` 同时启动两个进程，验证写穿缓存、路由隔离和双侧优雅退出
 - [x] console 的管理员命令：创建租户并签发一把 API Key
   - `cmd/console key issue` 明文只打印一次。`expires_at` 为空表示不过期，`revoked_at` 表示吊销；过期或吊销仍返回 401。`key list` 只显示状态，`key revoke` 按密钥 ID 吊销。没有公开的签发 HTTP 接口
 - [ ] （可选）缓存击穿的多副本方案：有了多个 redirector 副本、回源次数真的成为压力之后，比较 Redis 分布式锁（`SET NX PX` 加 Lua 释放）和逻辑过期加后台刷新，按回源次数和可接受的一致性取舍

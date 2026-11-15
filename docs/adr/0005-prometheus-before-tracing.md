@@ -12,7 +12,7 @@
 ## 决策
 
 - 在 Redis 之前接入 `github.com/prometheus/client_golang`。`GET /metrics` 是运维端点：不版本化，不对公网开放。它和业务共用一个监听端口，应用本身不做鉴权；“不对公网开放”由部署层保证（反向代理不转发或网络策略限制）。
-- Registry 由 `main` 创建并注入。HTTP 指标在 `NewServer` 里注册一次，`Routes()` 只组装中间件，不注册指标：现有测试会在同一个 `Server` 上多次调用 `Routes()`，重复注册会 panic。测试构造多个 `Server` 时，每个都要注入新的 Registry。自建 Registry 是空的，Go 运行时指标要单独注册。
+- Registry 由 `main` 创建并注入。HTTP 指标在构造 `Server` 时注册一次，路由组装只套中间件，不注册指标：现有测试会在同一个 `Server` 上多次组装路由，重复注册会 panic。测试构造多个 `Server` 时，每个都要注入新的 Registry。自建 Registry 是空的，Go 运行时指标要单独注册。
 - `/metrics` 用 `promhttp.HandlerFor(reg, promhttp.HandlerOpts{})` 暴露，不能用 `promhttp.Handler()`：后者默认抓 `DefaultGatherer`，注入的 Registry 里的指标不会出现。
 - 抓取请求也走中间件链，会被 logging 记一条访问日志、被 HTTP 指标统计一次，`timeout` 也作用在抓取上。暂时接受这些噪声；影响排查时再把 `/metrics` 挪到链外。
 - HTTP 指标按路由模式、方法、状态码记录请求数和耗时。label 只用取值有限的维度，短码和 request_id 不做 label。路由模式用 `mux.Handler(r)` 查，未匹配归到一个固定值；`mux.Handler` 对 405 也返回空 pattern，所以这个固定值会同时包含 404 和 405，状态码 label 仍能区分。外层中间件里 `r.Pattern` 是空串：`timeout` 在指标中间件里层用 `WithContext` 交出一份新的 Request，`ServeMux` 只把 Pattern 写到那份副本上。方法只保留 GET、HEAD、POST，其余记成 `other`；`GET` 的模式同时匹配 HEAD，所以 HEAD 留在列表里。未匹配请求的方法来自客户端，原样做 label 会让时间序列无限增长。中间件放在 `recoverer` 外面，和 `logging` 一样用 status writer 捕获状态码，否则 handler panic 被写成 500 时指标会漏掉。耗时直方图从 0.1ms 开始按 2 倍增长，默认桶从 5ms 开始，跳转的 p99 看不出缓存效果。
@@ -27,7 +27,7 @@
 ## 后果
 
 - 缓存效果有基线，验收不靠感觉。
-- 测试必须使用注入的 Registry，不能用 `prometheus.DefaultRegisterer`；指标只注册一次，`Routes()` 可以被重复调用。
+- 测试必须使用注入的 Registry，不能用 `prometheus.DefaultRegisterer`；指标只注册一次，路由可以重复组装。
 - `/metrics` 和 `/healthz` 同属运维面，不进 `/api/v1`；应用不做鉴权，公网隔离靠部署层。
 - 抓取会进访问日志和 HTTP 指标，暂时接受。
 - 慢请求在这个阶段靠耗时直方图和日志排查；追踪留到指标不够用的时候。

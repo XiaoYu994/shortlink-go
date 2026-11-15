@@ -7,7 +7,13 @@
 ```bash
 # 先按 docs/runbook.md 准备 .env、DATABASE_URL 和 REDIS_URL，并启动数据库
 make migrate
-make run
+make run-redirector   # 终端 1：公开跳转，监听 :8080
+```
+
+另开一个终端启动管理进程：
+
+```bash
+make run-console      # 管理 API，监听 :8081
 curl -i localhost:8080/healthz
 ```
 
@@ -17,20 +23,23 @@ curl -i localhost:8080/healthz
 make console ARGS="key issue --name acme"
 ```
 
-创建短链：
+创建短链走 console：
 
 ```bash
-curl -i -X POST localhost:8080/api/v1/links \
+curl -i -X POST localhost:8081/api/v1/links \
   -H 'Authorization: Bearer slk_...' \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 ```
 
-响应里的 `code` 拼到 `/r/{code}` 就是短链：
+响应里的 `code` 拼到 `/r/{code}` 就是短链，跳转走 redirector：
 
 ```bash
 curl -i localhost:8080/r/AbC123xy
 ```
+
+两个进程共用 PostgreSQL、Redis 和 `internal/` 里的代码，进程之间不互相调用。
+部署时由反向代理把 `/r/` 转到 redirector，把 `/api/v1/` 转到 console；短链的公开地址不变。
 
 ## 验证
 

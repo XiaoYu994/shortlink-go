@@ -23,7 +23,7 @@ TestMetricsEndpoint 验证 /metrics 从注入的 Registry 收集指标。
 */
 func TestMetricsEndpoint(t *testing.T) {
 	srv := newTestServer()
-	handler := srv.Routes()
+	handler := srv.RedirectRoutes()
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -51,7 +51,7 @@ func TestMetricsEndpoint(t *testing.T) {
 */
 func TestHTTPMetricsSkipsMetricsPath(t *testing.T) {
 	srv := newTestServer()
-	handler := srv.Routes()
+	handler := srv.RedirectRoutes()
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, metricsPath, nil))
@@ -157,7 +157,7 @@ func TestHTTPMetricsRecordsRouteAndStatus(t *testing.T) {
 			srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), tt.store, 5*time.Second, newTestRegistry(), nil)
 
 			rec := httptest.NewRecorder()
-			srv.Routes().ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
+			srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("%s %s = %d, want %d", tt.method, tt.path, rec.Code, tt.wantStatus)
@@ -197,7 +197,7 @@ func TestHTTPMetricsRecordsPanicAs500(t *testing.T) {
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), panicStore{}, 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+	srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("GET /r/AbC123xy = %d, want %d", rec.Code, http.StatusInternalServerError)

@@ -1,8 +1,9 @@
 /*
-Command server 是短链接服务的 HTTP 入口。
+Command redirector 是公开短链跳转进程。
 
-创建短链和跳转目前都在这一个程序里。租户和 API Key 的运维命令在 cmd/console。
-进程拆分见 ADR 0009：redirector 只做跳转，管理 HTTP 再迁到 console。
+只提供 GET /r/{code}、/healthz 和 /metrics。读 Redis 缓存，未命中回源 PostgreSQL，
+成功的 GET 异步记录点击。管理 API 和 API Key 鉴权在 cmd/console，进程之间不互相调用。
+拆分边界见 ADR 0009。
 */
 package main
 
@@ -29,7 +30,7 @@ import (
 )
 
 func main() {
-	// 逻辑都放在 run 里并返回 error，这样 run 里的 defer 才会执行（第 8 课）。
+	// 逻辑都放在 run 里并返回 error，这样 run 里的 defer 才会执行。
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -62,7 +63,7 @@ func run() error {
 	logger.Info("connected to redis")
 
 	/*
-		自建 Registry：测试会构造多个 Server，共用 DefaultRegisterer 时同名指标重复注册会 panic。
+		自建 Registry：每个进程自己暴露 /metrics，redirector 和 console 各自抓取。
 		自建 Registry 默认是空的，Go 运行时、进程和连接池指标要单独注册。
 	*/
 	registry := prometheus.NewRegistry()
@@ -95,19 +96,17 @@ func run() error {
 		MissConcurrency: cfg.CacheMissConcurrency,
 		FetchTimeout:    cfg.CacheFetchTimeout,
 	})
-	// pgStore 同时负责查链接和用 API Key 哈希换租户。缓存不参与鉴权。
-	srv := httpapi.NewServer(logger, store, cfg.RequestTimeout, registry, clicks, pgStore)
+	srv := httpapi.NewRedirector(logger, store, cfg.RequestTimeout, registry, clicks)
 
 	/*
 		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。
-		ReadTimeout 从开始读请求算起，创建接口的 body 也算在里面；写死成更短的值时，
-		把请求时限调大后，body 会先被掐断。
+		ReadTimeout 从开始读请求算起，跳转没有请求体，但保持和 console 一致的规则。
 		WriteTimeout 从读完请求头算起，多出来的时间用来把 504 写回客户端。
 	*/
 	readWriteTimeout := cfg.RequestTimeout + 5*time.Second
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           srv.Routes(),
+		Handler:           srv.RedirectRoutes(),
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       readWriteTimeout,

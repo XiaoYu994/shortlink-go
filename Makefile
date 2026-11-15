@@ -5,17 +5,20 @@ export
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
-.PHONY: help run build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
+.PHONY: help run-redirector run-console build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
 	test-db test-integration smoke deps-up up prometheus down psql redis-cli
 
 help: ## 列出所有命令
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
 
-run: ## 启动服务
-	go run ./cmd/server
+run-redirector: ## 启动跳转进程（ADDR 默认 :8080）
+	go run ./cmd/redirector
 
-build: ## 编译到 bin/server 和 bin/console
-	go build -o bin/server ./cmd/server
+run-console: ## 启动管理进程（本机固定 :8081）
+	ADDR=:8081 go run ./cmd/console serve
+
+build: ## 编译到 bin/redirector 和 bin/console
+	go build -o bin/redirector ./cmd/redirector
 	go build -o bin/console ./cmd/console
 
 console: ## 运维命令。例如 make console ARGS="key issue --name acme"

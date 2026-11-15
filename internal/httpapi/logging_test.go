@@ -88,7 +88,7 @@ func TestRoutesLogRequest(t *testing.T) {
 	srv := testServer(slog.New(slog.NewJSONHandler(&buf, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)

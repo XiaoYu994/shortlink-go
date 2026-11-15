@@ -25,8 +25,8 @@ var durationBuckets = prometheus.ExponentialBuckets(0.0001, 2, 18)
 
 /*
 httpMetrics 持有 HTTP 指标。
-NewServer 里创建并注册一次；Routes() 每次只组装中间件，不能在这里注册，
-否则测试在同一个 Server 上重复调用 Routes() 时会 panic。
+newServer 里创建并注册一次；RedirectRoutes 和 ConsoleRoutes 每次只组装中间件，
+不能在这里注册，否则测试在同一个 Server 上重复调用路由方法时会 panic。
 */
 type httpMetrics struct {
 	requests *prometheus.CounterVec

@@ -1,9 +1,9 @@
 #!/bin/sh
-# 冒烟测试：启动真实进程，按 docs/api.md 的契约走一遍健康检查、创建、跳转、
-# HEAD、404、非法参数、过期和指标，最后检查 SIGTERM 优雅退出。
+# 冒烟测试：启动 redirector 和 console 两个真实进程，按 docs/api.md 的契约走一遍
+# 健康检查、创建、跳转、HEAD、404、非法参数、过期、路由隔离和指标，最后检查 SIGTERM 优雅退出。
 #
-# 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/server 已构建、
-# 测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
+# 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/redirector、bin/console
+# 已构建、测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -26,22 +26,28 @@ fi
 if [ -n "$explicit_db" ]; then TEST_DATABASE_URL=$explicit_db; fi
 if [ -n "$explicit_redis" ]; then TEST_REDIS_URL=$explicit_redis; fi
 
-LOG=$(mktemp)
+REDIRECTOR_LOG=$(mktemp)
+CONSOLE_LOG=$(mktemp)
 TMP=$(mktemp -d)
-SERVER_PID=
+REDIRECTOR_PID=
+CONSOLE_PID=
 
 cleanup() {
-	if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-		kill -TERM "$SERVER_PID" 2>/dev/null || true
-		i=0
-		while kill -0 "$SERVER_PID" 2>/dev/null && [ "$i" -lt 100 ]; do
-			i=$((i + 1))
-			sleep 0.1
-		done
-		kill -KILL "$SERVER_PID" 2>/dev/null || true
-	fi
-	wait "$SERVER_PID" 2>/dev/null || true
-	rm -f "$LOG"
+	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}"; do
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+			kill -TERM "$pid" 2>/dev/null || true
+			i=0
+			while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+				i=$((i + 1))
+				sleep 0.1
+			done
+			kill -KILL "$pid" 2>/dev/null || true
+		fi
+		if [ -n "$pid" ]; then
+			wait "$pid" 2>/dev/null || true
+		fi
+	done
+	rm -f "$REDIRECTOR_LOG" "$CONSOLE_LOG"
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -50,9 +56,13 @@ trap 'exit 143' TERM
 
 fail() {
 	printf 'smoke: %s\n' "$*" >&2
-	if [ -s "$LOG" ]; then
-		printf '%s\n' '--- server log (last 20 lines) ---' >&2
-		tail -n 20 "$LOG" >&2
+	if [ -s "$REDIRECTOR_LOG" ]; then
+		printf '%s\n' '--- redirector log (last 20 lines) ---' >&2
+		tail -n 20 "$REDIRECTOR_LOG" >&2
+	fi
+	if [ -s "$CONSOLE_LOG" ]; then
+		printf '%s\n' '--- console log (last 20 lines) ---' >&2
+		tail -n 20 "$CONSOLE_LOG" >&2
 	fi
 	exit 1
 }
@@ -92,18 +102,19 @@ SQL
 }
 
 # request 把状态码写到 stdout，响应体和响应头分别放进 $TMP/body、$TMP/headers。
-request() { # method path [json]
-	method=$1
-	path=$2
-	body=${3:-}
+request() { # base method path [json]
+	base=$1
+	method=$2
+	path=$3
+	body=${4:-}
 	if [ -n "$body" ]; then
 		curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 			-X "$method" -H 'Content-Type: application/json' \
 			-H "Authorization: Bearer $SMOKE_API_KEY" \
-			-d "$body" "$BASE$path"
+			-d "$body" "$base$path"
 	else
 		curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
-			-X "$method" "$BASE$path"
+			-X "$method" "$base$path"
 	fi
 }
 
@@ -116,7 +127,24 @@ random_code() {
 	LC_ALL=C tr -dc '0-9A-Za-z' </dev/urandom | head -c 8
 }
 
-[ -x bin/server ] || fail 'bin/server 不存在，先运行 make build'
+# wait_ready 等一个进程的 healthz 就绪，最多 15 秒。进程提前退出时把日志带出来。
+wait_ready() { # base pid name
+	base=$1
+	pid=$2
+	name=$3
+	i=0
+	while ! curl -fsS --max-time 1 "$base/healthz" >/dev/null 2>&1; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			fail "$name 启动后立即退出"
+		fi
+		i=$((i + 1))
+		[ "$i" -ge 150 ] && fail "$name 15 秒内没有就绪"
+		sleep 0.1
+	done
+}
+
+[ -x bin/redirector ] || fail 'bin/redirector 不存在，先运行 make build'
+[ -x bin/console ] || fail 'bin/console 不存在，先运行 make build'
 
 # 只允许打在测试库和测试 Redis 上，避免把冒烟数据写进开发库。
 [ -n "${TEST_DATABASE_URL:-}" ] || fail 'TEST_DATABASE_URL 未设置，冒烟只允许使用测试库'
@@ -125,44 +153,42 @@ DATABASE_URL=$TEST_DATABASE_URL
 REDIS_URL=$TEST_REDIS_URL
 export DATABASE_URL REDIS_URL
 
-ADDR=${SMOKE_ADDR:-127.0.0.1:18080}
-BASE=http://$ADDR
-export ADDR
+REDIRECTOR_ADDR=${SMOKE_REDIRECTOR_ADDR:-127.0.0.1:18080}
+CONSOLE_ADDR=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
+REDIRECTOR_BASE=http://$REDIRECTOR_ADDR
+CONSOLE_BASE=http://$CONSOLE_ADDR
 export LOG_LEVEL=error
 
 # 64 位小写十六进制。只存在于测试库，和开发库无关。
 SMOKE_API_KEY=slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 seed_smoke_key
 
-./bin/server >"$LOG" 2>&1 &
-SERVER_PID=$!
+# 两个进程各自读 ADDR；.env 里的 ADDR 被这里的赋值覆盖。
+ADDR=$REDIRECTOR_ADDR ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
+REDIRECTOR_PID=$!
+ADDR=$CONSOLE_ADDR ./bin/console serve >"$CONSOLE_LOG" 2>&1 &
+CONSOLE_PID=$!
 
-# 等 healthz 就绪，最多 15 秒。进程提前退出时把日志带出来。
-i=0
-while ! curl -fsS --max-time 1 "$BASE/healthz" >/dev/null 2>&1; do
-	if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-		fail '服务启动后立即退出'
-	fi
-	i=$((i + 1))
-	[ "$i" -ge 150 ] && fail '服务 15 秒内没有就绪'
-	sleep 0.1
-done
+wait_ready "$REDIRECTOR_BASE" "$REDIRECTOR_PID" redirector
+wait_ready "$CONSOLE_BASE" "$CONSOLE_PID" console
 
 echo 'smoke: healthz'
-status=$(request GET /healthz)
-assert_eq "$status" 200 'GET /healthz 状态码'
-assert_eq "$(cat "$TMP/body")" 'ok' 'GET /healthz 响应体'
+for base in "$REDIRECTOR_BASE" "$CONSOLE_BASE"; do
+	status=$(request "$base" GET /healthz)
+	assert_eq "$status" 200 "GET $base/healthz 状态码"
+	assert_eq "$(cat "$TMP/body")" 'ok' "GET $base/healthz 响应体"
+done
 
 echo 'smoke: unauthorized'
 status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
 	-X POST -H 'Content-Type: application/json' \
-	-d '{"url":"https://example.com/no-key"}' "$BASE/api/v1/links")
+	-d '{"url":"https://example.com/no-key"}' "$CONSOLE_BASE/api/v1/links")
 assert_eq "$status" 401 '没有 API Key 的创建'
 grep -q '"unauthorized"' "$TMP/body" || fail '401 响应体不是 unauthorized'
 
 echo 'smoke: create'
 url="https://example.com/smoke-$$-$(date +%s)"
-status=$(request POST /api/v1/links "{\"url\":\"$url\"}")
+status=$(request "$CONSOLE_BASE" POST /api/v1/links "{\"url\":\"$url\"}")
 assert_eq "$status" 201 'POST /api/v1/links 状态码'
 location=$(header Location)
 case "$location" in
@@ -174,53 +200,74 @@ grep -q "\"code\":\"$code\"" "$TMP/body" || fail '创建响应里没有 code'
 grep -q "\"url\":\"$url\"" "$TMP/body" || fail '创建响应里没有 url'
 
 echo 'smoke: redirect'
-status=$(request GET "/r/$code")
+status=$(request "$REDIRECTOR_BASE" GET "/r/$code")
 assert_eq "$status" 302 'GET /r/{code} 状态码'
 assert_eq "$(header Location)" "$url" '跳转 Location'
 
+echo 'smoke: route isolation'
+status=$(request "$CONSOLE_BASE" GET "/r/$code")
+assert_eq "$status" 404 'console 不应提供跳转路由'
+status=$(request "$REDIRECTOR_BASE" POST /api/v1/links '{"url":"https://example.com/isolated"}')
+assert_eq "$status" 404 'redirector 不应提供管理路由'
+
 echo 'smoke: head'
-status=$(curl -sS --max-time 10 -I -o /dev/null -w '%{http_code}' "$BASE/r/$code")
+status=$(curl -sS --max-time 10 -I -o /dev/null -w '%{http_code}' "$REDIRECTOR_BASE/r/$code")
 assert_eq "$status" 302 'HEAD /r/{code} 状态码'
 
 echo 'smoke: not found'
-status=$(request GET "/r/$(random_code)")
+status=$(request "$REDIRECTOR_BASE" GET "/r/$(random_code)")
 assert_eq "$status" 404 '不存在的短码'
 grep -q '"error"' "$TMP/body" || fail '404 响应体不是 JSON error'
 
 echo 'smoke: invalid url'
-status=$(request POST /api/v1/links '{"url":"ftp://example.com"}')
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"ftp://example.com"}')
 assert_eq "$status" 400 '非法 URL'
 grep -q '"error"' "$TMP/body" || fail '400 响应体不是 JSON error'
 
 echo 'smoke: expiry'
 # GNU date；CI 和 WSL2 都是 Linux。留 3 秒余量，再等 4 秒确保越过到期时刻。
 expires_at=$(date -u -d '+3 seconds' '+%Y-%m-%dT%H:%M:%SZ')
-status=$(request POST /api/v1/links "{\"url\":\"https://example.com/expired\",\"expires_at\":\"$expires_at\"}")
+status=$(request "$CONSOLE_BASE" POST /api/v1/links "{\"url\":\"https://example.com/expired\",\"expires_at\":\"$expires_at\"}")
 assert_eq "$status" 201 '创建带过期时间的链接'
 grep -q '"expires_at"' "$TMP/body" || fail '创建响应里没有 expires_at'
 location=$(header Location)
 expired_code=${location#/r/}
-status=$(request GET "/r/$expired_code")
+status=$(request "$REDIRECTOR_BASE" GET "/r/$expired_code")
 assert_eq "$status" 302 '过期前跳转'
 sleep 4
-status=$(request GET "/r/$expired_code")
+status=$(request "$REDIRECTOR_BASE" GET "/r/$expired_code")
 assert_eq "$status" 404 '过期后不跳转'
 
 echo 'smoke: metrics'
-status=$(request GET /metrics)
-assert_eq "$status" 200 'GET /metrics 状态码'
-grep -q 'shortlink_http_requests_total' "$TMP/body" || fail '指标里没有 shortlink_http_requests_total'
+status=$(request "$REDIRECTOR_BASE" GET /metrics)
+assert_eq "$status" 200 'redirector GET /metrics 状态码'
+grep -q 'shortlink_http_requests_total' "$TMP/body" || fail 'redirector 指标里没有 shortlink_http_requests_total'
+grep -q 'shortlink_cache_gets_total{result="hit"}' "$TMP/body" || fail 'redirector 没有缓存命中，创建可能没有写穿'
+grep -q 'shortlink_clicks_' "$TMP/body" || fail 'redirector 指标里没有点击指标'
+
+status=$(request "$CONSOLE_BASE" GET /metrics)
+assert_eq "$status" 200 'console GET /metrics 状态码'
+grep -q 'shortlink_http_requests_total' "$TMP/body" || fail 'console 指标里没有 shortlink_http_requests_total'
+grep -q 'shortlink_cache_writes_total{result="success"}' "$TMP/body" || fail 'console 没有成功写缓存，创建可能没有写穿'
+grep -q 'shortlink_store_operations_total{operation="create",result="success"}' "$TMP/body" || fail 'console 指标里没有创建存储操作'
+if grep -q 'shortlink_clicks_' "$TMP/body"; then
+	fail 'console 不应启动 ClickRecorder'
+fi
 
 echo 'smoke: shutdown'
 # 看门狗：服务卡在关停流程里时最多等 20 秒，避免冒烟把 CI 拖到 job 超时。
-( sleep 20; kill -KILL "$SERVER_PID" 2>/dev/null ) &
+( sleep 20; kill -KILL "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null ) &
 watchdog=$!
-kill -TERM "$SERVER_PID"
-status=0
-wait "$SERVER_PID" || status=$?
+kill -TERM "$REDIRECTOR_PID" "$CONSOLE_PID"
+redirector_status=0
+console_status=0
+wait "$REDIRECTOR_PID" || redirector_status=$?
+wait "$CONSOLE_PID" || console_status=$?
 kill "$watchdog" 2>/dev/null || true
 wait "$watchdog" 2>/dev/null || true
-SERVER_PID=
-assert_eq "$status" 0 'SIGTERM 后的退出码'
+REDIRECTOR_PID=
+CONSOLE_PID=
+assert_eq "$redirector_status" 0 'redirector SIGTERM 后的退出码'
+assert_eq "$console_status" 0 'console SIGTERM 后的退出码'
 
 echo 'smoke: ok'

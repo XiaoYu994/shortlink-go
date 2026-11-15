@@ -31,7 +31,7 @@ type ClickRecorder interface {
 	Record(id int64)
 }
 
-// Server 持有 handler 需要的依赖。
+// Server 持有 handler 需要的依赖。用 NewRedirector 或 NewConsole 构造。
 type Server struct {
 	logger         *slog.Logger
 	store          LinkStore
@@ -43,17 +43,31 @@ type Server struct {
 }
 
 /*
-NewServer 组装 handler 依赖；store 由 main 注入，测试可以换成别的实现。
+NewRedirector 组装公开跳转进程，clicks 为 nil 时跳转不记点击。
+传入的必须是未装箱的 nil：带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
+*/
+func NewRedirector(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
+	return newServer(logger, store, requestTimeout, registry, clicks, nil)
+}
+
+/*
+NewConsole 组装管理进程。
+keys 为 nil 时创建接口返回 500，而不是把鉴权放开。
+*/
+func NewConsole(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, keys APIKeyAuthenticator) *Server {
+	return newServer(logger, store, requestTimeout, registry, nil, keys)
+}
+
+/*
+newServer 是两个构造函数共用的实现，让 main 只拿到自己那一半依赖：
+redirector 没有 keys，console 没有 clicks。测试在同一个包内，也可以直接用它同时组装两组路由。
+
 logger 包上一层 requestIDHandler：带请求 context 的日志会自动写上 request_id。
 requestTimeout 是每个请求的处理时限，由 timeout 中间件执行，必须为正。
 registry 由 main 创建并注入，/metrics 从这里收集；测试每次传一个新的 Registry，
-避免同名指标重复注册。HTTP 指标也在这个构造函数里注册一次，Routes() 只组装中间件。
-clicks 为 nil 时跳转不记点击。传入的必须是未装箱的 nil：
-带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
-keys 是管理 API 的鉴权。跳转不使用它。传入的同样必须是未装箱的 nil，
-nil 接口会让创建接口返回 500，而不是把接口放开。
+避免同名指标重复注册。HTTP 指标在这个构造函数里注册一次，两个路由方法只组装中间件。
 */
-func NewServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder, keys APIKeyAuthenticator) *Server {
+func newServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder, keys APIKeyAuthenticator) *Server {
 	return &Server{
 		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
 		store:          store,

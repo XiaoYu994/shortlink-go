@@ -21,20 +21,43 @@ func isMetricsRequest(r *http.Request) bool {
 }
 
 /*
-Routes 返回注册好全部路由的 handler。
+RedirectRoutes 返回跳转进程的路由：公开跳转、健康检查和指标。
+它不注册任何管理路由，API Key 鉴权只存在于 ConsoleRoutes。
+*/
+func (s *Server) RedirectRoutes() http.Handler {
+	mux := http.NewServeMux()
+	s.registerOperational(mux)
+	mux.HandleFunc("GET "+redirectPrefix+"{code}", s.handleRedirect)
+	return s.withMiddleware(mux)
+}
+
+/*
+ConsoleRoutes 返回管理进程的路由：创建短链、健康检查和指标。
+鉴权只包管理 API。公开跳转、健康检查和指标不认密钥。
+*/
+func (s *Server) ConsoleRoutes() http.Handler {
+	mux := http.NewServeMux()
+	s.registerOperational(mux)
+	mux.Handle("POST "+apiV1Prefix+"/links", s.authenticate(http.HandlerFunc(s.handleCreate)))
+	return s.withMiddleware(mux)
+}
+
+// registerOperational 注册两个进程都有的运维端点。
+func (s *Server) registerOperational(mux *http.ServeMux) {
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// /metrics 用注入的 Registry；promhttp.Handler() 抓的是 DefaultGatherer，注入的指标不会出现。
+	mux.Handle("GET "+metricsPath, promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
+}
+
+/*
+withMiddleware 给一组路由套上中间件。
 requestID 在最外层，里面的 logging、recoverer 和 handler 拿到的 context 里已经有编号。
 logging 在 recoverer 外面：panic 被写成 500 之后，访问日志里的状态码也是 500。
 HTTP 指标也放在 recoverer 外面，才能把 recoverer 写的 500 记进去。
 timeout 在最里层：它只约束 handler，日志和 panic 兜底要完整执行，不能被时限打断。
+mux 必须是这组路由自己的，指标中间件靠它查路由模式。
 */
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	// /metrics 用注入的 Registry；promhttp.Handler() 抓的是 DefaultGatherer，注入的指标不会出现。
-	mux.Handle("GET "+metricsPath, promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
-	// 鉴权只包管理 API。公开跳转、健康检查和指标不认密钥。
-	mux.Handle("POST "+apiV1Prefix+"/links", s.authenticate(http.HandlerFunc(s.handleCreate)))
-	mux.HandleFunc("GET "+redirectPrefix+"{code}", s.handleRedirect)
+func (s *Server) withMiddleware(mux *http.ServeMux) http.Handler {
 	return chain(mux,
 		requestID(),
 		logging(s.logger),

@@ -22,7 +22,16 @@ REDIS_URL=redis://localhost:6379/0
 cp .env.example .env
 make up
 make migrate
-make run
+```
+
+然后在两个终端分别启动：
+
+```bash
+make run-redirector   # 公开跳转，:8080
+```
+
+```bash
+make run-console      # 管理 API，:8081
 ```
 
 `make up` 只启动数据库，不执行 SQL。以前用初始化脚本建过表、但没有 `schema_migrations` 的数据卷，`make migrate` 会在 `CREATE TABLE links` 处失败。学习用的 compose 库可以删掉数据卷再来一次（这会清空该卷里的数据）：
@@ -37,7 +46,16 @@ make migrate
 
 ```bash
 make migrate
-make run
+```
+
+然后在两个终端分别启动：
+
+```bash
+make run-redirector
+```
+
+```bash
+make run-console
 ```
 
 `up`、`down` 和 `version` 都读同一个地址，并且只允许库名 `shortlink` 或以 `shortlink_` 开头的库（部署环境用前缀区分，例如 `shortlink_prod`）。查看当前版本：
@@ -57,16 +75,23 @@ PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，�
 
 ## 启动
 
+两个进程各开一个终端：
+
 ```bash
-make run
+make run-redirector   # 公开跳转，ADDR 来自 .env，默认 :8080
 ```
 
-看到 `connected to postgres`、`connected to redis` 和 `listening addr=:8080` 表示启动成功。`make run` 会自动加载 `.env`。
+```bash
+make run-console      # 管理 API，本机固定 :8081
+```
+
+看到 `connected to postgres`、`connected to redis` 和 `listening addr=:8080` / `:8081` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`；`run-console` 用 `ADDR=:8081` 覆盖 `.env` 里的地址。密钥命令 `make console ...` 不启动 HTTP，也不需要 Redis。
 
 检查：
 
 ```bash
-curl -i localhost:8080/healthz
+curl -i localhost:8080/healthz   # redirector
+curl -i localhost:8081/healthz   # console
 ```
 
 日志级别由 `LOG_LEVEL` 控制，默认 `info`；可选 `debug`、`warn`、`error`。
@@ -76,23 +101,26 @@ curl -i localhost:8080/healthz
 ```bash
 curl -s -o /dev/null localhost:8080/healthz
 curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|shortlink_clicks_|go_sql_)'
+
+curl -s -o /dev/null localhost:8081/healthz
+curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|go_sql_)'
 ```
 
-计数发生在响应写完之后，没出现过的 label 也不会输出。刚启动后直接抓 `/metrics`，正文里还没有 `shortlink_http_*`，所以上面先访问一次 `/healthz`。
+两个进程各暴露一份。计数发生在响应写完之后，没出现过的 label 也不会输出。刚启动后直接抓 `/metrics`，正文里还没有 `shortlink_http_*`，所以上面先访问一次 `/healthz`。
 
 目前能看到：
 
 - `go_goroutines` 等 Go 运行时指标，一启动就有
 - `process_*`：进程 CPU、内存、文件描述符，一启动就有
-- `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），一启动就有
+- `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），每个进程各一份，一启动就有
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 只有 `GET`、`HEAD`、`POST`、`other`
-- `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。`/healthz` 不访问数据库，要创建或打开过短链才看得到
-- `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。要发生过跳转才出现
-- `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
-- `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。创建和回源写缓存都会计数；`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
+- `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 创建后出现 `operation="create"`
+- `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。只有 redirector 读取，发生过跳转才出现
+- `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。只有 redirector 有；按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
+- `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。两个进程都可能写：console 创建时写穿，redirector 回源时写。`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
 - `shortlink_cache_operation_duration_seconds`：缓存操作耗时，`operation` 为 `get`、`set`，用来区分慢在 Redis 还是数据库
-- `shortlink_clicks_dropped_total`：点击缓冲满了没记下的次数。一启动就是 0
-- `shortlink_clicks_written_total`：交给存储的点击数，`result` 为 `success` 或 `error`。一启动两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`
+- `shortlink_clicks_dropped_total`：点击缓冲满了没记下的次数。只有 redirector 有，一启动就是 0
+- `shortlink_clicks_written_total`：交给存储的点击数，`result` 为 `success` 或 `error`。只有 redirector 有，一启动两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`
 
 Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志和 HTTP 指标。
 
@@ -119,7 +147,7 @@ redis-cli -h localhost -p 6379 TTL shortlink:link:AbC123xy
 make prometheus
 ```
 
-Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:8080/metrics`，所以 app 要用 `make run` 跑在宿主机。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
+Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:8080/metrics`（job `redirector`）和 `host.docker.internal:8081/metrics`（job `console`），所以两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
 ## 基线压测（无缓存）
 
@@ -318,7 +346,7 @@ make console ARGS="key revoke --id 1"
 ## 创建一条短链
 
 ```bash
-curl -i -X POST localhost:8080/api/v1/links \
+curl -i -X POST localhost:8081/api/v1/links \
   -H 'Authorization: Bearer slk_...' \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
@@ -377,9 +405,10 @@ make selfcheck        # test-db + verify + test-integration + smoke
 `postgres:17-alpine` 镜像里的客户端。使用项目自带的 compose 时先跑 `make deps-up`；
 使用自己的 PostgreSQL/Redis 时跳过它，确保 `.env` 指向已有实例即可。
 
-`make smoke` 会启动真实进程（默认 `127.0.0.1:18080`，可用 `SMOKE_ADDR` 覆盖），
-使用测试库和测试 Redis，验证健康检查、创建、跳转、HEAD、404、非法参数、过期链接和指标，
-最后用 SIGTERM 检查优雅退出。它同样会重建测试库，不碰开发库。
+`make smoke` 会启动两个真实进程：redirector 默认 `127.0.0.1:18080`，console 默认 `127.0.0.1:18081`，
+可分别用 `SMOKE_REDIRECTOR_ADDR`、`SMOKE_CONSOLE_ADDR` 覆盖。它使用测试库和测试 Redis，
+验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、路由隔离和指标，
+最后用 SIGTERM 检查两个进程的优雅退出。它同样会重建测试库，不碰开发库。
 
 测试配置在 `.env` 里：
 
@@ -405,13 +434,15 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 
 ## 停止
 
-前台 `make run` 用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。请求结束后再把点击缓冲写完，最多再等一份 `SHUTDOWN_TIMEOUT`；若当时有一批正在写，那一批还会用完自己的写入超时（默认 2s）。然后关闭 Redis 和数据库。再按一次 `Ctrl+C` 会立刻退出。进程崩溃或被 SIGKILL 时，缓冲区里还没写完的点击会丢掉。`make down` 只停止项目自带的 compose 服务。
+前台运行的 redirector / console 各自用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。redirector 请求结束后再把点击缓冲写完，最多再等一份 `SHUTDOWN_TIMEOUT`；若当时有一批正在写，那一批还会用完自己的写入超时（默认 2s）。然后关闭 Redis 和数据库。再按一次 `Ctrl+C` 会立刻退出。进程崩溃或被 SIGKILL 时，缓冲区里还没写完的点击会丢掉。`make down` 只停止项目自带的 compose 服务。
 
 ## 常见问题
 
 | 现象 | 处理 |
 | --- | --- |
-| `DATABASE_URL is required` | `.env` 缺失，或没有通过 `make run` 启动 |
+| `DATABASE_URL is required` | `.env` 缺失，或没有通过 `make run-*` / `make console` 启动 |
+| console 端口被占用 | 本机 `:8081` 已有服务；停掉它，或临时改 Makefile 的 `run-console` 地址 |
+| 新短码立刻跳转 404 | 确认创建走 console、跳转走 redirector；console 创建后会写穿 Redis，绕过 console 直接写库不会清掉负缓存 |
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |

@@ -20,7 +20,7 @@ func TestRequestIDKeepsValidInboundHeader(t *testing.T) {
 	req.Header.Set(requestIDHeader, "gw.7_abc-01")
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv.RedirectRoutes().ServeHTTP(rec, req)
 
 	if got := rec.Header().Get(requestIDHeader); got != "gw.7_abc-01" {
 		t.Errorf("%s = %q, want %q", requestIDHeader, got, "gw.7_abc-01")
@@ -44,7 +44,7 @@ func TestRequestIDReplacesUnsafeInboundHeader(t *testing.T) {
 			req.Header.Set(requestIDHeader, tt.inbound)
 
 			rec := httptest.NewRecorder()
-			srv.Routes().ServeHTTP(rec, req)
+			srv.RedirectRoutes().ServeHTTP(rec, req)
 
 			got := rec.Header().Get(requestIDHeader)
 			if got == tt.inbound || !validRequestID(got) {
@@ -59,7 +59,7 @@ func TestRequestIDDiffersAcrossRequests(t *testing.T) {
 	seen := map[string]bool{}
 	for range 20 {
 		rec := httptest.NewRecorder()
-		srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		id := rec.Header().Get(requestIDHeader)
 		if seen[id] {
 			t.Fatalf("duplicate request id %q", id)
@@ -73,7 +73,7 @@ func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 	srv := testServer(slog.New(slog.NewJSONHandler(&buf, nil)), failingStore{err: errors.New("db down")}, 5*time.Second, newTestRegistry(), nil)
 
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
+	srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil))
 
 	id := rec.Header().Get(requestIDHeader)
 	if !validRequestID(id) {

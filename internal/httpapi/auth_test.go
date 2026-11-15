@@ -50,7 +50,7 @@ func TestAuthenticate(t *testing.T) {
 				got, saw = principalFrom(r.Context())
 				w.WriteHeader(http.StatusNoContent)
 			})
-			srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil, keys)
+			srv := newServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil, keys)
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/links", nil)
 			if tt.header != "" {
@@ -86,7 +86,7 @@ func TestCreateAssignsTenantFromAPIKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/tenant"}`))
 	authorize(req)
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv.ConsoleRoutes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
@@ -108,7 +108,7 @@ func TestCreateWithoutAPIKeyDoesNotStore(t *testing.T) {
 	store := &countingStore{}
 	srv := testServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store, 5*time.Second, newTestRegistry(), nil)
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com"}`)))
+	srv.ConsoleRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com"}`)))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
