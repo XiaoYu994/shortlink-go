@@ -46,6 +46,38 @@ func TestMetricsEndpoint(t *testing.T) {
 }
 
 /*
+TestConsoleMetricsRouteLabel 验证 console 的创建路由用 ServeMux 模式做 route label。
+withMiddleware 拿错 mux 或路由挂到别的 mux 时，route 会退化成 unmatched，这里会失败。
+*/
+func TestConsoleMetricsRouteLabel(t *testing.T) {
+	srv := newTestServer()
+	handler := srv.ConsoleRoutes()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com"}`))
+	authorize(req)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	status := strconv.Itoa(http.StatusCreated)
+	if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("POST /api/v1/links", http.MethodPost, status)); got != 1 {
+		t.Errorf("requests{route=%q, method=%q, status=%q} = %v, want 1", "POST /api/v1/links", http.MethodPost, status, got)
+	}
+
+	// 没有密钥也走同一个路由，route label 不应该是 unmatched。
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com"}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	status = strconv.Itoa(http.StatusUnauthorized)
+	if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("POST /api/v1/links", http.MethodPost, status)); got != 1 {
+		t.Errorf("requests{route=%q, method=%q, status=%q} = %v, want 1", "POST /api/v1/links", http.MethodPost, status, got)
+	}
+}
+
+/*
 抓取的 route 是 ServeMux 模式 "GET /metrics"，不是 URL 路径。
 再打一次 /healthz，确认只有抓取被跳过。
 */

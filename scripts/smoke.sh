@@ -31,8 +31,14 @@ CONSOLE_LOG=$(mktemp)
 TMP=$(mktemp -d)
 REDIRECTOR_PID=
 CONSOLE_PID=
+WATCHDOG_PID=
 
 cleanup() {
+	# 先停看门狗，避免它在脚本退出后拿旧 PID 去 kill。
+	if [ -n "${WATCHDOG_PID:-}" ]; then
+		kill "$WATCHDOG_PID" 2>/dev/null || true
+		wait "$WATCHDOG_PID" 2>/dev/null || true
+	fi
 	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}"; do
 		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 			kill -TERM "$pid" 2>/dev/null || true
@@ -141,6 +147,10 @@ wait_ready() { # base pid name
 		[ "$i" -ge 150 ] && fail "$name 15 秒内没有就绪"
 		sleep 0.1
 	done
+	# healthz 可能打到遗留的旧进程；确认本次启动的进程仍然活着。
+	if ! kill -0 "$pid" 2>/dev/null; then
+		fail "$name 启动后退出（端口可能被旧进程占用）"
+	fi
 }
 
 [ -x bin/redirector ] || fail 'bin/redirector 不存在，先运行 make build'
@@ -243,6 +253,11 @@ status=$(request "$REDIRECTOR_BASE" GET /metrics)
 assert_eq "$status" 200 'redirector GET /metrics 状态码'
 grep -q 'shortlink_http_requests_total' "$TMP/body" || fail 'redirector 指标里没有 shortlink_http_requests_total'
 grep -q 'shortlink_cache_gets_total{result="hit"}' "$TMP/body" || fail 'redirector 没有缓存命中，创建可能没有写穿'
+# 正常短码的首次 GET 必须命中 console 写穿的正缓存，不能留下成功的数据库查询。
+# 否则 shortlink_cache_gets_total{hit} 可能只是 redirector 自己回源后写缓存造成的。
+if grep -q 'shortlink_store_operations_total{operation="get",result="success"}' "$TMP/body"; then
+	fail 'redirector 首次跳转回源了数据库，console 可能没有写穿缓存'
+fi
 grep -q 'shortlink_clicks_' "$TMP/body" || fail 'redirector 指标里没有点击指标'
 
 status=$(request "$CONSOLE_BASE" GET /metrics)
@@ -257,14 +272,16 @@ fi
 echo 'smoke: shutdown'
 # 看门狗：服务卡在关停流程里时最多等 20 秒，避免冒烟把 CI 拖到 job 超时。
 ( sleep 20; kill -KILL "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null ) &
-watchdog=$!
-kill -TERM "$REDIRECTOR_PID" "$CONSOLE_PID"
+WATCHDOG_PID=$!
+# 进程可能在上一次请求后已经退出；这里失败不能触发 set -e，交给后面的 wait 报状态。
+kill -TERM "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null || true
 redirector_status=0
 console_status=0
 wait "$REDIRECTOR_PID" || redirector_status=$?
 wait "$CONSOLE_PID" || console_status=$?
-kill "$watchdog" 2>/dev/null || true
-wait "$watchdog" 2>/dev/null || true
+kill "$WATCHDOG_PID" 2>/dev/null || true
+wait "$WATCHDOG_PID" 2>/dev/null || true
+WATCHDOG_PID=
 REDIRECTOR_PID=
 CONSOLE_PID=
 assert_eq "$redirector_status" 0 'redirector SIGTERM 后的退出码'

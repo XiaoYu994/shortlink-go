@@ -25,6 +25,11 @@ func main() {
 		不能因为 HTTP 模式要连 Redis，就让 key issue/list/revoke 也依赖 Redis。
 	*/
 	if len(args) > 0 && args[0] == "serve" {
+		// 和 console help / key issue -h 一致：help 是成功路径。
+		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
+			writeUsage(os.Stderr)
+			return
+		}
 		if len(args) > 1 {
 			writeUsage(os.Stderr)
 			os.Exit(2)
