@@ -98,14 +98,15 @@
 
 决策见 [ADR 0011](adr/0011-link-crud-api.md)、[ADR 0012](adr/0012-click-analytics.md)。
 
-- [ ] 迁移 003：`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`；`links (tenant_id, clicks DESC, id DESC)` 索引
-- [ ] 管理 API：`GET /api/v1/links`（`sort=id|clicks|clicks_today`）、`GET/PATCH/DELETE /api/v1/links/{code}`；租户隔离、游标分页、过期链接管理可见
-- [ ] 缓存一致性：回源正负缓存改 `SET NX`，更新/删除后无条件 `SET`（删除写负缓存）；补修改/删除与在途回源的并发语义和测试
-- [ ] `link.AdminLink`（`Clicks`、`ClicksToday`）、`GetForTenant`、`List`、`Update`、`Delete` 的存储实现和测试
-- [ ] 点击元数据：Referer host、设备分类、客户端分类（browser/bot/cli/other）、按天盐的访客哈希、`VISITOR_SALT` 和 `TRUST_PROXY_HEADERS`
-- [ ] `ClickRecorder` 和 `postgres.Store` 批量写三张日聚合表与 `links.clicks`，同一事务
-- [ ] 统计接口 `GET /api/v1/links/{code}/stats`：日趋势、Top 来源、设备、客户端、每日访客、补零和范围校验
-- [ ] 列表排序：`links.clicks` 历史排序和 `link_clicks_daily` 今日排序的索引、游标和测试
-- [ ] 配置、`.env.example`、`docs/api.md`、`docs/architecture.md`、`docs/runbook.md` 同步
-- [ ] 集成测试和 `make smoke` 覆盖修改、删除、排序、统计和租户隔离；压一轮观察 dropped 和连接池
-- [ ] ADR 0011、0012 状态从 Proposed 改为 Accepted
+- [x] 迁移 003：`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`；`links (tenant_id, clicks DESC, id DESC)` 索引
+- [x] 管理 API：`GET /api/v1/links`（`sort=id|clicks|clicks_today`）、`GET/PATCH/DELETE /api/v1/links/{code}`；租户隔离、游标分页、过期链接管理可见
+- [x] 缓存一致性：回源正负缓存改 `SET NX`，更新/删除后无条件 `SET`（删除写负缓存）；补修改/删除与在途回源的并发语义和测试
+- [x] `link.AdminLink`（`Clicks`、`ClicksToday`）、`GetForTenant`、`List`、`Update`、`Delete` 的存储实现和测试
+- [x] 点击元数据：Referer host、设备分类、客户端分类（browser/bot/cli/other）、按天盐的访客哈希、`VISITOR_SALT` 和 `TRUST_PROXY_HEADERS`
+- [x] `ClickRecorder` 和 `postgres.Store` 批量写三张日聚合表与 `links.clicks`，同一事务
+- [x] 统计接口 `GET /api/v1/links/{code}/stats`：日趋势、Top 来源、设备、客户端、每日访客、补零和范围校验
+- [x] 列表排序：`links.clicks` 历史排序和 `link_clicks_daily` 今日排序的索引、游标和测试
+- [x] 配置、`.env.example`、`docs/api.md`、`docs/architecture.md`、`docs/runbook.md` 同步
+- [x] 集成测试和 `make smoke` 覆盖修改、删除、排序、统计和租户隔离；压一轮观察 dropped 和连接池
+  - 2026-11-15 热 key 压测：单 redirector、3000 req/s、20 秒，65,000 次点击全部写出，dropped 0，连接池使用峰值 1、等待 0；数据和方法见 runbook
+- [x] ADR 0011、0012 状态从 Proposed 改为 Accepted

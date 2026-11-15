@@ -18,15 +18,21 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// record 是大多数测试的简写：只关心链接 ID，元数据用零值。
+func record(r *Recorder, id int64) {
+	r.Record(Click{LinkID: id})
+}
+
 type memStore struct {
 	mu     sync.Mutex
 	counts map[int64]int64
+	last   []Click
 	err    error
 	// wrote 在成功写入后收到一次信号。容量是 1，避免堵住 worker。
 	wrote chan struct{}
 }
 
-func (s *memStore) AddClicks(_ context.Context, counts map[int64]int64) error {
+func (s *memStore) RecordClicks(_ context.Context, clicks []Click) error {
 	if s.err != nil {
 		s.signalWrote()
 		return s.err
@@ -36,9 +42,10 @@ func (s *memStore) AddClicks(_ context.Context, counts map[int64]int64) error {
 	if s.counts == nil {
 		s.counts = make(map[int64]int64)
 	}
-	for id, n := range counts {
-		s.counts[id] += n
+	for _, c := range clicks {
+		s.counts[c.LinkID]++
 	}
+	s.last = append([]Click(nil), clicks...)
 	s.signalWrote()
 	return nil
 }
@@ -59,16 +66,22 @@ func (s *memStore) get(id int64) int64 {
 	return s.counts[id]
 }
 
+func (s *memStore) lastClicks() []Click {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Click(nil), s.last...)
+}
+
 func TestCloseFlushesPartialBatch(t *testing.T) {
 	store := &memStore{}
 	reg := prometheus.NewRegistry()
 	// 间隔很长、批量也大，这三条只能靠 Close 写出去。
 	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 10, Interval: time.Hour})
 
-	r.Record(7)
-	r.Record(7)
-	r.Record(8)
-	r.Record(0)
+	record(r, 7)
+	record(r, 7)
+	record(r, 8)
+	record(r, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -89,6 +102,41 @@ func TestCloseFlushesPartialBatch(t *testing.T) {
 	}
 }
 
+// TestRecordPreservesMetadata 验证 Recorder 只补 At，不改来源、设备和访客哈希。
+func TestRecordPreservesMetadata(t *testing.T) {
+	store := &memStore{}
+	reg := prometheus.NewRegistry()
+	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 10, Interval: time.Hour})
+
+	hash := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	r.Record(Click{
+		LinkID:      9,
+		Referrer:    "news.ycombinator.com",
+		Device:      DeviceDesktop,
+		Client:      ClientBrowser,
+		VisitorHash: hash,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := r.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got := store.lastClicks()
+	if len(got) != 1 {
+		t.Fatalf("clicks = %d, want 1", len(got))
+	}
+	if got[0].Referrer != "news.ycombinator.com" || got[0].Device != DeviceDesktop || got[0].Client != ClientBrowser {
+		t.Errorf("metadata = %+v, want preserved", got[0])
+	}
+	if len(got[0].VisitorHash) != 16 || got[0].VisitorHash[0] != 1 {
+		t.Errorf("VisitorHash = %v, want preserved", got[0].VisitorHash)
+	}
+	if got[0].At.IsZero() {
+		t.Error("At was not filled in")
+	}
+}
+
 func TestFlushesWhenBatchFull(t *testing.T) {
 	store := &memStore{wrote: make(chan struct{}, 1)}
 	reg := prometheus.NewRegistry()
@@ -101,8 +149,8 @@ func TestFlushesWhenBatchFull(t *testing.T) {
 		}
 	})
 
-	r.Record(3)
-	r.Record(3)
+	record(r, 3)
+	record(r, 3)
 	select {
 	case <-store.wrote:
 	case <-time.After(time.Second):
@@ -117,7 +165,7 @@ func TestCloseReturnsWriteError(t *testing.T) {
 	store := &memStore{err: errors.New("db down")}
 	reg := prometheus.NewRegistry()
 	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 10, Interval: time.Hour})
-	r.Record(1)
+	record(r, 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -154,7 +202,7 @@ type blockingStore struct {
 	once    sync.Once
 }
 
-func (s *blockingStore) AddClicks(context.Context, map[int64]int64) error {
+func (s *blockingStore) RecordClicks(context.Context, []Click) error {
 	s.once.Do(func() { close(s.entered) })
 	<-s.release
 	return nil
@@ -176,17 +224,17 @@ func TestRecordDropsWhenBufferFull(t *testing.T) {
 		}
 	})
 
-	r.Record(1)
+	record(r, 1)
 	select {
 	case <-store.entered:
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for the worker to block in AddClicks")
+		t.Fatal("timed out waiting for the worker to block in RecordClicks")
 	}
 
 	// worker 已经取走 1 并停在写库上，channel 是空的。再放 3 条，缓冲只有 2 个位置。
-	r.Record(2)
-	r.Record(3)
-	r.Record(4)
+	record(r, 2)
+	record(r, 3)
+	record(r, 4)
 
 	if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 1 {
 		t.Errorf("dropped = %v, want 1", got)
@@ -203,7 +251,7 @@ func TestRecordAfterCloseDoesNotPanic(t *testing.T) {
 	if err := r.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	r.Record(1)
+	record(r, 1)
 	if got := store.get(1); got != 0 {
 		t.Errorf("clicks[1] = %d, want 0", got)
 	}
@@ -223,7 +271,7 @@ func TestRecordOverlapsClose(t *testing.T) {
 		defer wg.Done()
 		close(started)
 		for i := range 200 {
-			r.Record(int64(i%20 + 1))
+			record(r, int64(i%20+1))
 		}
 	}()
 	<-started
@@ -263,7 +311,7 @@ func TestFlushesOnInterval(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 10, Interval: 15 * time.Millisecond})
 
-	r.Record(5)
+	record(r, 5)
 	select {
 	case <-store.wrote:
 	case <-time.After(time.Second):
@@ -288,7 +336,7 @@ func TestRunningWriteErrorIsMetricOnly(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	r := New(store, discardLogger(), reg, Options{Buffer: 4, BatchSize: 1, Interval: time.Hour})
 
-	r.Record(1)
+	record(r, 1)
 	select {
 	case <-store.wrote:
 	case <-time.After(time.Second):
@@ -318,7 +366,7 @@ func TestDrainFullBatchError(t *testing.T) {
 	storeErr := errors.New("db down")
 	var mu sync.Mutex
 	var calls int
-	store := &fnStore{fn: func(context.Context, map[int64]int64) error {
+	store := &fnStore{fn: func(context.Context, []Click) error {
 		mu.Lock()
 		calls++
 		n := calls
@@ -333,15 +381,15 @@ func TestDrainFullBatchError(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 2, Interval: time.Hour})
 
-	r.Record(1)
-	r.Record(1)
+	record(r, 1)
+	record(r, 1)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for the first flush")
 	}
 	for range 4 {
-		r.Record(2)
+		record(r, 2)
 	}
 
 	errCh := make(chan error, 1)
@@ -374,7 +422,7 @@ func TestDrainStopsWhenCloseContextEnds(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var calls int
-	store := &fnStore{fn: func(ctx context.Context, _ map[int64]int64) error {
+	store := &fnStore{fn: func(ctx context.Context, _ []Click) error {
 		mu.Lock()
 		calls++
 		n := calls
@@ -396,15 +444,15 @@ func TestDrainStopsWhenCloseContextEnds(t *testing.T) {
 		Buffer: 16, BatchSize: 2, Interval: time.Hour, WriteTimeout: 5 * time.Second,
 	})
 
-	r.Record(1)
-	r.Record(1)
+	record(r, 1)
+	record(r, 1)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for the first flush")
 	}
 	for range 6 {
-		r.Record(2)
+		record(r, 2)
 	}
 
 	errCh := make(chan error, 1)
@@ -437,14 +485,14 @@ TestCloseWaitsForCanceledWrite 固定 ctx 到期后 Close 仍等这一批写完�
 */
 func TestCloseWaitsForCanceledWrite(t *testing.T) {
 	finished := make(chan struct{})
-	store := &fnStore{fn: func(ctx context.Context, _ map[int64]int64) error {
+	store := &fnStore{fn: func(ctx context.Context, _ []Click) error {
 		<-ctx.Done()
 		close(finished)
 		return ctx.Err()
 	}}
 	reg := prometheus.NewRegistry()
 	r := New(store, discardLogger(), reg, Options{Buffer: 4, BatchSize: 10, Interval: time.Hour})
-	r.Record(1)
+	record(r, 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -465,7 +513,7 @@ func TestCloseWaitsForCanceledWrite(t *testing.T) {
 func TestWorkerPanicStopsRecorder(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	r := New(panicStore{}, discardLogger(), reg, Options{Buffer: 4, BatchSize: 1, Interval: time.Hour})
-	r.Record(1)
+	record(r, 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -473,23 +521,23 @@ func TestWorkerPanicStopsRecorder(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "store exploded") {
 		t.Fatalf("Close error = %v, want panic", err)
 	}
-	r.Record(2)
+	record(r, 2)
 	if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 0 {
 		t.Errorf("dropped = %v, want 0", got)
 	}
 }
 
 type fnStore struct {
-	fn func(ctx context.Context, counts map[int64]int64) error
+	fn func(ctx context.Context, clicks []Click) error
 }
 
-func (s *fnStore) AddClicks(ctx context.Context, counts map[int64]int64) error {
-	return s.fn(ctx, counts)
+func (s *fnStore) RecordClicks(ctx context.Context, clicks []Click) error {
+	return s.fn(ctx, clicks)
 }
 
 type panicStore struct{}
 
-func (panicStore) AddClicks(context.Context, map[int64]int64) error {
+func (panicStore) RecordClicks(context.Context, []Click) error {
 	panic("store exploded")
 }
 

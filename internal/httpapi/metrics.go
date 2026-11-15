@@ -81,12 +81,13 @@ func (m *httpMetrics) httpMiddleware(mux *http.ServeMux) middleware {
 
 /*
 methodLabel 把方法收成有限集合。
-已注册的只有 GET 和 POST；net/http 里 GET 的模式同时匹配 HEAD，所以 HEAD 单独留下。
-其余方法只会出现在未匹配的请求上，原样做 label 会随客户端输入无限增长。
+已注册的有 GET、HEAD、POST、PATCH、DELETE；net/http 里 GET 的模式同时匹配 HEAD，
+所以 HEAD 单独留下。其余方法只会出现在未匹配的请求上，
+原样做 label 会随客户端输入无限增长。
 */
 func methodLabel(method string) string {
 	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost:
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPatch, http.MethodDelete:
 		return method
 	default:
 		return methodOther

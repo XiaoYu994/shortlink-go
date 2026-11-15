@@ -42,6 +42,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	/*
+		盐是访客哈希的密钥。为空时不记访客，UV 会一直是 0；
+		与其静默降级，不如启动失败，让部署方把 VISITOR_SALT 配上。
+	*/
+	if cfg.VisitorSalt == "" {
+		return errors.New("VISITOR_SALT is required")
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -95,8 +102,13 @@ func run() error {
 	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
 		MissConcurrency: cfg.CacheMissConcurrency,
 		FetchTimeout:    cfg.CacheFetchTimeout,
+		Logger:          logger,
 	})
-	srv := httpapi.NewRedirector(logger, store, cfg.RequestTimeout, registry, clicks)
+	srv := httpapi.NewRedirector(logger, store, cfg.RequestTimeout, registry, httpapi.RedirectOptions{
+		Clicks:            clicks,
+		VisitorSalt:       []byte(cfg.VisitorSalt),
+		TrustProxyHeaders: cfg.TrustProxyHeaders,
+	})
 
 	/*
 		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。

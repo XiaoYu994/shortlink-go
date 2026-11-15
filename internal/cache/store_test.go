@@ -26,10 +26,14 @@ fakeStore 是下一层存储的替身。get 每次调用都计数，
 测试用它断言请求有没有被缓存挡住。
 */
 type fakeStore struct {
-	calls   atomic.Int32
-	creates atomic.Int32
-	get     func(ctx context.Context, code string) (*link.Link, error)
-	create  func(l *link.Link) error
+	calls    atomic.Int32
+	creates  atomic.Int32
+	updates  atomic.Int32
+	deletes  atomic.Int32
+	get      func(ctx context.Context, code string) (*link.Link, error)
+	create   func(l *link.Link) error
+	update   func(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
+	deleteFn func(ctx context.Context, tenantID int64, code string) error
 }
 
 func (f *fakeStore) Create(ctx context.Context, l *link.Link) error {
@@ -43,6 +47,34 @@ func (f *fakeStore) Create(ctx context.Context, l *link.Link) error {
 func (f *fakeStore) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	f.calls.Add(1)
 	return f.get(ctx, code)
+}
+
+func (f *fakeStore) List(context.Context, link.ListOptions) ([]link.AdminLink, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) GetForTenant(context.Context, int64, string) (*link.AdminLink, error) {
+	return nil, link.ErrNotFound
+}
+
+func (f *fakeStore) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
+	f.updates.Add(1)
+	if f.update != nil {
+		return f.update(ctx, tenantID, code, u)
+	}
+	return nil, link.ErrNotFound
+}
+
+func (f *fakeStore) Delete(ctx context.Context, tenantID int64, code string) error {
+	f.deletes.Add(1)
+	if f.deleteFn != nil {
+		return f.deleteFn(ctx, tenantID, code)
+	}
+	return nil
+}
+
+func (f *fakeStore) Stats(context.Context, int64, string, time.Time, time.Time) (*link.Stats, error) {
+	return nil, link.ErrNotFound
 }
 
 /*
@@ -542,8 +574,9 @@ func TestStoreNegativeWriteDoesNotOverwritePositive(t *testing.T) {
 	}}
 	s := newTestStore(t, next, rdb)
 
-	s.writeCache(ctx, key, want)
-	s.writeCache(ctx, key, nil)
+	// 正缓存来自创建（无条件写），负缓存来自回源（SET NX 不能盖掉它）。
+	s.writeCache(ctx, key, want, writeOverwrite)
+	s.writeCache(ctx, key, nil, writeNX)
 
 	data, err := rdb.Get(ctx, key).Bytes()
 	if err != nil {
@@ -1041,3 +1074,151 @@ func TestStoreGetByCodeUsesFetchTimeout(t *testing.T) {
 		t.Errorf("GetByCode took %v, fetch timeout %v was not applied", elapsed, fetchTimeout)
 	}
 }
+
+/*
+TestStoreUpdateWritesThrough 验证修改提交后无条件覆盖缓存：
+之后的跳转直接命中新值，不再回源。
+*/
+func TestStoreUpdateWritesThrough(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	newURL := "https://example.com/new"
+	next := &fakeStore{update: func(_ context.Context, tenantID int64, gotCode string, u link.Update) (*link.AdminLink, error) {
+		if tenantID != 1 || gotCode != code {
+			t.Errorf("Update(%d, %q), want (1, %q)", tenantID, gotCode, code)
+		}
+		return &link.AdminLink{
+			Link:   link.Link{ID: 7, Code: code, URL: *u.URL},
+			Clicks: 3,
+		}, nil
+	}}
+	s := newTestStore(t, next, rdb)
+	ctx := context.Background()
+
+	updated, err := s.Update(ctx, 1, code, link.Update{URL: &newURL})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.URL != newURL {
+		t.Errorf("updated URL = %q, want %q", updated.URL, newURL)
+	}
+
+	want := &link.Link{ID: 7, Code: code, URL: newURL}
+	next.get = func(context.Context, string) (*link.Link, error) {
+		t.Error("GetByCode fell through to the store after Update")
+		return nil, link.ErrNotFound
+	}
+	got, err := s.GetByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	if got.URL != want.URL || got.ID != want.ID {
+		t.Errorf("GetByCode = %+v, want %+v", got, want)
+	}
+	if n := next.updates.Load(); n != 1 {
+		t.Errorf("updates = %d, want 1", n)
+	}
+}
+
+// TestStoreUpdateExpiredWritesNegative 验证只改 URL、链接原本已过期时写负缓存。
+func TestStoreUpdateExpiredWritesNegative(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Minute)
+
+	next := &fakeStore{update: func(_ context.Context, _ int64, _ string, _ link.Update) (*link.AdminLink, error) {
+		return &link.AdminLink{
+			Link: link.Link{ID: 7, Code: code, URL: "https://example.com/expired", ExpiresAt: &past},
+		}, nil
+	}}
+	s := newTestStore(t, next, rdb)
+	if _, err := s.Update(ctx, 1, code, link.Update{URL: ptrString("https://example.com/expired")}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if got := rdb.Get(ctx, keyPrefix+code).Val(); got != "null" {
+		t.Errorf("cached value = %q, want null", got)
+	}
+	next.get = func(context.Context, string) (*link.Link, error) {
+		t.Error("GetByCode fell through to the store after negative cache")
+		return nil, link.ErrNotFound
+	}
+	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
+		t.Errorf("GetByCode error = %v, want ErrNotFound", err)
+	}
+}
+
+/*
+TestStoreDeleteWritesNegative 验证删除后无条件写负缓存，
+盖掉之前的正缓存；之后的跳转直接 404。
+*/
+func TestStoreDeleteWritesNegative(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+	ctx := context.Background()
+
+	next := &fakeStore{deleteFn: func(_ context.Context, tenantID int64, gotCode string) error {
+		if tenantID != 1 || gotCode != code {
+			t.Errorf("Delete(%d, %q), want (1, %q)", tenantID, gotCode, code)
+		}
+		return nil
+	}}
+	s := newTestStore(t, next, rdb)
+
+	s.writeCache(ctx, keyPrefix+code, &link.Link{ID: 7, Code: code, URL: "https://example.com/old"}, writeOverwrite)
+	if err := s.Delete(ctx, 1, code); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got := rdb.Get(ctx, keyPrefix+code).Val(); got != "null" {
+		t.Errorf("cached value = %q, want null", got)
+	}
+	next.get = func(context.Context, string) (*link.Link, error) {
+		t.Error("GetByCode fell through to the store after delete")
+		return nil, link.ErrNotFound
+	}
+	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
+		t.Errorf("GetByCode error = %v, want ErrNotFound", err)
+	}
+}
+
+/*
+TestStoreOriginWriteDoesNotOverwriteNewValue 固定 ADR 0011 的交错语义：
+在途回源读到旧值，修改提交后已经无条件覆盖缓存，旧回源的 SET NX 必须失败，
+不能把新值盖回去。
+*/
+func TestStoreOriginWriteDoesNotOverwriteNewValue(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+	ctx := context.Background()
+	key := keyPrefix + code
+
+	s := newTestStore(t, &fakeStore{}, rdb)
+	newLink := &link.Link{ID: 7, Code: code, URL: "https://example.com/new"}
+	stale := &link.Link{ID: 7, Code: code, URL: "https://example.com/old"}
+
+	s.writeCache(ctx, key, newLink, writeOverwrite)
+	s.writeCache(ctx, key, stale, writeNX)
+
+	data, err := rdb.Get(ctx, key).Bytes()
+	if err != nil {
+		t.Fatalf("get cached value: %v", err)
+	}
+	var cached *link.Link
+	if err := json.Unmarshal(data, &cached); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cached == nil || cached.URL != newLink.URL {
+		t.Errorf("cached = %+v, want new URL %q", cached, newLink.URL)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSkipped)); got != 1 {
+		t.Errorf("writes{result=skipped} = %v, want 1", got)
+	}
+}
+
+func ptrString(s string) *string { return &s }

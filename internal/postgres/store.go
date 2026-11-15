@@ -31,14 +31,6 @@ const (
 	*/
 	getLinkSQL = `SELECT id, code, url, expires_at, created_at, tenant_id FROM ` + linksTable + `
 WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())`
-	/*
-		同一行在 data 里只出现一次，调用方已经按 id 加总。
-		unnest 的两个数组按下标配对，长度必须一致。
-	*/
-	addClicksSQL = `UPDATE ` + linksTable + ` AS l
-SET clicks = l.clicks + data.n
-FROM unnest($1::bigint[], $2::bigint[]) AS data(id, n)
-WHERE l.id = data.id`
 
 	/*
 		maxCodeAttempts 是短码冲突时的最大重试次数。
@@ -138,35 +130,6 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		return nil, fmt.Errorf("get link: %w", err)
 	}
 	return &l, nil
-}
-
-/*
-AddClicks 把一批点击加到已有计数上。
-不存在的 id 匹配不到行，不影响同一条语句里的其他 id。
-counts 为空时不访问数据库。[]int64 由 pgx 编成 bigint[]。
-*/
-func (s *Store) AddClicks(ctx context.Context, counts map[int64]int64) error {
-	if len(counts) == 0 {
-		return nil
-	}
-
-	ids := make([]int64, 0, len(counts))
-	ns := make([]int64, 0, len(counts))
-	for id, n := range counts {
-		if id <= 0 || n <= 0 {
-			continue
-		}
-		ids = append(ids, id)
-		ns = append(ns, n)
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-
-	if _, err := s.db.ExecContext(ctx, addClicksSQL, ids, ns); err != nil {
-		return fmt.Errorf("add clicks: %w", err)
-	}
-	return nil
 }
 
 /*

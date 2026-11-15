@@ -8,13 +8,14 @@
 ```txt
 DATABASE_URL=postgres://user:password@127.0.0.1:5432/dbname?sslmode=disable
 REDIS_URL=redis://localhost:6379/0
+VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。
+`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`。
 
 `.env` 已被 gitignore，不会提交。
 
-- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants` 和 `api_keys`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
+- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`link_clicks_daily`、`link_dimension_daily` 和 `link_visitors_daily`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
 
 如果使用项目自带的 `docker-compose.yml`：
 
@@ -85,7 +86,7 @@ make run-redirector   # 公开跳转，ADDR 来自 .env，默认 :8080
 make run-console      # 管理 API，本机固定 :8081
 ```
 
-看到 `connected to postgres`、`connected to redis` 和 `listening addr=:8080` / `:8081` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`；`run-console` 用 `ADDR=:8081` 覆盖 `.env` 里的地址。密钥命令 `make console ...` 不启动 HTTP，也不需要 Redis。
+看到 `connected to postgres`、`connected to redis` 和 `listening addr=:8080` / `:8081` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`；`run-console` 用 `ADDR=:8081` 覆盖 `.env` 里的地址。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥命令 `make console ...` 不启动 HTTP，也不需要 Redis。
 
 检查：
 
@@ -113,11 +114,11 @@ curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `go_goroutines` 等 Go 运行时指标，一启动就有
 - `process_*`：进程 CPU、内存、文件描述符，一启动就有
 - `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），每个进程各一份，一启动就有
-- `shortlink_http_*`：HTTP 请求数和耗时。`method` 只有 `GET`、`HEAD`、`POST`、`other`
-- `shortlink_store_*`：存储操作的耗时和结果（`success`、`not_found`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 创建后出现 `operation="create"`
+- `shortlink_http_*`：HTTP 请求数和耗时。`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`
+- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 调过管理接口后出现对应操作
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。只有 redirector 读取，发生过跳转才出现
 - `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。只有 redirector 有；按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
-- `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。两个进程都可能写：console 创建时写穿，redirector 回源时写。`skipped` 表示负缓存 `SET NX` 没写进去（key 已被创建写好）
+- `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。两个进程都可能写：console 在创建、修改、删除后维护缓存，redirector 回源时写。`skipped` 表示回源的 `SET NX` 没写进去（key 已有更新的值，可能是并发的创建或管理写）
 - `shortlink_cache_operation_duration_seconds`：缓存操作耗时，`operation` 为 `get`、`set`，用来区分慢在 Redis 还是数据库
 - `shortlink_clicks_dropped_total`：点击缓冲满了没记下的次数。只有 redirector 有，一启动就是 0
 - `shortlink_clicks_written_total`：交给存储的点击数，`result` 为 `success` 或 `error`。只有 redirector 有，一启动两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`
@@ -130,8 +131,9 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
 - 正缓存 TTL 取剩余寿命和 1 小时里更短的那个；没有到期时间时是 1 小时。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
-- 创建成功后写穿正缓存；负缓存用 `SET NX`，避免和创建并发时后到的负缓存覆盖正缓存。
+- 回源写缓存（正、负）都用 `SET NX`，只有 key 不存在时才写。console 在创建、修改、删除提交后无条件覆盖缓存；删除写负缓存，修改后的链接已过期也写负缓存。这样在途旧回源不会盖掉管理写的新值。
 - 并发未命中用 singleflight 合并回源。普通未命中和 Redis 读失败（fallback）各有一条回源限流：许可数分别是 `CACHE_MISS_CONCURRENCY`（默认 8）和固定 8，拿不到许可立即返回 503。单次回源超时由 `CACHE_FETCH_TIMEOUT`（默认 1s）控制，独立于 `REQUEST_TIMEOUT`。启动时 Ping 失败进程会退出，属于部署配置错误。
+- 修改或删除后 Redis 写失败只影响一致性：旧值可能保留到 TTL，下一次写路径会自愈。删除不是强撤销，已经在途的跳转仍可能返回 302。
 - 查看某个短码的缓存：
 
 ```bash
@@ -327,6 +329,54 @@ Prometheus（服务端，30 秒窗口）：
 - miss 和不存在场景每轮使用不同的短码，窗口内每个短码只访问一次；同一短码重复访问会命中刚写入的缓存。
 - 503 是 bulkhead 主动拒绝，不是故障；客户端应退避重试。当前 503 响应没有 `Retry-After`，后续可以补。
 
+## 点击写入压测（2026-11-15）
+
+目标：日聚合把点击写入从 1 条 UPDATE 变成 2 条 upsert、1 条访客 insert 加 1 条 UPDATE，
+确认跳转路径和连接池还能承受，并观察 dropped。
+
+### 环境和方法
+
+| 项目 | 配置 |
+| --- | --- |
+| 机器 | 本机 Linux，16 vCPU，PostgreSQL/Redis 用项目 compose |
+| 应用 | `bin/redirector`、`bin/console`，测试库，Redis DB 15，`LOG_LEVEL=warn` |
+| 压测工具 | vegeta，`-redirects=0`，单热 key，`GET /r/{code}` |
+| 请求头 | 固定 `Referer: https://news.ycombinator.com/item?id=1` 和 Chrome User-Agent |
+| 流量 | 预热 5s x 1000/s，测量 20s x 3000/s |
+| 连接池 | `DB_MAX_OPEN_CONNS=10`、`DB_MAX_IDLE_CONNS=5`（默认） |
+
+所有请求都命中 console 创建时写穿的正缓存，所以存储读路径没有流量；点击走
+`ClickRecorder` 每 1 秒或满 100 条的异步批量写。
+
+### 结果
+
+vegeta（客户端）：
+
+| 指标 | 数值 |
+| --- | --- |
+| 请求数 | 60,000（预热 5,000） |
+| 客户端 p50 / p99 / max | 0.35 / 0.83 / 2.73 ms |
+| 状态码 | 全部 302（`-redirects=0` 时 vegeta 把 302 当作停止点，`Success` 统计为 0 是工具口径） |
+
+redirector `/metrics`（20 秒窗口）：
+
+| 指标 | 数值 |
+| --- | --- |
+| `shortlink_cache_gets_total{result="hit"}` | 65,000（含预热） |
+| `shortlink_clicks_written_total{result="success"}` | 65,000 |
+| `shortlink_clicks_written_total{result="error"}` | 0 |
+| `shortlink_clicks_dropped_total` | 0 |
+| `go_sql_in_use_connections` 峰值 | 1 |
+| `go_sql_wait_count_total` | 0 |
+
+### 结论
+
+- 单热 key、3000 req/s 下点击写入没有打满 10 个连接：异步批次只占用约 1 个连接，
+  没有等待；dropped 为 0。
+- 客户端 p99 在 1ms 内，说明点击元数据构造和入队没有明显拖慢跳转。
+- 这是单机、单 redirector 和学习用测试库的数字，只用于本机前后对比，不是容量规划依据。
+  真实流量还要看多 key、冷缓存和数据库负载。
+
 ## 签发 API Key
 
 `make` 会加载 `.env`，所以下面的命令能读到 `DATABASE_URL`。直接 `go run` 时要先导出环境变量。命令不连接 Redis。
@@ -369,6 +419,41 @@ curl -i localhost:8080/r/AbC123xy
 
 浏览器打开 `http://localhost:8080/r/AbC123xy` 也可以。
 
+## 管理短链
+
+```bash
+# 列表：默认按 id 降序，limit 最大 100
+curl -s 'localhost:8081/api/v1/links?limit=20&sort=clicks_today' \
+  -H 'Authorization: Bearer slk_...'
+
+# 详情、修改、删除
+curl -s localhost:8081/api/v1/links/AbC123xy -H 'Authorization: Bearer slk_...'
+curl -i -X PATCH localhost:8081/api/v1/links/AbC123xy \
+  -H 'Authorization: Bearer slk_...' -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/new","expires_at":null}'
+curl -i -X DELETE localhost:8081/api/v1/links/AbC123xy -H 'Authorization: Bearer slk_...'
+```
+
+修改和删除之后 console 会维护 Redis 缓存；跳转进程不需要重启。列表和详情包含已过期链接，跳转仍然只认有效链接。游标是响应里的 `next_cursor`，原样传回即可。
+
+## 点击统计
+
+访问几次短链（带 `Referer` 和 `User-Agent`），等 1 秒让 `ClickRecorder` 落库，再查统计：
+
+```bash
+curl -s -H 'Referer: https://news.ycombinator.com/' \
+  -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0' \
+  localhost:8080/r/AbC123xy
+
+sleep 2
+curl -s localhost:8081/api/v1/links/AbC123xy/stats \
+  -H 'Authorization: Bearer slk_...'
+```
+
+默认查最近 8 个 UTC 日（`to` 为今天，`from` 为 `to - 7 天`）。可以用 `?from=...&to=...` 指定 RFC3339 时间，跨度不超过 90 天。`total_clicks` 是终身累计，`clicks` 是日趋势；`devices` 和 `clients` 固定返回全部类别，没有数据的为 0。`unique_visitors` 是每天 UV 相加，不是跨天去重。
+
+访客哈希依赖 `VISITOR_SALT`。换盐会让当天的新旧哈希分裂，UV 可能偏高，安排在 UTC 零点后换。`TRUST_PROXY_HEADERS=false` 时用连接地址，代理后面看到的 IP 会都一样，UV 会偏低；确认代理可信后再打开。
+
 ## 查看数据库
 
 如果使用项目自带的 compose：
@@ -407,8 +492,9 @@ make selfcheck        # test-db + verify + test-integration + smoke
 
 `make smoke` 会启动两个真实进程：redirector 默认 `127.0.0.1:18080`，console 默认 `127.0.0.1:18081`，
 可分别用 `SMOKE_REDIRECTOR_ADDR`、`SMOKE_CONSOLE_ADDR` 覆盖。它使用测试库和测试 Redis，
-验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、路由隔离和指标，
-最后用 SIGTERM 检查两个进程的优雅退出。它同样会重建测试库，不碰开发库。
+验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、列表和三种排序、
+修改后缓存写穿、删除、统计、租户隔离、路由隔离和指标，最后用 SIGTERM 检查两个进程的优雅退出。
+脚本会自己设置一个 `VISITOR_SALT`（如果环境里没有）；同样会重建测试库，不碰开发库。
 
 测试配置在 `.env` 里：
 
@@ -446,6 +532,9 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
+| `VISITOR_SALT is required` | `.env` 里没有配置访客哈希的盐；从 `.env.example` 补一行开发占位值 |
+| 统计里 `unique_visitors` 一直是 0 | 检查 redirector 是否配置了 `VISITOR_SALT`；代理后面还需要 `TRUST_PROXY_HEADERS=true`，否则所有请求的 IP 都一样 |
+| `PATCH` 成功后仍跳旧地址 | 看 console 的 `shortlink_cache_writes_total{result="error"}`；Redis 写失败时旧值最多保留到 TTL（1 小时） |
 | 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `CACHE_MISS_CONCURRENCY` |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 在仓库根目录执行 `make migrate` |

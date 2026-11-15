@@ -27,6 +27,21 @@ func principalFrom(ctx context.Context) (tenant.Tenant, bool) {
 }
 
 /*
+principal 取出鉴权中间件写进 context 的租户。
+管理 handler 在 authenticate 里面，理论上不会缺失；缺失说明路由组装错了，
+返回 500，而不是把请求当成没有租户或放开访问。
+*/
+func (s *Server) principal(w http.ResponseWriter, r *http.Request) (tenant.Tenant, bool) {
+	tn, ok := principalFrom(r.Context())
+	if !ok {
+		s.logger.ErrorContext(r.Context(), "missing tenant in request context")
+		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+		return tenant.Tenant{}, false
+	}
+	return tn, true
+}
+
+/*
 authenticate 只包管理 API。/r/、/healthz、/metrics 不经过它。
 密钥格式不对和未知密钥都是 401。数据库故障沿用存储错误的映射，不伪装成密钥无效。
 */

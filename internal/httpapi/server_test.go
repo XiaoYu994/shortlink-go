@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"shortlink/internal/click"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 	"shortlink/internal/memorystore"
@@ -40,8 +41,16 @@ func authorize(req *http.Request) {
 }
 
 // testServer 用测试密钥组装 Server，避免每个用例都传一遍 authenticator。
+// 只注入 LinkStore；需要管理路由的用例用 newAdminServer 或 NewConsole。
 func testServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
-	return newServer(logger, store, requestTimeout, registry, clicks, allowKey{})
+	return newServer(serverDeps{
+		logger:         logger,
+		store:          store,
+		requestTimeout: requestTimeout,
+		registry:       registry,
+		clicks:         clicks,
+		keys:           allowKey{},
+	})
 }
 
 // newTestRegistry 返回一个独立的 Registry，并注册 Go 运行时指标。
@@ -86,7 +95,7 @@ func TestProcessRoutes(t *testing.T) {
 	store := &stubStore{links: map[string]*link.Link{
 		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/old"},
 	}}
-	redirector := NewRedirector(logger, store, 5*time.Second, newTestRegistry(), nil)
+	redirector := NewRedirector(logger, store, 5*time.Second, newTestRegistry(), RedirectOptions{})
 	console := NewConsole(logger, store, 5*time.Second, newTestRegistry(), allowKey{})
 
 	t.Run("redirector redirects", func(t *testing.T) {
@@ -166,7 +175,7 @@ func TestCreateAndRedirect(t *testing.T) {
 		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 
-	var resp createLinkResponse
+	var resp linkResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -210,7 +219,7 @@ func TestCreateWithExpiresAt(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
-	var resp createLinkResponse
+	var resp linkResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -338,14 +347,14 @@ func TestRedirectInvalidCode(t *testing.T) {
 }
 
 type recordSink struct {
-	mu  sync.Mutex
-	ids []int64
+	mu     sync.Mutex
+	clicks []click.Click
 }
 
-func (s *recordSink) Record(id int64) {
+func (s *recordSink) Record(c click.Click) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ids = append(s.ids, id)
+	s.clicks = append(s.clicks, c)
 }
 
 func TestRedirectRecordsClick(t *testing.T) {
@@ -370,8 +379,8 @@ func TestRedirectRecordsClick(t *testing.T) {
 
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if len(sink.ids) != 1 || sink.ids[0] != 42 {
-		t.Errorf("recorded = %v, want [42]", sink.ids)
+	if len(sink.clicks) != 1 || sink.clicks[0].LinkID != 42 {
+		t.Errorf("recorded = %v, want link 42", sink.clicks)
 	}
 }
 
@@ -393,8 +402,8 @@ func TestRedirectHeadDoesNotRecordClick(t *testing.T) {
 
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if len(sink.ids) != 0 {
-		t.Errorf("recorded = %v, want none", sink.ids)
+	if len(sink.clicks) != 0 {
+		t.Errorf("recorded = %v, want none", sink.clicks)
 	}
 }
 
@@ -420,8 +429,8 @@ func TestRedirectCanceledDuringGetDoesNotRecordClick(t *testing.T) {
 	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if len(sink.ids) != 0 {
-		t.Errorf("recorded = %v, want none", sink.ids)
+	if len(sink.clicks) != 0 {
+		t.Errorf("recorded = %v, want none", sink.clicks)
 	}
 }
 
@@ -453,6 +462,25 @@ func (s *stubStore) GetByCode(_ context.Context, code string) (*link.Link, error
 		return nil, link.ErrNotFound
 	}
 	return l, nil
+}
+
+// 管理方法只满足 NewConsole 的接口；这个替身不测管理行为。
+func (s *stubStore) List(context.Context, link.ListOptions) ([]link.AdminLink, error) {
+	return nil, nil
+}
+
+func (s *stubStore) GetForTenant(context.Context, int64, string) (*link.AdminLink, error) {
+	return nil, link.ErrNotFound
+}
+
+func (s *stubStore) Update(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+	return nil, link.ErrNotFound
+}
+
+func (s *stubStore) Delete(context.Context, int64, string) error { return link.ErrNotFound }
+
+func (s *stubStore) Stats(context.Context, int64, string, time.Time, time.Time) (*link.Stats, error) {
+	return nil, link.ErrNotFound
 }
 
 /*

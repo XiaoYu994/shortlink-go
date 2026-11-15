@@ -87,40 +87,50 @@ psql_cmd() { # url [psql args...]
 	fi
 }
 
-# seed_smoke_key 往测试库写入一把固定 API Key。明文只留在这个脚本里。
-# 准备脚本会清掉租户表，所以每次冒烟都要重新种，不能提前写进迁移。
-seed_smoke_key() {
-	hash=$(printf '%s' "$SMOKE_API_KEY" | sha256sum | awk '{print $1}')
-	psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q <<SQL || fail '写入冒烟 API Key 失败'
+# seed_key 往测试库写入一把固定 API Key，并给它一个独立租户。
+# 明文只留在这个脚本里。准备脚本会清掉租户表，所以每次冒烟都要重新种，
+# 不能提前写进迁移。
+seed_key() { # tenant-name key
+	name=$1
+	key=$2
+	hash=$(printf '%s' "$key" | sha256sum | awk '{print $1}')
+	psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q <<SQL || fail "写入冒烟 API Key 失败: $name"
 INSERT INTO tenants (name)
-SELECT 'smoke'
+SELECT '${name}'
 WHERE NOT EXISTS (
     SELECT 1 FROM api_keys WHERE key_hash = decode('${hash}', 'hex')
 );
 INSERT INTO api_keys (tenant_id, key_hash)
-SELECT id, decode('${hash}', 'hex')
-FROM tenants
-WHERE name = 'smoke'
-ORDER BY id
-LIMIT 1
-ON CONFLICT (key_hash) DO NOTHING;
+SELECT t.id, decode('${hash}', 'hex')
+FROM tenants t
+WHERE t.name = '${name}'
+  AND NOT EXISTS (SELECT 1 FROM api_keys WHERE key_hash = decode('${hash}', 'hex'))
+ORDER BY t.id
+LIMIT 1;
 SQL
 }
 
-# request 把状态码写到 stdout，响应体和响应头分别放进 $TMP/body、$TMP/headers。
+# request 用冒烟租户的密钥发请求，状态码写到 stdout，
+# 响应体和响应头分别放进 $TMP/body、$TMP/headers。
 request() { # base method path [json]
-	base=$1
-	method=$2
-	path=$3
-	body=${4:-}
+	request_as "$SMOKE_API_KEY" "$@"
+}
+
+# request_as 用指定密钥发请求，用来验证租户隔离。
+request_as() { # key base method path [json]
+	key=$1
+	base=$2
+	method=$3
+	path=$4
+	body=${5:-}
 	if [ -n "$body" ]; then
 		curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 			-X "$method" -H 'Content-Type: application/json' \
-			-H "Authorization: Bearer $SMOKE_API_KEY" \
+			-H "Authorization: Bearer $key" \
 			-d "$body" "$base$path"
 	else
 		curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
-			-X "$method" "$base$path"
+			-X "$method" -H "Authorization: Bearer $key" "$base$path"
 	fi
 }
 
@@ -168,10 +178,15 @@ CONSOLE_ADDR=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
 REDIRECTOR_BASE=http://$REDIRECTOR_ADDR
 CONSOLE_BASE=http://$CONSOLE_ADDR
 export LOG_LEVEL=error
+# redirector 没有盐会拒绝启动。CI 从 .env.example 生成 .env，本机可能还没配。
+VISITOR_SALT=${VISITOR_SALT:-smoke-visitor-salt}
+export VISITOR_SALT
 
 # 64 位小写十六进制。只存在于测试库，和开发库无关。
 SMOKE_API_KEY=slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
-seed_smoke_key
+SMOKE_OTHER_KEY=slk_ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+seed_key smoke "$SMOKE_API_KEY"
+seed_key smoke-other "$SMOKE_OTHER_KEY"
 
 # 两个进程各自读 ADDR；.env 里的 ADDR 被这里的赋值覆盖。
 ADDR=$REDIRECTOR_ADDR ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
@@ -233,6 +248,66 @@ echo 'smoke: invalid url'
 status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"ftp://example.com"}')
 assert_eq "$status" 400 '非法 URL'
 grep -q '"error"' "$TMP/body" || fail '400 响应体不是 JSON error'
+
+echo 'smoke: admin list and detail'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links?limit=10")
+assert_eq "$status" 200 'GET /api/v1/links 状态码'
+grep -q "\"code\":\"$code\"" "$TMP/body" || fail '列表里没有刚创建的短码'
+grep -q '"clicks_today"' "$TMP/body" || fail '列表项没有 clicks_today'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 200 'GET /api/v1/links/{code} 状态码'
+grep -q "\"code\":\"$code\"" "$TMP/body" || fail '详情里没有 short code'
+grep -q '"created_at"' "$TMP/body" || fail '详情里没有 created_at'
+grep -q '"clicks"' "$TMP/body" || fail '详情里没有 clicks'
+
+echo 'smoke: tenant isolation'
+status=$(request_as "$SMOKE_OTHER_KEY" "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 404 '其他租户查询详情'
+status=$(request_as "$SMOKE_OTHER_KEY" "$CONSOLE_BASE" DELETE "/api/v1/links/$code")
+assert_eq "$status" 404 '其他租户删除链接'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 200 '其他租户的删除不应影响链接'
+
+echo 'smoke: update and cache write-through'
+newurl="https://example.com/smoke-updated-$$-$(date +%s)"
+status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$code" "{\"url\":\"$newurl\"}")
+assert_eq "$status" 200 'PATCH /api/v1/links/{code} 状态码'
+grep -q "\"url\":\"$newurl\"" "$TMP/body" || fail 'PATCH 响应里没有新 URL'
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H 'Referer: https://news.ycombinator.com/item?id=1' \
+	-A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' \
+	"$REDIRECTOR_BASE/r/$code")
+assert_eq "$status" 302 '修改后跳转状态码'
+assert_eq "$(header Location)" "$newurl" '修改后跳转 Location（console 应写穿缓存）'
+
+echo 'smoke: sorting'
+for sort in id clicks clicks_today; do
+	status=$(request "$CONSOLE_BASE" GET "/api/v1/links?limit=10&sort=$sort")
+	assert_eq "$status" 200 "GET /api/v1/links?sort=$sort 状态码"
+	grep -q "\"code\":\"$code\"" "$TMP/body" || fail "sort=$sort 的列表里没有短码"
+done
+
+echo 'smoke: stats'
+# ClickRecorder 每 1 秒或满批写出，等这批点击落库再查统计。
+sleep 2
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code/stats")
+assert_eq "$status" 200 'GET /api/v1/links/{code}/stats 状态码'
+grep -q '"total_clicks":2' "$TMP/body" || fail "统计里 total_clicks 不是 2: $(cat "$TMP/body")"
+grep -q '"referrer":"news.ycombinator.com"' "$TMP/body" || fail '统计里没有 Referer host'
+grep -q '"device":"desktop"' "$TMP/body" || fail '统计里没有设备类别'
+grep -q '"client":"browser"' "$TMP/body" || fail '统计里没有客户端类别'
+grep -q '"daily_visitors"' "$TMP/body" || fail '统计里没有每日访客'
+grep -q '"unique_visitors"' "$TMP/body" || fail '统计里没有 unique_visitors'
+
+echo 'smoke: delete'
+status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$code")
+assert_eq "$status" 204 'DELETE /api/v1/links/{code} 状态码'
+status=$(request "$REDIRECTOR_BASE" GET "/r/$code")
+assert_eq "$status" 404 '删除后跳转'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 404 '删除后详情'
+status=$(request_as "$SMOKE_OTHER_KEY" "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 404 '删除后其他租户详情'
 
 echo 'smoke: expiry'
 # GNU date；CI 和 WSL2 都是 Linux。留 3 秒余量，再等 4 秒确保越过到期时刻。

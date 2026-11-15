@@ -11,11 +11,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"shortlink/internal/click"
 	"shortlink/internal/link"
 )
 
 /*
-LinkStore 是 handler 需要的存储能力。
+LinkStore 是跳转和创建需要的存储能力。
 接口定义在使用方，内存版和 PostgreSQL 版都只要满足它。
 */
 type LinkStore interface {
@@ -24,58 +25,130 @@ type LinkStore interface {
 }
 
 /*
+LinkAdminStore 是管理接口的存储能力。
+所有方法都带 tenantID，由 handler 从鉴权 context 取出，不能来自请求体。
+*/
+type LinkAdminStore interface {
+	List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error)
+	GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error)
+	Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
+	Delete(ctx context.Context, tenantID int64, code string) error
+}
+
+// LinkStatsStore 提供统计查询，不经过 Redis 缓存。
+type LinkStatsStore interface {
+	Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error)
+}
+
+// ConsoleStore 是 console 需要的全部能力；cache 和 storemetrics 都实现它。
+type ConsoleStore interface {
+	LinkStore
+	LinkAdminStore
+	LinkStatsStore
+}
+
+/*
 ClickRecorder 接收一次成功的跳转。
 Record 必须马上返回。nil 表示这个 Server 不记点击，现有测试走这条路径。
 */
 type ClickRecorder interface {
-	Record(id int64)
+	Record(click.Click)
+}
+
+// RedirectOptions 是跳转进程的额外依赖。
+type RedirectOptions struct {
+	// Clicks 为 nil 时跳转不记点击。传入的必须是未装箱的 nil：
+	// 带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
+	Clicks ClickRecorder
+	// VisitorSalt 是按天访客哈希的 HMAC 密钥；为空时不记访客，点击本身照常记录。
+	VisitorSalt []byte
+	// TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
+	// 只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+	TrustProxyHeaders bool
 }
 
 // Server 持有 handler 需要的依赖。用 NewRedirector 或 NewConsole 构造。
 type Server struct {
 	logger         *slog.Logger
 	store          LinkStore
+	admin          LinkAdminStore
+	stats          LinkStatsStore
 	keys           APIKeyAuthenticator
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
 	clicks         ClickRecorder
+	visitorSalt    []byte
+	trustProxy     bool
 }
 
-/*
-NewRedirector 组装公开跳转进程，clicks 为 nil 时跳转不记点击。
-传入的必须是未装箱的 nil：带类型的 nil 指针放进接口后不等于 nil，调用 Record 会 panic。
-*/
-func NewRedirector(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder) *Server {
-	return newServer(logger, store, requestTimeout, registry, clicks, nil)
+// serverDeps 是 newServer 的参数，避免一长串容易错位的位置参数。
+type serverDeps struct {
+	logger            *slog.Logger
+	store             LinkStore
+	admin             LinkAdminStore
+	stats             LinkStatsStore
+	keys              APIKeyAuthenticator
+	requestTimeout    time.Duration
+	registry          *prometheus.Registry
+	clicks            ClickRecorder
+	visitorSalt       []byte
+	trustProxyHeaders bool
+}
+
+// NewRedirector 组装公开跳转进程，不注册管理路由。
+func NewRedirector(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, opts RedirectOptions) *Server {
+	return newServer(serverDeps{
+		logger:            logger,
+		store:             store,
+		requestTimeout:    requestTimeout,
+		registry:          registry,
+		clicks:            opts.Clicks,
+		visitorSalt:       opts.VisitorSalt,
+		trustProxyHeaders: opts.TrustProxyHeaders,
+	})
 }
 
 /*
 NewConsole 组装管理进程。
 keys 为 nil 时创建接口返回 500，而不是把鉴权放开。
+ConsoleStore 同时提供跳转读取、管理 CRUD 和统计查询。
 */
-func NewConsole(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, keys APIKeyAuthenticator) *Server {
-	return newServer(logger, store, requestTimeout, registry, nil, keys)
+func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Duration, registry *prometheus.Registry, keys APIKeyAuthenticator) *Server {
+	return newServer(serverDeps{
+		logger:         logger,
+		store:          store,
+		admin:          store,
+		stats:          store,
+		keys:           keys,
+		requestTimeout: requestTimeout,
+		registry:       registry,
+	})
 }
 
 /*
 newServer 是两个构造函数共用的实现，让 main 只拿到自己那一半依赖：
-redirector 没有 keys，console 没有 clicks。测试在同一个包内，也可以直接用它同时组装两组路由。
+redirector 没有 keys 和 admin，console 没有 clicks。测试在同一个包内，
+也可以直接用它同时组装两组路由，或者只给其中一部分依赖。
 
 logger 包上一层 requestIDHandler：带请求 context 的日志会自动写上 request_id。
 requestTimeout 是每个请求的处理时限，由 timeout 中间件执行，必须为正。
 registry 由 main 创建并注入，/metrics 从这里收集；测试每次传一个新的 Registry，
 避免同名指标重复注册。HTTP 指标在这个构造函数里注册一次，两个路由方法只组装中间件。
 */
-func newServer(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, clicks ClickRecorder, keys APIKeyAuthenticator) *Server {
+func newServer(d serverDeps) *Server {
 	return &Server{
-		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
-		store:          store,
-		keys:           keys,
-		requestTimeout: requestTimeout,
-		registry:       registry,
-		metrics:        newHTTPMetrics(registry),
-		clicks:         clicks,
+		logger:         slog.New(requestIDHandler{Handler: d.logger.Handler()}),
+		store:          d.store,
+		admin:          d.admin,
+		stats:          d.stats,
+		keys:           d.keys,
+		requestTimeout: d.requestTimeout,
+		registry:       d.registry,
+		metrics:        newHTTPMetrics(d.registry),
+		clicks:         d.clicks,
+		visitorSalt:    d.visitorSalt,
+		trustProxy:     d.trustProxyHeaders,
 	}
 }
 

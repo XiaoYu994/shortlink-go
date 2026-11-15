@@ -21,7 +21,7 @@ const usageText = `用法:
   console key list --tenant ID
   console key revoke --id ID
 
-serve 启动管理 HTTP（POST /api/v1/links），需要 DATABASE_URL 和 REDIS_URL。
+serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期。
 --name 会新建租户；已有租户用 --tenant。密钥命令只读 DATABASE_URL，不连接 Redis。
 `

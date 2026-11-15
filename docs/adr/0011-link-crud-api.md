@@ -1,6 +1,6 @@
 # 0011. 短链管理 API 的增删改查和排序
 
-- 状态：Proposed
+- 状态：Accepted
 - 日期：2026-11-15
 
 ## 背景
@@ -71,7 +71,7 @@
 - 空对象、`url` 和 `expires_at` 都没出现、未知字段都返回 400。
 - 不能改 `code`、`tenant_id`、`created_at`、`clicks`、`clicks_today`。
 - Go 的 `*time.Time` 区分不了「没传」和「传了 null」；实现用 `json.RawMessage` 或自定义可选类型。语义由本 ADR 定，写法在 handler 里选。
-- 修改采用读-改-写，最后提交者生效，不做 `If-Match` 或版本号。管理写频率低，先接受并发修改的丢失可能；需要时再加乐观锁。
+- 修改用一条原子 `UPDATE`：没传的字段保持原值，两个字段可以并发修改，同一字段最后提交者生效。不做 `If-Match` 或版本号；管理写频率低，先接受同一字段的并发覆盖，需要时再加乐观锁。
 - URL 和 `expires_at` 的校验从 `NewLink` 里抽成可复用的函数，创建和修改共用，避免两套规则漂移。
 - 成功返回 200 和修改后的链接表示。
 
@@ -105,19 +105,20 @@
 - `PATCH` 返回 200 时，如果 Redis 写成功，之后开始的请求看到新值；已经在途的请求仍可能返回旧值。Redis 写失败时，旧值保留到 TTL，数据库已经是新值，下一次写路径自愈。
 - 删除同理，并且不是强撤销：已经在途的跳转仍可能返回 302，删除后的新请求才会 404。
 - 点击统计按链接 ID 记录，和 URL/过期时间是否刚改过无关；一次跳转只算一次。
-- 两个管理员同时 `PATCH` 同一条链接时，数据库按提交顺序最后写入者生效，读-改-写可能丢一个字段；当前不做 `If-Match`/版本号。管理写低频，先接受，需要时再加乐观锁。
+- 两个管理员同时 `PATCH` 同一条链接时，同一字段按提交顺序最后写入者生效；不同字段都会保留，因为 UPDATE 只改请求里出现的字段。当前不做 `If-Match`/版本号，同一字段的并发覆盖先接受，需要时再加乐观锁。
 - 测试要覆盖回源 `SET NX` 和管理写 `SET` 的交错：旧回源不能盖掉更新的新值或删除的负缓存。
 
 ### 接口拆分
 
 - `httpapi.LinkStore` 保持 `Create` + `GetByCode`，给 redirector 和 console 的创建接口用。
 - 新增 `httpapi.LinkAdminStore`：`List`、`GetForTenant`、`Update`、`Delete`，给 console 的管理 handler 用。
-- 新增组合接口 `httpapi.ConsoleStore`（嵌入上面两个），`NewConsole` 接收它；`Server` 里分别保存 `store` 和 `admin` 两个字段。`NewRedirector` 只接收 `LinkStore`。
-- `cache.Store`、`storemetrics.Store` 是透明装饰器，需要透传完整能力，各自定义一个包含这六个方法的 `LinkStore` 接口；`postgres.Store`、`memorystore.Store` 隐式满足。
+- 新增 `httpapi.LinkStatsStore`：`Stats`，给统计接口用（[ADR 0012](0012-click-analytics.md)）。
+- 新增组合接口 `httpapi.ConsoleStore`（嵌入上面三个），`NewConsole` 接收它；`Server` 里分别保存 `store`、`admin`、`stats` 三个字段。`NewRedirector` 只接收 `LinkStore`。
+- `cache.Store`、`storemetrics.Store` 是透明装饰器，需要透传完整能力，各自定义一个包含这七个方法的 `LinkStore` 接口；`postgres.Store` 隐式满足。`memorystore.Store` 只实现 `LinkStore`。
 - `cache.Store` 的管理方法：
-  - `List`、`GetForTenant` 直接透传，不读也不写缓存。
+  - `List`、`GetForTenant`、`Stats` 直接透传，不读也不写缓存。
   - `Update`、`Delete` 调用下游后在 Redis 维护缓存。
-- `storemetrics` 增加操作 label：`list`、`get_tenant`、`update`、`delete`；结果分类沿用 `success`、`not_found`、`canceled`、`timeout`、`error`。
+- `storemetrics` 增加操作 label：`list`、`get_tenant`、`update`、`delete`、`stats`；结果分类沿用 `success`、`not_found`、`canceled`、`timeout`、`error`。
 
 ### 响应表示
 

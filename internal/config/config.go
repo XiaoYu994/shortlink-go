@@ -48,6 +48,13 @@ type Config struct {
 	CacheMissConcurrency int
 	// CacheFetchTimeout 是单次回源超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
 	CacheFetchTimeout time.Duration
+
+	// VisitorSalt 是按天访客哈希的 HMAC 密钥。redirector 启动时要求非空；
+	// console 不用盐。盐不能提交到仓库，生产从密钥管理注入。
+	VisitorSalt string
+	// TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
+	// 只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+	TrustProxyHeaders bool
 }
 
 /*
@@ -80,6 +87,14 @@ func LoadConfig() (Config, error) {
 	cfg.RedisURL = os.Getenv("REDIS_URL")
 	if cfg.RedisURL == "" {
 		return Config{}, errors.New("REDIS_URL is required")
+	}
+	cfg.VisitorSalt = os.Getenv("VISITOR_SALT")
+	if raw := os.Getenv("TRUST_PROXY_HEADERS"); raw != "" {
+		trust, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TRUST_PROXY_HEADERS: %w", err)
+		}
+		cfg.TrustProxyHeaders = trust
 	}
 	if level := os.Getenv("LOG_LEVEL"); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {

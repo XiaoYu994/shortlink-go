@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"math/rand/v2"
 	"time"
 
@@ -53,9 +55,28 @@ const (
 	resultSkipped = ""
 
 	writeSuccess = "success"
-	// writeSkipped 表示负缓存的 SET NX 没写进去：key 已被并发的创建写好。
+	/*
+		writeSkipped 表示回源的 SET NX 没写进去：key 已经有一个更新的值
+		（并发的创建或管理写）。管理写的无条件 SET 不会产生这个结果。
+	*/
 	writeSkipped = "skipped"
 	writeError   = "error"
+)
+
+/*
+writeMode 区分回源和管理写。
+
+回源用 writeNX：请求读到的是数据库的旧快照，只有 key 不存在时才写，
+避免修改或删除提交之后，在途请求把旧值盖回来。
+
+管理写（创建、修改、删除）用 writeOverwrite：数据库已经提交，
+无条件覆盖缓存；删除写负缓存，修改后的链接已过期也写负缓存。
+*/
+type writeMode int
+
+const (
+	writeNX writeMode = iota
+	writeOverwrite
 )
 
 /*
@@ -65,20 +86,28 @@ const (
 var durationBuckets = prometheus.ExponentialBuckets(0.0001, 2, 18)
 
 /*
-LinkStore 是装饰器需要的最小能力。接口放在使用方，cache 就不依赖 httpapi 和 postgres。
+LinkStore 是装饰器需要的完整能力。接口放在使用方，cache 就不依赖 httpapi 和 postgres。
+List、GetForTenant 和 Stats 直接透传；Update、Delete 除了写库还要维护缓存。
 */
 type LinkStore interface {
 	Create(ctx context.Context, l *link.Link) error
 	GetByCode(ctx context.Context, code string) (*link.Link, error)
+	List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error)
+	GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error)
+	Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
+	Delete(ctx context.Context, tenantID int64, code string) error
+	Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error)
 }
 
 /*
-Options 控制回源保护。零值换成默认值，测试可以只改关心的一项。
+Options 控制回源保护和日志。零值换成默认值，测试可以只改关心的一项。
 MissConcurrency 是普通未命中的回源许可数；FetchTimeout 是单次回源的超时。
+Logger 只用来记录写缓存失败；为 nil 时丢弃日志，生产由 main 注入。
 */
 type Options struct {
 	MissConcurrency int
 	FetchTimeout    time.Duration
+	Logger          *slog.Logger
 }
 
 func (o Options) withDefaults() Options {
@@ -115,21 +144,27 @@ type Store struct {
 
 	// fetchTimeout 是单次回源的上限，独立于请求时限。
 	fetchTimeout time.Duration
+	logger       *slog.Logger
 }
 
 // New 把指标注册到 registry。测试每次传新的，避免重复注册 panic。
 func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts Options) *Store {
 	opts = opts.withDefaults()
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	s := &Store{
-		next: next,
-		rdb:  rdb,
+		next:   next,
+		rdb:    rdb,
+		logger: logger,
 		gets: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: getsMetricName,
 			Help: "Total number of cache lookups by result.",
 		}, []string{"result"}),
 		writes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: writesMetricName,
-			Help: "Total number of cache writes by result.",
+			Help: "Total number of cache writes by result; skipped means an origin SET NX found a newer value.",
 		}, []string{"result"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    durationMetricName,
@@ -153,7 +188,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := s.next.Create(ctx, l); err != nil {
 		return err
 	}
-	s.writeCache(ctx, keyPrefix+l.Code, l)
+	s.writeCache(ctx, keyPrefix+l.Code, l, writeOverwrite)
 	return nil
 }
 
@@ -191,7 +226,9 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		if err != nil && !errors.Is(err, link.ErrNotFound) {
 			return nil, err // 真正的错误不写缓存，下次请求应该重试
 		}
-		s.writeCache(fetchCtx, key, found)
+		// 回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
+		// 这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
+		s.writeCache(fetchCtx, key, found, writeNX)
 		return found, err
 	})
 	if ctx.Err() == nil {
@@ -201,6 +238,57 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		}
 	}
 	return l, err
+}
+
+/*
+List 和 GetForTenant 直接透传，不读也不写缓存。
+管理视角包含过期链接和实时计数，缓存里只有跳转可见的 Link。
+*/
+func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
+	return s.next.List(ctx, opts)
+}
+
+func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error) {
+	return s.next.GetForTenant(ctx, tenantID, code)
+}
+
+/*
+Update 先提交数据库，再无条件覆盖缓存。
+
+修改后的链接如果已经过期（只改 URL、原 expires_at 已过），写负缓存，
+让 redirector 直接 404；否则写新的正缓存。无条件 SET 会覆盖在途回源；
+同时回源改用 SET NX，旧快照不会反过来盖掉这里的新值。
+Redis 写失败只影响一致性，旧值最多保留到 TTL，见 ADR 0011。
+*/
+func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
+	updated, err := s.next.Update(ctx, tenantID, code, u)
+	if err != nil {
+		return nil, err
+	}
+	key := keyPrefix + code
+	if updated.Expired(time.Now()) {
+		s.writeCache(ctx, key, nil, writeOverwrite)
+	} else {
+		s.writeCache(ctx, key, &updated.Link, writeOverwrite)
+	}
+	return updated, nil
+}
+
+/*
+Delete 先提交数据库，再无条件写负缓存，盖掉旧的正缓存。
+删除不是强撤销：已经在途的跳转仍可能返回 302，之后的新请求才会 404。
+*/
+func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
+	if err := s.next.Delete(ctx, tenantID, code); err != nil {
+		return err
+	}
+	s.writeCache(ctx, keyPrefix+code, nil, writeOverwrite)
+	return nil
+}
+
+// Stats 直接查 PostgreSQL，不经过缓存；管理接口流量低，先不做结果缓存。
+func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error) {
+	return s.next.Stats(ctx, tenantID, code, from, to)
 }
 
 /*
@@ -270,13 +358,13 @@ func usableCachedLink(cached *link.Link, code string) bool {
 /*
 writeCache 失败只影响下次命中。ctx 已取消时不记成写失败。
 
-负缓存用 SET NX，避免后写的「不存在」盖掉刚创建的正缓存；
-SET NX 没写进去说明正缓存已经在，记 skipped 而不是 success。
-正缓存用 SET，创建可以盖掉旧的负缓存。
+mode 决定写入方式，不能只按 l 是否为 nil 判断：
+回源的正、负缓存都用 SET NX，管理写（包括删除的负缓存）都用无条件 SET。
+SET NX 没写进去说明已经有更新的值，记 skipped 而不是 success。
 
 TTL 向下随机抖动，避免同一批写入的 key 集中过期。
 */
-func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
+func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode writeMode) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -293,6 +381,7 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 	data, marshalErr := json.Marshal(l)
 	if marshalErr != nil {
 		s.writes.WithLabelValues(writeError).Inc()
+		s.logger.ErrorContext(ctx, "marshal cache value", "key", key, "err", marshalErr)
 		return
 	}
 
@@ -301,7 +390,7 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 		written bool
 		setErr  error
 	)
-	if l == nil {
+	if mode == writeNX {
 		written, setErr = s.rdb.SetNX(ctx, key, data, jitteredTTL(ttl)).Result()
 	} else {
 		setErr = s.rdb.Set(ctx, key, data, jitteredTTL(ttl)).Err()
@@ -310,6 +399,13 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link) {
 	// 调用中取消同样不记。拨号超时不会让 ctx.Err() 非空，仍记成 error。
 	if setErr != nil && ctx.Err() != nil {
 		return
+	}
+	if setErr != nil {
+		/*
+			数据库已经提交，只有缓存落后到 TTL。记下来便于发现 Redis 故障；
+			下一次写路径会自愈，不影响本次响应。
+		*/
+		s.logger.WarnContext(ctx, "write cache", "key", key, "err", setErr)
 	}
 	result := writeSuccess
 	switch {

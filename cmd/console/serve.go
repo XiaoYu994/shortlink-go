@@ -1,6 +1,6 @@
 /*
-serve 是 console 的 HTTP 模式：提供 POST /api/v1/links、/healthz 和 /metrics。
-创建成功后写穿 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
+serve 是 console 的 HTTP 模式：提供短链增删改查、统计、/healthz 和 /metrics。
+创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
 密钥命令仍然走 admin.go 的路径，不加载 Redis。
 */
 package main
@@ -68,6 +68,7 @@ func runServe() error {
 	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
 		MissConcurrency: cfg.CacheMissConcurrency,
 		FetchTimeout:    cfg.CacheFetchTimeout,
+		Logger:          logger,
 	})
 	// 鉴权直接用 pgStore，缓存不参与 API Key 校验。
 	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, pgStore)

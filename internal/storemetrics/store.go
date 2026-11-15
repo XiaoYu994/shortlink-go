@@ -15,8 +15,13 @@ const (
 	operationsMetricName = "shortlink_store_operations_total"
 	durationMetricName   = "shortlink_store_operation_duration_seconds"
 
-	operationCreate = "create"
-	operationGet    = "get"
+	operationCreate    = "create"
+	operationGet       = "get"
+	operationList      = "list"
+	operationGetTenant = "get_tenant"
+	operationUpdate    = "update"
+	operationDelete    = "delete"
+	operationStats     = "stats"
 
 	resultSuccess  = "success"
 	resultNotFound = "not_found"
@@ -38,6 +43,11 @@ LinkStore 是装饰器需要的最小存储能力。接口由使用方定义，
 type LinkStore interface {
 	Create(ctx context.Context, l *link.Link) error
 	GetByCode(ctx context.Context, code string) (*link.Link, error)
+	List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error)
+	GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error)
+	Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
+	Delete(ctx context.Context, tenantID int64, code string) error
+	Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error)
 }
 
 /*
@@ -83,6 +93,42 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 	l, err := s.next.GetByCode(ctx, code)
 	s.observe(operationGet, err, time.Since(start))
 	return l, err
+}
+
+// List、GetForTenant、Update、Delete、Stats 同理，只观察，不改写结果。
+func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
+	start := time.Now()
+	got, err := s.next.List(ctx, opts)
+	s.observe(operationList, err, time.Since(start))
+	return got, err
+}
+
+func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error) {
+	start := time.Now()
+	got, err := s.next.GetForTenant(ctx, tenantID, code)
+	s.observe(operationGetTenant, err, time.Since(start))
+	return got, err
+}
+
+func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
+	start := time.Now()
+	got, err := s.next.Update(ctx, tenantID, code, u)
+	s.observe(operationUpdate, err, time.Since(start))
+	return got, err
+}
+
+func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
+	start := time.Now()
+	err := s.next.Delete(ctx, tenantID, code)
+	s.observe(operationDelete, err, time.Since(start))
+	return err
+}
+
+func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error) {
+	start := time.Now()
+	got, err := s.next.Stats(ctx, tenantID, code, from, to)
+	s.observe(operationStats, err, time.Since(start))
+	return got, err
 }
 
 func (s *Store) observe(operation string, err error, d time.Duration) {

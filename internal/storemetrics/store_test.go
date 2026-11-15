@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -22,6 +23,24 @@ func (s stubStore) Create(context.Context, *link.Link) error { return s.err }
 
 func (s stubStore) GetByCode(context.Context, string) (*link.Link, error) {
 	return s.link, s.err
+}
+
+func (s stubStore) List(context.Context, link.ListOptions) ([]link.AdminLink, error) {
+	return nil, s.err
+}
+
+func (s stubStore) GetForTenant(context.Context, int64, string) (*link.AdminLink, error) {
+	return nil, s.err
+}
+
+func (s stubStore) Update(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+	return nil, s.err
+}
+
+func (s stubStore) Delete(context.Context, int64, string) error { return s.err }
+
+func (s stubStore) Stats(context.Context, int64, string, time.Time, time.Time) (*link.Stats, error) {
+	return nil, s.err
 }
 
 func TestCreateRecordsResult(t *testing.T) {

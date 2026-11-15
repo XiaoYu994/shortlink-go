@@ -1,7 +1,7 @@
 /*
 Command console 是管理进程，也是租户和 API Key 的运维入口。
 
-console serve 提供 POST /api/v1/links、/healthz 和 /metrics；
+console serve 提供短链增删改查、点击统计、/healthz 和 /metrics；
 console key issue/list/revoke 签发密钥、列出状态和吊销，明文只写到标准输出，不进日志。
 密钥命令只连 PostgreSQL，不加载 Redis。进程拆分见 ADR 0009。
 */

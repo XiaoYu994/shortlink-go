@@ -26,15 +26,18 @@ const (
 // errExtraJSON 表示第一个 JSON 值后面还有另一个值。
 var errExtraJSON = errors.New("extra JSON value")
 
+/*
+badRequestError 的文本就是要返回给客户端的短句。
+解码时已经能判断的错误（例如 PATCH 什么都没改）用它，
+不用再经过 createRequestMessage 的 JSON 语法映射。
+*/
+type badRequestError string
+
+func (e badRequestError) Error() string { return string(e) }
+
 type createLinkRequest struct {
 	URL       string     `json:"url"`
 	ExpiresAt *time.Time `json:"expires_at"`
-}
-
-type createLinkResponse struct {
-	Code      string     `json:"code"`
-	URL       string     `json:"url"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 /*
@@ -46,23 +49,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBodyBytes))
-
-	/*
-		一次读完整个 body：MaxBytesReader 的超限错误才能暴露出来，
-		不会只解析第一个 JSON 值就把没读的尾巴放过去。
-	*/
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if s.clientGone(r) {
-			return
-		}
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			s.writeError(r.Context(), w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
-		s.logger.ErrorContext(r.Context(), "read request body", "err", err)
-		s.writeError(r.Context(), w, http.StatusBadRequest, "read request body")
+	body, ok := s.readSmallBody(w, r)
+	if !ok {
 		return
 	}
 
@@ -98,9 +86,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", redirectPrefix+l.Code)
-	s.writeJSON(r.Context(), w, http.StatusCreated, createLinkResponse{
-		Code: l.Code, URL: l.URL, ExpiresAt: l.ExpiresAt,
-	})
+	s.writeJSON(r.Context(), w, http.StatusCreated, newCreatedLinkResponse(l))
 }
 
 /*
@@ -128,6 +114,31 @@ func decodeCreateRequest(body []byte) (createLinkRequest, error) {
 		return createLinkRequest{}, err
 	}
 	return req, nil
+}
+
+/*
+readSmallBody 读取创建和修改共用的请求体，并限制大小。
+返回 false 表示已经写过响应（客户端断开、413 或读失败），handler 直接返回。
+
+一次读完整个 body：MaxBytesReader 的超限错误才能暴露出来，
+不会只解析第一个 JSON 值就把没读的尾巴放过去。
+*/
+func (s *Server) readSmallBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBodyBytes))
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if s.clientGone(r) {
+			return nil, false
+		}
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			s.writeError(r.Context(), w, http.StatusRequestEntityTooLarge, "request body too large")
+			return nil, false
+		}
+		s.logger.ErrorContext(r.Context(), "read request body", "err", err)
+		s.writeError(r.Context(), w, http.StatusBadRequest, "read request body")
+		return nil, false
+	}
+	return body, true
 }
 
 /*

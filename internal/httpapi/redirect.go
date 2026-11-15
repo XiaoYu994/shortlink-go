@@ -3,7 +3,9 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"time"
 
+	"shortlink/internal/click"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 )
@@ -45,19 +47,28 @@ func (s *Server) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		s.recordClick(l.ID)
+		s.recordClick(r, l.ID)
 	}
 	http.Redirect(w, r, l.URL, http.StatusFound)
 }
 
 /*
-recordClick 在知道链接存在之后调用。
+recordClick 在知道链接存在之后调用，构造来源、设备、客户端和访客哈希。
+时间在进入 Recorder 时取，写库延迟不会把点击挪到第二天。
+
 clicks 为 nil 时跳过。这里认的是接口本身为 nil，
 (*click.Recorder)(nil) 放进接口后不等于 nil，调用 Record 会 panic。
 */
-func (s *Server) recordClick(id int64) {
+func (s *Server) recordClick(r *http.Request, id int64) {
 	if s.clicks == nil || id <= 0 {
 		return
 	}
-	s.clicks.Record(id)
+	s.clicks.Record(click.NewClick(
+		id,
+		time.Now().UTC(),
+		r.Referer(),
+		r.UserAgent(),
+		clientIP(r, s.trustProxy),
+		s.visitorSalt,
+	))
 }

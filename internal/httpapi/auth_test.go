@@ -50,7 +50,7 @@ func TestAuthenticate(t *testing.T) {
 				got, saw = principalFrom(r.Context())
 				w.WriteHeader(http.StatusNoContent)
 			})
-			srv := newServer(slog.New(slog.NewTextHandler(io.Discard, nil)), memorystore.New(), 5*time.Second, newTestRegistry(), nil, keys)
+			srv := newServer(serverDeps{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), store: memorystore.New(), requestTimeout: 5 * time.Second, registry: newTestRegistry(), keys: keys})
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/links", nil)
 			if tt.header != "" {
@@ -91,7 +91,7 @@ func TestCreateAssignsTenantFromAPIKey(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 
-	var resp createLinkResponse
+	var resp linkResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

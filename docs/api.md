@@ -9,9 +9,16 @@
 | redirector | `GET` | `/r/{code}` | 302 跳转到原始 URL |
 | console | `GET` | `/healthz` | 健康检查，返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| console | `POST` | `/api/v1/links` | 创建短链，需要 API Key |
+| console | `POST` | `/api/v1/links` | 创建短链 |
+| console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页 |
+| console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期链接 |
+| console | `PATCH` | `/api/v1/links/{code}` | 修改 `url` 和/或 `expires_at` |
+| console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204 |
+| console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客 |
 
 本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放（由部署层的反向代理或网络策略限制）。
+
+管理 API 的租户只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不返回 403，也不透露链接是否存在。
 
 ## 创建短链
 
@@ -32,7 +39,7 @@ Content-Type: application/json; charset=utf-8
 Location: /r/AbC123xy
 X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 
-{"code":"AbC123xy","url":"https://example.com/path?q=1"}
+{"code":"AbC123xy","url":"https://example.com/path?q=1","created_at":"2026-11-15T10:00:00Z","clicks":0,"clicks_today":0}
 ```
 
 规则：
@@ -44,24 +51,129 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 - 请求体必须恰好是一个 JSON 值，尾部多余内容返回 400。
 - `expires_at` 可选，用 RFC3339 时间，例如 `"2026-12-01T00:00:00Z"`。省略或 `null` 表示永不过期。必须是将来的时间，到期时刻本身算过期。格式不对时错误信息是 `invalid expires_at`。过期后短码仍被占着，跳转返回 404。响应里带上同一个时刻；没有设置时响应不包含这个字段。
 - 未知字段返回 400。`expires_at` 拼错时如果被静默忽略，会创建一条永不过期的链接。
+- 响应新增 `created_at`、`clicks` 和 `clicks_today`；新链接的计数都是 0。这是兼容扩展，老客户端可以忽略。
 
-错误格式：
+## 管理接口的链接表示
+
+详情、修改和列表项使用同一个对象：
 
 ```json
-{"error":"invalid JSON body"}
+{
+  "code": "AbC123xy",
+  "url": "https://example.com/path?q=1",
+  "expires_at": "2026-12-01T00:00:00Z",
+  "created_at": "2026-11-15T10:00:00Z",
+  "clicks": 42,
+  "clicks_today": 3
+}
 ```
 
-| 状态码 | 场景 |
+`expires_at` 为空时省略。`clicks` 是终身累计，`clicks_today` 是 UTC 今天的点击数。
+
+## 列表
+
+```bash
+curl -s localhost:8081/api/v1/links?limit=20 \
+  -H 'Authorization: Bearer slk_...'
+```
+
+查询参数：
+
+| 参数 | 说明 |
 | --- | --- |
-| 400 | JSON 不合法、有未知字段、URL 或 `expires_at` 不合法 |
-| 401 | 没有 `Authorization: Bearer`、密钥格式不对、密钥不存在、已过期或已吊销 |
-| 413 | 请求体超过上限（约 12KB） |
-| 500 | 存储或内部错误 |
-| 504 | 请求处理超过 `REQUEST_TIMEOUT`（默认 5s） |
+| `limit` | 每页条数，默认 20，最大 100；其他值返回 400 |
+| `sort` | `id`（默认）、`clicks`（历史累计）、`clicks_today`（今日） |
+| `cursor` | 上一页响应里的 `next_cursor`，原样传回；不透明 |
 
-401 的正文是 `{"error":"unauthorized"}`，并带 `WWW-Authenticate: Bearer`。格式错误、未知密钥、过期和吊销用同一句，不透露密钥是否存在过。
+列表固定降序，包含已过期链接，不提供状态过滤；客户端根据 `expires_at` 判断。列表只有当前租户的行。
 
-单个请求的处理时限由 `REQUEST_TIMEOUT` 控制。到点后数据库查询被取消，服务端返回 504，不会让请求一直挂着占住连接。
+```json
+{
+  "items": [
+    {"code":"AbC123xy","url":"https://example.com/path","created_at":"2026-11-15T10:00:00Z","clicks":42,"clicks_today":3}
+  ],
+  "next_cursor": "42:7"
+}
+```
+
+没有下一页时省略 `next_cursor`。不返回总数。`sort=id` 的游标稳定，适合翻完整列表；`clicks` 和 `clicks_today` 会随点击变化，翻页时可能出现重复或漏项，适合看板 Top N，不适合精确导出。非法 `limit`、`sort` 或游标返回 400。
+
+## 详情
+
+```bash
+curl -s localhost:8081/api/v1/links/AbC123xy \
+  -H 'Authorization: Bearer slk_...'
+```
+
+返回 200 和链接对象。过期链接在管理视角仍然可见；不存在、已删除或其他租户的链接返回 404。
+
+## 修改
+
+```bash
+curl -i -X PATCH localhost:8081/api/v1/links/AbC123xy \
+  -H 'Authorization: Bearer slk_...' \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/new","expires_at":null}'
+```
+
+只处理 `url` 和 `expires_at`：
+
+- `url` 出现时按创建规则校验。
+- `expires_at` 出现且为字符串时必须是将来时间。
+- `expires_at` 出现且为 `null` 时清除过期时间，改为永不过期。
+- 字段没出现时保持原值。
+- 空对象、两个字段都没出现、未知字段、尾部多余内容都返回 400。
+- 不能改 `code`、`tenant_id`、`created_at`、`clicks`、`clicks_today`。
+
+成功返回 200 和修改后的链接对象。修改 URL 不改变过期状态；把 `expires_at` 改到将来可以让过期链接重新生效。修改采用最后提交者生效，不做 `If-Match` 或版本号。
+
+修改提交后 console 会覆盖 Redis 缓存，之后开始的跳转看到新 URL。已经发出、正在处理的跳转仍可能按旧 URL 返回一次 302。
+
+## 删除
+
+```bash
+curl -i -X DELETE localhost:8081/api/v1/links/AbC123xy \
+  -H 'Authorization: Bearer slk_...'
+```
+
+成功返回 204，无响应体。硬删除会同时删除链接和它的统计行，删除后不能恢复。不存在或其他租户的链接返回 404。
+
+删除不是强撤销：已经在途的跳转仍可能返回 302；删除提交后 console 写负缓存，之后的新请求返回 404。Redis 写失败时旧值可能保留到缓存 TTL，下一次写路径会自愈。
+
+## 统计
+
+```bash
+curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to=2026-11-15T00:00:00Z' \
+  -H 'Authorization: Bearer slk_...'
+```
+
+查询参数：
+
+- `from`、`to`：RFC3339，转成 UTC 后按天取整。默认 `to` 为当前 UTC 日期，`from` 为 `to - 7 天`。
+- 要求 `from < to`，跨度不超过 90 天；非法参数返回 400。
+- 两端所在的整日都计入。链接按 `code + tenant_id` 查；过期链接可以看，已删除或其他租户的链接返回 404。
+
+```json
+{
+  "code": "AbC123xy",
+  "total_clicks": 1234,
+  "range_clicks": 120,
+  "from": "2026-11-08T00:00:00Z",
+  "to": "2026-11-15T00:00:00Z",
+  "clicks": [{"day":"2026-11-08","clicks":10}],
+  "referrers": [{"referrer":"news.ycombinator.com","clicks":30}],
+  "devices": [{"device":"desktop","clicks":40},{"device":"mobile","clicks":50}],
+  "clients": [{"client":"browser","clicks":80},{"client":"bot","clicks":5}],
+  "daily_visitors": [{"day":"2026-11-08","visitors":8}],
+  "unique_visitors": 42
+}
+```
+
+- `total_clicks` 取 `links.clicks`，是终身累计；`range_clicks` 是本次时间范围内的日表之和。迁移前的点击只有 `total_clicks`，没有时间分布。
+- `clicks`、`daily_visitors` 按天补零；`devices` 固定返回 `desktop`、`mobile`、`tablet`、`bot`、`other` 五个类别，`clients` 固定返回 `browser`、`bot`、`cli`、`other` 四个类别，没有数据的补 0。
+- `referrers` 取范围内点击数最多的 10 个 host，按点击数降序、host 升序；不返回合并的 long tail 行。
+- `unique_visitors` 是 `daily_visitors` 之和，按天去重后相加，不是跨天唯一人数。同一访客换 IP、换 User-Agent 或跨天都会算成多个。
+- 统计来自写入时的日聚合，只能看聚合结果，不能回查单次点击。来源、设备、客户端和访客从这一版上线后开始记录；迁移前的历史只有 `total_clicks`。
 
 ## 跳转
 
@@ -70,6 +182,15 @@ curl -i localhost:8080/r/AbC123xy
 ```
 
 成功返回 302，`Location` 是原始 URL。只有 GET 记一次点击。`GET /r/{code}` 也匹配 HEAD（探针、预览、扫描器），HEAD 同样返回 302，但不记点击。查出链接时客户端已经断开的，不记点击。短码不存在或已过期返回 404，存储错误返回 500，处理超时返回 504；回源并发已满返回 503（临时过载，可重试），包括普通缓存未命中超过 `CACHE_MISS_CONCURRENCY` 和 Redis 不可用时的回源。错误体都是 JSON。
+
+点击记录带这些元数据：
+
+- 来源：`Referer` 的 host，转小写并去掉一个前导 `www.`；空值记 `direct`，非法或超长记 `other`。
+- 设备：`desktop`、`mobile`、`tablet`、`bot`、`other`。
+- 客户端：`browser`、`bot`、`cli`、`other`。
+- 访客：`HMAC-SHA256(VISITOR_SALT, 按天盐 + IP + User-Agent)` 的前 16 字节。不存原始 IP 和 User-Agent。
+
+客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才看 `X-Forwarded-For` 的第一段；这个开关只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
 
 ## 健康检查
 
@@ -87,13 +208,13 @@ curl -i localhost:8080/metrics   # redirector
 curl -i localhost:8081/metrics   # console
 ```
 
-两个进程各自返回 Prometheus 文本格式，指标名相同，用 Prometheus 的 `job` 区分。redirector 暴露 Go 运行时、进程、HTTP、缓存、存储、连接池和点击指标；console 暴露 Go 运行时、进程、HTTP、存储和连接池指标，以及创建时写缓存的计数。目前暴露的指标：
+两个进程各自返回 Prometheus 文本格式，指标名相同，用 Prometheus 的 `job` 区分。redirector 暴露 Go 运行时、进程、HTTP、缓存、存储、连接池和点击指标；console 暴露 Go 运行时、进程、HTTP、存储和连接池指标，以及创建、修改、删除时写缓存的计数。目前暴露的指标：
 
-- `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 只有 `GET`、`HEAD`、`POST`、`other`）
+- `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`）
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
-- `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建和回源写缓存都会计数；`skipped` 表示负缓存的 `SET NX` 发现 key 已被并发的创建写好）
+- `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建、修改、删除和回源写缓存都会计数；`skipped` 表示回源的 `SET NX` 发现 key 已有更新的值，可能是并发的创建或管理写）
 - `shortlink_cache_operation_duration_seconds`（缓存操作耗时，`operation` 为 `get`、`set`，`result` 取值同上面两个计数器）
-- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
+- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 - `process_*`（进程 CPU、内存、文件描述符）
 - `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）

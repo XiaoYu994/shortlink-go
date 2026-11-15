@@ -43,10 +43,11 @@ func newTestStore(t *testing.T) (*Store, int64) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	/*
-		没有外键之后，TRUNCATE tenants CASCADE 不会再带上 links 和 api_keys。
-		三张表写在同一条语句里，有没有外键都能清空。
+		没有外键之后，TRUNCATE tenants CASCADE 不会再带上 links、api_keys 和统计表。
+		所有表写在同一条语句里，有没有外键都能清空。
 	*/
-	if _, err := db.ExecContext(ctx, "TRUNCATE links, api_keys, tenants RESTART IDENTITY"); err != nil {
+	if _, err := db.ExecContext(ctx, `TRUNCATE links, api_keys, tenants,
+    link_clicks_daily, link_dimension_daily, link_visitors_daily RESTART IDENTITY`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	var tenantID int64
@@ -239,47 +240,6 @@ func TestAuthenticate(t *testing.T) {
 	}
 	if _, err := store.Authenticate(ctx, "not-a-key"); !errors.Is(err, tenant.ErrUnauthenticated) {
 		t.Errorf("malformed key error = %v, want ErrUnauthenticated", err)
-	}
-}
-
-func TestAddClicks(t *testing.T) {
-	store, tenantID := newTestStore(t)
-	ctx := context.Background()
-
-	l := mustLink(t, "https://example.com/clicks", tenantID)
-	if err := store.Create(ctx, l); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	err := store.AddClicks(ctx, map[int64]int64{
-		l.ID:           3,
-		l.ID + 999_999: 1, // 不存在的 id 应被忽略
-	})
-	if err != nil {
-		t.Fatalf("AddClicks: %v", err)
-	}
-
-	var clicks int64
-	if err := store.db.QueryRowContext(ctx, "SELECT clicks FROM "+linksTable+" WHERE id = $1", l.ID).Scan(&clicks); err != nil {
-		t.Fatalf("select clicks: %v", err)
-	}
-	if clicks != 3 {
-		t.Errorf("clicks = %d, want 3", clicks)
-	}
-
-	// 再加一次。若 SQL 写成 SET clicks = data.n，这里会停在 4，覆盖而不是累加。
-	if err := store.AddClicks(ctx, map[int64]int64{l.ID: 4}); err != nil {
-		t.Fatalf("AddClicks again: %v", err)
-	}
-	if err := store.db.QueryRowContext(ctx, "SELECT clicks FROM "+linksTable+" WHERE id = $1", l.ID).Scan(&clicks); err != nil {
-		t.Fatalf("select clicks: %v", err)
-	}
-	if clicks != 7 {
-		t.Errorf("clicks = %d, want 7", clicks)
-	}
-
-	if err := store.AddClicks(ctx, nil); err != nil {
-		t.Errorf("AddClicks(nil): %v", err)
 	}
 }
 

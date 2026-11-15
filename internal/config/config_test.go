@@ -23,6 +23,8 @@ func TestLoadConfig(t *testing.T) {
 		"CACHE_MISS_CONCURRENCY": "",
 		"CACHE_FETCH_TIMEOUT":    "",
 		"REDIS_URL":              "redis://localhost:6379/0",
+		"VISITOR_SALT":           "",
+		"TRUST_PROXY_HEADERS":    "",
 		"LOG_LEVEL":              "",
 	}
 	defaults := Config{
@@ -58,6 +60,8 @@ func TestLoadConfig(t *testing.T) {
 				"CACHE_MISS_CONCURRENCY": "4",
 				"CACHE_FETCH_TIMEOUT":    "500ms",
 				"REDIS_URL":              "rediss://user:pass@redis:6380/1",
+				"VISITOR_SALT":           "test-salt",
+				"TRUST_PROXY_HEADERS":    "true",
 			},
 			want: Config{
 				Addr:        ":9090",
@@ -73,6 +77,8 @@ func TestLoadConfig(t *testing.T) {
 				ShutdownTimeout:      15 * time.Second,
 				CacheMissConcurrency: 4,
 				CacheFetchTimeout:    500 * time.Millisecond,
+				VisitorSalt:          "test-salt",
+				TrustProxyHeaders:    true,
 			},
 		},
 		{
@@ -129,6 +135,11 @@ func TestLoadConfig(t *testing.T) {
 			name:    "invalid log level",
 			env:     map[string]string{"LOG_LEVEL": "verbose"},
 			wantErr: "LOG_LEVEL",
+		},
+		{
+			name:    "invalid trust proxy headers",
+			env:     map[string]string{"TRUST_PROXY_HEADERS": "sometimes"},
+			wantErr: "TRUST_PROXY_HEADERS",
 		},
 		{
 			name:    "invalid open conns",

@@ -1,7 +1,7 @@
 /*
-Package click 异步累计短链点击（第 10 课）。
+Package click 异步累计短链点击，并负责来源、设备、客户端和访客的归类（第 10、11 课）。
 
-跳转请求只把链接 ID 放进缓冲 channel。后台 goroutine 按批写回 links.clicks，
+跳转请求构造一次 Click 后放进缓冲 channel。后台 goroutine 按批交给存储，
 进程退出前由 Close 把缓冲区排空。这条 goroutine 在 New 里启动，
 在 channel 被关闭且排空写完后退出。入口会 recover：panic 时停掉记录，
 并把错误交给 Close。
@@ -38,7 +38,7 @@ Store 是 Recorder 要的写能力，定义在使用方。
 测试要挡住写入才能把 channel 填满，所以这里用接口，click 不依赖 postgres。
 */
 type Store interface {
-	AddClicks(ctx context.Context, counts map[int64]int64) error
+	RecordClicks(ctx context.Context, clicks []Click) error
 }
 
 /*
@@ -76,7 +76,7 @@ Recorder 把点击攒成一批再写。
 type Recorder struct {
 	store        Store
 	logger       *slog.Logger
-	ch           chan int64
+	ch           chan Click
 	done         chan struct{}
 	dropped      prometheus.Counter
 	written      *prometheus.CounterVec
@@ -106,7 +106,7 @@ func New(store Store, logger *slog.Logger, registry *prometheus.Registry, opts O
 	r := &Recorder{
 		store:  store,
 		logger: logger,
-		ch:     make(chan int64, opts.Buffer),
+		ch:     make(chan Click, opts.Buffer),
 		done:   make(chan struct{}),
 		dropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: droppedMetricName,
@@ -129,15 +129,19 @@ func New(store Store, logger *slog.Logger, registry *prometheus.Registry, opts O
 }
 
 /*
-Record 在缓冲有空位时放入 ID，满了就计一次 dropped。
+Record 在缓冲有空位时放入这次点击，满了就计一次 dropped。
 
-id 小于等于 0 直接丢掉，那是调用方的 bug，不是队列满。
+LinkID 小于等于 0 直接丢掉，那是调用方的 bug，不是队列满。
+At 为零时补上当前 UTC 时间；记录日期以进入队列的时刻为准，不等到写出。
 Close 已经开始，或 worker 因 panic 停下时，也不再放入，并且不计入 dropped：
 dropped 只表示缓冲满。
 */
-func (r *Recorder) Record(id int64) {
-	if id <= 0 {
+func (r *Recorder) Record(c Click) {
+	if c.LinkID <= 0 {
 		return
+	}
+	if c.At.IsZero() {
+		c.At = time.Now().UTC()
 	}
 
 	r.mu.RLock()
@@ -146,7 +150,7 @@ func (r *Recorder) Record(id int64) {
 		return
 	}
 	select {
-	case r.ch <- id:
+	case r.ch <- c:
 	default:
 		r.dropped.Inc()
 	}
@@ -201,15 +205,15 @@ func (r *Recorder) loop() {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 
-	batch := make([]int64, 0, r.batchSize)
+	batch := make([]Click, 0, r.batchSize)
 	for {
 		select {
-		case id, ok := <-r.ch:
+		case c, ok := <-r.ch:
 			if !ok {
 				r.flush(batch)
 				return
 			}
-			batch = append(batch, id)
+			batch = append(batch, c)
 			if len(batch) >= r.batchSize {
 				r.flush(batch)
 				batch = batch[:0]
@@ -249,8 +253,10 @@ flush 在正常运行时用独立的超时，不用请求的 ctx：跳转响应�
 写失败只打日志。停在这一批上重试会让 channel 堆满，后面的点击变成 dropped。
 
 Close 开始之后改用 exitCtx，错误留给 Close 返回，这里不再打日志。
+batch 的底层数组在 write 返回后会被 loop 复用；存储必须同步处理完，
+不能把切片留到后台。
 */
-func (r *Recorder) flush(batch []int64) {
+func (r *Recorder) flush(batch []Click) {
 	if len(batch) == 0 {
 		return
 	}
@@ -298,28 +304,13 @@ func (r *Recorder) observeWrite(n int, err error) {
 	r.written.WithLabelValues(result).Add(float64(n))
 }
 
-/*
-write 把这一批交给存储。countsOf 会把 ID 收成一份新 map，
-所以调用方可以在 write 返回后复用 batch 的底层数组。
-*/
-func (r *Recorder) write(ctx context.Context, batch []int64) error {
+// write 把这一批交给存储。聚合和事务由存储实现负责。
+func (r *Recorder) write(ctx context.Context, batch []Click) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	if err := r.store.AddClicks(ctx, countsOf(batch)); err != nil {
+	if err := r.store.RecordClicks(ctx, batch); err != nil {
 		return fmt.Errorf("flush clicks: %w", err)
 	}
 	return nil
-}
-
-/*
-countsOf 把同一条链接在这一批里的点击加成一个总数。
-同一 id 在一条 UPDATE 里出现两次时，PostgreSQL 只应用其中一行，用哪一行不确定。
-*/
-func countsOf(ids []int64) map[int64]int64 {
-	counts := make(map[int64]int64, len(ids))
-	for _, id := range ids {
-		counts[id]++
-	}
-	return counts
 }
