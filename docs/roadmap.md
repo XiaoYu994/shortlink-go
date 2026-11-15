@@ -93,3 +93,19 @@
 - [ ] （可选）缓存击穿的多副本方案：有了多个 redirector 副本、回源次数真的成为压力之后，比较 Redis 分布式锁（`SET NX PX` 加 Lua 释放）和逻辑过期加后台刷新，按回源次数和可接受的一致性取舍
 - [ ] （可选）OpenTelemetry 追踪：拆分后两个进程互不调用，追踪看的是单个请求内部各环节的耗时，等指标解释不了慢请求时再加
 - 用户操作短链的平台不在本阶段。人的登录和 API Key 以后都写成 context 里的同一个租户，见 ADR 0009
+
+## 阶段 7：短链管理和点击统计（第 11 课）
+
+决策见 [ADR 0011](adr/0011-link-crud-api.md)、[ADR 0012](adr/0012-click-analytics.md)。
+
+- [ ] 迁移 003：`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`；`links (tenant_id, clicks DESC, id DESC)` 索引
+- [ ] 管理 API：`GET /api/v1/links`（`sort=id|clicks|clicks_today`）、`GET/PATCH/DELETE /api/v1/links/{code}`；租户隔离、游标分页、过期链接管理可见
+- [ ] 缓存一致性：回源正负缓存改 `SET NX`，更新/删除后无条件 `SET`（删除写负缓存）；补修改/删除与在途回源的并发语义和测试
+- [ ] `link.AdminLink`（`Clicks`、`ClicksToday`）、`GetForTenant`、`List`、`Update`、`Delete` 的存储实现和测试
+- [ ] 点击元数据：Referer host、设备分类、客户端分类（browser/bot/cli/other）、按天盐的访客哈希、`VISITOR_SALT` 和 `TRUST_PROXY_HEADERS`
+- [ ] `ClickRecorder` 和 `postgres.Store` 批量写三张日聚合表与 `links.clicks`，同一事务
+- [ ] 统计接口 `GET /api/v1/links/{code}/stats`：日趋势、Top 来源、设备、客户端、每日访客、补零和范围校验
+- [ ] 列表排序：`links.clicks` 历史排序和 `link_clicks_daily` 今日排序的索引、游标和测试
+- [ ] 配置、`.env.example`、`docs/api.md`、`docs/architecture.md`、`docs/runbook.md` 同步
+- [ ] 集成测试和 `make smoke` 覆盖修改、删除、排序、统计和租户隔离；压一轮观察 dropped 和连接池
+- [ ] ADR 0011、0012 状态从 Proposed 改为 Accepted

@@ -27,6 +27,8 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0008](0008-cold-cache-read-path.md) | 冷缓存和长尾短码的读路径保护 | Accepted |
 | [0009](0009-process-split-and-credentials.md) | 两个进程、一种租户身份 | Accepted |
 | [0010](0010-app-level-referential-integrity.md) | 引用完整性放在应用层，不使用数据库外键 | Accepted |
+| [0011](0011-link-crud-api.md) | 短链管理 API 的增删改查和排序 | Proposed |
+| [0012](0012-click-analytics.md) | 点击统计：日聚合、客户端维度和统计接口 | Proposed |
 
 ## 模板
 
