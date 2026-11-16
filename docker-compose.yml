@@ -27,6 +27,18 @@ services:
       timeout: 3s
       retries: 10
 
+  # 可选的公网入口。默认不启动；需要时：docker compose --profile edge up -d nginx
+  # 只暴露 /r/ 和 /api/。/metrics 仍由 Prometheus 直接抓宿主机上的进程端口。
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: ["edge"]
+    ports:
+      - "127.0.0.1:8088:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   prometheus:
     image: prom/prometheus:v2.55.1
     # Docker Desktop 在 WSL 里绑定单个文件会报 mount 源不存在。

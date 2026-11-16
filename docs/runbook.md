@@ -11,7 +11,7 @@ REDIS_URL=redis://localhost:6379/0
 VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`。打开之后取 `X-Forwarded-For` 的最右一段。
+`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`。打开之后取 `X-Forwarded-For` 的最右一段。公网入口用 `deploy/nginx.conf`，它把这个头覆盖成代理看到的对端地址，并且不转发 `/metrics`、`/healthz` 和 `/readyz`。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。
 
 `.env` 已被 gitignore，不会提交。
 
