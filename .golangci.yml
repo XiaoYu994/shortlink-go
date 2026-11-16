@@ -1,0 +1,20 @@
+# golangci-lint v2。版本和 CI 里的 v2.15.0 对齐。
+# default: standard 把原来“跟着二进制默认走”的那一组写死：
+# errcheck、govet、ineffassign、staticcheck、unused。
+# 下面额外打开的是会漏掉真实缺陷、又不会逼着改风格的规则。
+# gofmt 仍由 make fmt-check 检查，不放进这里。
+version: "2"
+run:
+  timeout: 5m
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - nilerr
+    - bodyclose
+    - sqlclosecheck
+    - rowserrcheck
+    - copyloopvar
+    - misspell
+    - durationcheck
+    - nolintlint

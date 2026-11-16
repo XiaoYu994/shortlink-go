@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -72,7 +73,8 @@ func TestRecovererRepanicsAbortHandler(t *testing.T) {
 
 	defer func() {
 		rec := recover()
-		if rec != http.ErrAbortHandler {
+		err, ok := rec.(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
 			t.Fatalf("recover() = %v, want http.ErrAbortHandler", rec)
 		}
 	}()
