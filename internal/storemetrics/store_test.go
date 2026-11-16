@@ -15,8 +15,10 @@ import (
 
 // stubStore 返回预设的结果，用来验证装饰器只观察、不改写返回值。
 type stubStore struct {
-	link *link.Link
-	err  error
+	link  *link.Link
+	admin *link.AdminLink
+	stats *link.Stats
+	err   error
 }
 
 func (s stubStore) Create(context.Context, *link.Link) error { return s.err }
@@ -26,21 +28,33 @@ func (s stubStore) GetByCode(context.Context, string) (*link.Link, error) {
 }
 
 func (s stubStore) List(context.Context, link.ListOptions) ([]link.AdminLink, error) {
-	return nil, s.err
+	if s.err != nil || s.admin == nil {
+		return nil, s.err
+	}
+	return []link.AdminLink{*s.admin}, nil
 }
 
 func (s stubStore) GetForTenant(context.Context, int64, string) (*link.AdminLink, error) {
-	return nil, s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.admin, nil
 }
 
 func (s stubStore) Update(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
-	return nil, s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.admin, nil
 }
 
 func (s stubStore) Delete(context.Context, int64, string) error { return s.err }
 
 func (s stubStore) Stats(context.Context, int64, string, time.Time, time.Time) (*link.Stats, error) {
-	return nil, s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.stats, nil
 }
 
 func TestCreateRecordsResult(t *testing.T) {
@@ -116,6 +130,82 @@ func TestGetRecordsResult(t *testing.T) {
 			}
 			assertDurationResult(t, reg, operationGet, tt.wantResult)
 		})
+	}
+}
+
+/*
+TestAdminOperationsRecordResult 锁住列表、详情、修改、删除和统计的 operation 标签。
+这五个方法共用 classifyResult；以前只有 Create 和 GetByCode 被断言过。
+*/
+func TestAdminOperationsRecordResult(t *testing.T) {
+	admin := &link.AdminLink{Link: link.Link{ID: 7, Code: "abc", URL: "https://example.com"}}
+	stats := &link.Stats{Code: "abc", TotalClicks: 4}
+	results := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"success", nil, resultSuccess},
+		{"not found", link.ErrNotFound, resultNotFound},
+		{"canceled", context.Canceled, resultCanceled},
+		{"timeout", context.DeadlineExceeded, resultTimeout},
+		{"error", errors.New("db down"), resultError},
+	}
+	ops := []struct {
+		operation string
+		call      func(t *testing.T, s *Store) error
+	}{
+		{operationList, func(t *testing.T, s *Store) error {
+			got, err := s.List(context.Background(), link.ListOptions{Limit: 1})
+			if err == nil && (len(got) != 1 || got[0].Code != admin.Code) {
+				t.Errorf("List = %+v, want %s", got, admin.Code)
+			}
+			return err
+		}},
+		{operationGetTenant, func(t *testing.T, s *Store) error {
+			got, err := s.GetForTenant(context.Background(), 1, "abc")
+			if err == nil && (got == nil || got.Code != admin.Code) {
+				t.Errorf("GetForTenant = %+v, want %s", got, admin.Code)
+			}
+			return err
+		}},
+		{operationUpdate, func(t *testing.T, s *Store) error {
+			got, err := s.Update(context.Background(), 1, "abc", link.Update{})
+			if err == nil && (got == nil || got.Code != admin.Code) {
+				t.Errorf("Update = %+v, want %s", got, admin.Code)
+			}
+			return err
+		}},
+		{operationDelete, func(_ *testing.T, s *Store) error {
+			return s.Delete(context.Background(), 1, "abc")
+		}},
+		{operationStats, func(t *testing.T, s *Store) error {
+			got, err := s.Stats(context.Background(), 1, "abc", time.Time{}, time.Time{})
+			if err == nil && (got == nil || got.TotalClicks != stats.TotalClicks) {
+				t.Errorf("Stats = %+v, want total %d", got, stats.TotalClicks)
+			}
+			return err
+		}},
+	}
+	for _, op := range ops {
+		for _, tt := range results {
+			t.Run(op.operation+" "+tt.name, func(t *testing.T) {
+				reg := prometheus.NewRegistry()
+				s := New(stubStore{admin: admin, stats: stats, err: tt.err}, reg)
+				if err := op.call(t, s); !errors.Is(err, tt.err) {
+					t.Fatalf("%s error = %v, want %v", op.operation, err, tt.err)
+				}
+				if got := testutil.ToFloat64(s.operations.WithLabelValues(op.operation, tt.want)); got != 1 {
+					t.Errorf("operations{operation=%q, result=%q} = %v, want 1", op.operation, tt.want, got)
+				}
+				if tt.want != resultSuccess {
+					if got := testutil.ToFloat64(s.operations.WithLabelValues(op.operation, resultSuccess)); got != 0 {
+						t.Errorf("operations{operation=%q, result=%q} = %v, want 0", op.operation, resultSuccess, got)
+					}
+				}
+				assertDurationResult(t, reg, op.operation, tt.want)
+			})
+		}
 	}
 }
 

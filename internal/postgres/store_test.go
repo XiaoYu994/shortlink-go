@@ -43,6 +43,17 @@ func newTestStore(t *testing.T) (*Store, int64) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	/*
+		先占住测试库的锁，再清空。cmd/console 的集成测试用同一把锁，
+		两个包并行跑时不会互相把刚写入的行清掉。
+		Cleanup 后进先出，所以解锁发生在关闭连接池之前。
+	*/
+	release, err := HoldTestDBLock(ctx, db)
+	if err != nil {
+		t.Fatalf("lock test database: %v", err)
+	}
+	t.Cleanup(release)
+
+	/*
 		没有外键之后，TRUNCATE tenants CASCADE 不会再带上 links、api_keys 和统计表。
 		所有表写在同一条语句里，有没有外键都能清空。
 	*/

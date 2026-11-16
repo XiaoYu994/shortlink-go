@@ -1,6 +1,6 @@
 #!/bin/sh
 # 冒烟测试：启动 redirector 和 console 两个真实进程，按 docs/api.md 的契约走一遍
-# 健康检查、创建、跳转、HEAD、404、非法参数、过期、路由隔离和指标，最后检查 SIGTERM 优雅退出。
+# 健康检查、创建、跳转、HEAD、404、非法参数、过期、路由隔离、访客去重和指标，最后检查 SIGTERM 优雅退出。
 #
 # 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/redirector、bin/console
 # 已构建、测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
@@ -232,7 +232,9 @@ grep -q "\"code\":\"$code\"" "$TMP/body" || fail '创建响应里没有 code'
 grep -q "\"url\":\"$url\"" "$TMP/body" || fail '创建响应里没有 url'
 
 echo 'smoke: redirect'
-status=$(request "$REDIRECTOR_BASE" GET "/r/$code")
+# 固定 User-Agent，后面两次 Chrome 跳转才能和这一次分成两个访客。
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-A 'smoke-client-a' "$REDIRECTOR_BASE/r/$code")
 assert_eq "$status" 302 'GET /r/{code} 状态码'
 assert_eq "$(header Location)" "$url" '跳转 Location'
 
@@ -286,6 +288,13 @@ status=$(request_redirect "$REDIRECTOR_BASE" "/r/$code" \
 assert_eq "$status" 302 '修改后跳转状态码'
 assert_eq "$(header Location)" "$newurl" '修改后跳转 Location（console 应写穿缓存）'
 
+echo 'smoke: visitor dedup'
+# 与上一次相同的 IP、UTC 日和 User-Agent，应合成同一个访客。
+status=$(request_redirect "$REDIRECTOR_BASE" "/r/$code" \
+	'https://news.ycombinator.com/item?id=1' \
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
+assert_eq "$status" 302 '相同客户端再次跳转'
+
 echo 'smoke: sorting'
 for sort in id clicks clicks_today; do
 	status=$(request "$CONSOLE_BASE" GET "/api/v1/links?limit=10&sort=$sort")
@@ -298,12 +307,13 @@ echo 'smoke: stats'
 sleep 2
 status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code/stats")
 assert_eq "$status" 200 'GET /api/v1/links/{code}/stats 状态码'
-grep -q '"total_clicks":2' "$TMP/body" || fail "统计里 total_clicks 不是 2: $(cat "$TMP/body")"
+# 三次 GET：smoke-client-a 一次，Chrome 两次。同一 IP 和同一天里，Chrome 两次合成一个访客。
+grep -E -q '"total_clicks":3[,}]' "$TMP/body" || fail "统计里 total_clicks 不是 3: $(cat "$TMP/body")"
+grep -E -q '"unique_visitors":2[,}]' "$TMP/body" || fail "统计里 unique_visitors 不是 2: $(cat "$TMP/body")"
 grep -q '"referrer":"news.ycombinator.com"' "$TMP/body" || fail '统计里没有 Referer host'
 grep -q '"device":"desktop"' "$TMP/body" || fail '统计里没有设备类别'
 grep -q '"client":"browser"' "$TMP/body" || fail '统计里没有客户端类别'
 grep -q '"daily_visitors"' "$TMP/body" || fail '统计里没有每日访客'
-grep -q '"unique_visitors"' "$TMP/body" || fail '统计里没有 unique_visitors'
 
 echo 'smoke: delete'
 status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$code")
