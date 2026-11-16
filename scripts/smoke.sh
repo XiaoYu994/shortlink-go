@@ -211,6 +211,13 @@ for base in "$REDIRECTOR_BASE" "$CONSOLE_BASE"; do
 	assert_eq "$(cat "$TMP/body")" 'ok' "GET $base/healthz 响应体"
 done
 
+echo 'smoke: readyz'
+for base in "$REDIRECTOR_BASE" "$CONSOLE_BASE"; do
+	status=$(request "$base" GET /readyz)
+	assert_eq "$status" 200 "GET $base/readyz 状态码"
+	assert_eq "$(cat "$TMP/body")" 'ok' "GET $base/readyz 响应体"
+done
+
 echo 'smoke: unauthorized'
 status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
 	-X POST -H 'Content-Type: application/json' \

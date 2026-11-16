@@ -84,6 +84,12 @@ type Server struct {
 	clicks         ClickRecorder
 	visitorSalt    []byte
 	trustProxy     bool
+	/*
+		ready 是 /readyz 要问的检查项，readyWired 记录 SetReadiness 有没有调用过。
+		两者分开：没接线要返回 503，接了线但一项都不查是合法的（redirector 就是这样）。
+	*/
+	ready      []ReadyCheck
+	readyWired bool
 }
 
 // serverDeps 是 newServer 的参数，避免一长串容易错位的位置参数。

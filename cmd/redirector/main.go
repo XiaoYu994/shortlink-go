@@ -1,7 +1,7 @@
 /*
 Command redirector 是公开短链跳转进程。
 
-只提供 GET /r/{code}、/healthz 和 /metrics。读 Redis 缓存，未命中回源 PostgreSQL，
+只提供 GET /r/{code}、/healthz、/readyz 和 /metrics。读 Redis 缓存，未命中回源 PostgreSQL，
 成功的 GET 异步记录点击。管理 API 和 API Key 鉴权在 cmd/console，进程之间不互相调用。
 拆分边界见 ADR 0009。
 */
@@ -109,6 +109,13 @@ func run() error {
 		VisitorSalt:       []byte(cfg.VisitorSalt),
 		TrustProxyHeaders: cfg.TrustProxyHeaders,
 	})
+	/*
+		跳转进程的 /readyz 不探 PostgreSQL 和 Redis，走到这里（两边都连上了）就算就绪。
+		Redis 挂了要降级查库，数据库挂了缓存命中的链接还能跳（ADR 0006）。
+		这两个依赖是所有副本共用的，探针一失败就是全部副本同时被摘流量，
+		降级会变成全站不可用。依赖故障看指标和告警。
+	*/
+	srv.SetReadiness()
 
 	/*
 		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。

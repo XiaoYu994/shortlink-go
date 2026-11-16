@@ -1,5 +1,5 @@
 /*
-serve 是 console 的 HTTP 模式：提供短链增删改查、统计、/healthz 和 /metrics。
+serve 是 console 的 HTTP 模式：提供短链增删改查、统计、/healthz、/readyz 和 /metrics。
 创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
 密钥命令仍然走 admin.go 的路径，不加载 Redis。
 */
@@ -73,6 +73,11 @@ func runServe() error {
 	})
 	// 鉴权直接用 pgStore，缓存不参与 API Key 校验。
 	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, pgStore)
+	/*
+		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。
+		Redis 不探：写缓存失败只记日志，管理请求照常成功（ADR 0006 的 fail-open）。
+	*/
+	srv.SetReadiness(httpapi.ReadyCheck{Name: "postgres", Ping: db.PingContext})
 
 	readWriteTimeout := cfg.RequestTimeout + 5*time.Second
 	httpSrv := &http.Server{

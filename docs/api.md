@@ -4,10 +4,12 @@
 
 | 进程 | 方法 | 路径 | 说明 |
 | --- | --- | --- | --- |
-| redirector | `GET` | `/healthz` | 健康检查，返回 `ok` |
+| redirector | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
+| redirector | `GET` | `/readyz` | 就绪检查，启动完成后返回 `ok`，不探依赖 |
 | redirector | `GET` | `/metrics` | Prometheus 指标，运维端点 |
 | redirector | `GET` | `/r/{code}` | 302 跳转到原始 URL |
-| console | `GET` | `/healthz` | 健康检查，返回 `ok` |
+| console | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
+| console | `GET` | `/readyz` | 就绪检查，PostgreSQL 能 Ping 通才返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
 | console | `POST` | `/api/v1/links` | 创建短链 |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页 |
@@ -195,11 +197,20 @@ curl -i localhost:8080/r/AbC123xy
 ## 健康检查
 
 ```bash
-curl -i localhost:8080/healthz   # redirector
-curl -i localhost:8081/healthz   # console
+curl -i localhost:8080/healthz   # redirector 存活
+curl -i localhost:8080/readyz    # redirector 就绪
+curl -i localhost:8081/healthz   # console 存活
+curl -i localhost:8081/readyz    # console 就绪
 ```
 
-返回 200 和 `ok`。它是 liveness 探针，故意不访问数据库。
+`/healthz` 返回 200 和 `ok`。它是 liveness 探针，故意不访问数据库：依赖抖一下不应该让编排器重启进程。
+
+`/readyz` 就绪时返回 200 和 `ok`，否则返回 503 和 `unavailable`，编排器用它摘流量。两个进程查的东西不一样：
+
+- console 在 1 秒内 Ping PostgreSQL。每个管理请求都要查库鉴权，库不通就一个请求也处理不了。Redis 不探，写缓存失败不影响管理请求成功。
+- redirector 不探依赖，启动时连上 PostgreSQL 和 Redis 之后就一直就绪。Redis 故障时它降级查库，数据库故障时缓存命中的链接还能跳；这两个依赖是所有副本共用的，探针失败会把全部副本同时摘掉，降级就变成了全站不可用。依赖故障看 `/metrics`。
+
+两个路径都打在进程自己的端口上，公网入口不转发。
 
 ## 指标
 
@@ -230,5 +241,5 @@ curl -i localhost:8081/metrics   # console
 
 - `/api/v1` 出现不兼容改动时新增 `/api/v2`，v1 按计划保留。
 - `/r/{code}` 不随 API 版本变化；已经发出去的短链必须一直可用。
-- `/healthz`、`/metrics` 等运维端点不进版本前缀。`/metrics` 只给抓取端，应用不做鉴权，公网隔离由部署层保证。
+- `/healthz`、`/readyz`、`/metrics` 等运维端点不进版本前缀。`/metrics` 只给抓取端，应用不做鉴权，公网隔离由部署层保证。
 - 短码大小写敏感。

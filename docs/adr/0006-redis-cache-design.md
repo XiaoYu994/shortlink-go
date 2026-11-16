@@ -38,6 +38,7 @@
 ### Redis 故障 fail-open
 
 - 读 Redis 出错（`redis.Nil` 除外）或写 Redis 出错都只影响命中率，请求照常回源数据库；读失败时回源并发超过上限的请求返回 503，属于限流，不是失败关闭。
+- 就绪检查不能和这一条打架。redirector 的 `/readyz` 不探 Redis，也不探 PostgreSQL：它们是所有副本共用的依赖，探针失败等于全部副本同时被摘流量，降级会变成全站不可用。console 的 `/readyz` 只探 PostgreSQL，不探 Redis。
 - 启动时 `Ping` 失败仍然让进程退出：连不上 Redis 属于部署配置错误，应该在启动阶段暴露，而不是带病运行。
 - 客户端超时和重试调短：`DialTimeout` 500ms、`ReadTimeout`/`WriteTimeout` 200ms、`MaxRetries` 1。go-redis 默认读超时 5 秒、重试 3 次，Redis 挂掉时一次 GET 可能超过 `REQUEST_TIMEOUT`，降级还没走到数据库请求就先超时了。
 - 连接参数只保留 `REDIS_URL`：`redis://`、`rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。不再单独维护 `REDIS_ADDR`，避免两条配置路径和优先级规则。超时和重试在 URL 解析后统一覆盖。

@@ -28,7 +28,7 @@
 | `PATCH` | `/api/v1/links/{code}` | 修改 `url` 和/或 `expires_at` |
 | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204 |
 
-- redirector 不注册管理路由；`/r/{code}`、`/healthz`、`/metrics` 行为不变。
+- redirector 不注册管理路由；`/r/{code}`、`/healthz`、`/metrics` 行为不变。`/readyz` 另做就绪检查，失败返回 503。
 - 每个管理路由单独包 `authenticate`。Go 的 `ServeMux` 没有路由组，不能把 `/api/v1/` 包一层再指望更具体的路由继承中间件。
 - 所有路由都在 `/api/v1` 下；新增接口是兼容扩展，不升 v2。
 

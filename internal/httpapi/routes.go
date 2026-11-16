@@ -21,7 +21,7 @@ func isMetricsRequest(r *http.Request) bool {
 }
 
 /*
-RedirectRoutes 返回跳转进程的路由：公开跳转、健康检查和指标。
+RedirectRoutes 返回跳转进程的路由：公开跳转、存活检查、就绪检查和指标。
 它不注册任何管理路由，API Key 鉴权只存在于 ConsoleRoutes。
 */
 func (s *Server) RedirectRoutes() http.Handler {
@@ -32,8 +32,8 @@ func (s *Server) RedirectRoutes() http.Handler {
 }
 
 /*
-ConsoleRoutes 返回管理进程的路由：短链增删改查、统计、健康检查和指标。
-鉴权只包管理 API。公开跳转、健康检查和指标不认密钥。
+ConsoleRoutes 返回管理进程的路由：短链增删改查、统计、存活检查、就绪检查和指标。
+鉴权只包管理 API。公开跳转、存活检查、就绪检查和指标不认密钥。
 每个管理路由单独包 authenticate：ServeMux 没有路由组，
 套在 /api/v1/ 前缀上的中间件不会被更具体的路由继承。
 */
@@ -52,6 +52,7 @@ func (s *Server) ConsoleRoutes() http.Handler {
 // registerOperational 注册两个进程都有的运维端点。
 func (s *Server) registerOperational(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	// /metrics 用注入的 Registry；promhttp.Handler() 抓的是 DefaultGatherer，注入的指标不会出现。
 	mux.Handle("GET "+metricsPath, promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 }

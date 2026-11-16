@@ -133,6 +133,14 @@ func TestHTTPMetricsRecordsRouteAndStatus(t *testing.T) {
 			wantRoute:  "GET /healthz",
 		},
 		{
+			name:       "readyz not configured",
+			method:     http.MethodGet,
+			path:       "/readyz",
+			store:      &stubStore{links: map[string]*link.Link{}},
+			wantStatus: http.StatusServiceUnavailable,
+			wantRoute:  "GET /readyz",
+		},
+		{
 			name:       "head",
 			method:     http.MethodHead,
 			path:       "/healthz",

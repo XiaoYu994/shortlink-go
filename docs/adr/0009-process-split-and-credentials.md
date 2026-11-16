@@ -23,8 +23,8 @@
 
 | 进程 | 职责 |
 | --- | --- |
-| `redirector` | `GET /r/{code}`、`/healthz`、`/metrics`。读缓存，未命中回源，成功的 GET 记点击。不挂管理路由，不签发密钥 |
-| `console` | `POST /api/v1/links`、`/healthz`、`/metrics`，以及以后的增删改查。创建时继续写穿缓存。API Key 鉴权只留在这里 |
+| `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics`。读缓存，未命中回源，成功的 GET 记点击。不挂管理路由，不签发密钥 |
+| `console` | `POST /api/v1/links`、`/healthz`、`/readyz`、`/metrics`，以及以后的增删改查。创建时继续写穿缓存。API Key 鉴权只留在这里 |
 
 每个进程各自监听，各自暴露指标。扩容时只加 redirector 副本。
 
@@ -57,7 +57,7 @@
 ## 后果
 
 - 跳转和管理可以分开扩容、分开重启。两边仍共享数据库，库是共同的故障点。
-- 两个进程的 `/healthz` 和 `/metrics` 要分别抓取。OpenTelemetry 仍然先不做：进程之间没有调用，追踪看的是单个请求内部的耗时（[ADR 0005](0005-prometheus-before-tracing.md)）。
+- 两个进程的 `/healthz`、`/readyz` 和 `/metrics` 要分别抓取。`/healthz` 只表示进程活着；`/readyz` 失败时摘掉这一个实例的流量。OpenTelemetry 仍然先不做：进程之间没有调用，追踪看的是单个请求内部的耗时（[ADR 0005](0005-prometheus-before-tracing.md)）。
 - 多个 redirector 副本之后，缓存击穿才需要单独的多副本方案；那一项保持可选。
 - 管理员命令在 `cmd/console`：`key issue`、`key list`、`key revoke`。`cmd/server` 在拆分完成前继续提供全部 HTTP。命令不依赖 Redis。空库要先签发一把密钥，创建接口才调得通。不要加公开的签发路由。
 - handler 只读 context 里的租户。以后加会话或网关中间件时，不改创建逻辑。
