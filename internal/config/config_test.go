@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"log/slog"
 	"strings"
 	"testing"
@@ -43,6 +44,7 @@ func TestLoadConfig(t *testing.T) {
 		"VISITOR_SALT":           "",
 		"TRUST_PROXY_HEADERS":    "",
 		"LOG_LEVEL":              "",
+		"LOG_FORMAT":             "",
 	}
 	defaults := Config{
 		Addr:                 defaultAddr,
@@ -52,6 +54,7 @@ func TestLoadConfig(t *testing.T) {
 		RequestTimeout:       defaultRequestTimeout,
 		ShutdownTimeout:      defaultShutdownTimeout,
 		LogLevel:             slog.LevelInfo,
+		LogFormat:            logFormatText,
 		CacheMissConcurrency: defaultCacheMissConcurrency,
 		CacheFetchTimeout:    defaultCacheFetchTimeout,
 	}
@@ -79,6 +82,7 @@ func TestLoadConfig(t *testing.T) {
 				"REDIS_URL":              "rediss://user:pass@redis:6380/1",
 				"VISITOR_SALT":           "test-salt",
 				"TRUST_PROXY_HEADERS":    "true",
+				"LOG_FORMAT":             "json",
 			},
 			want: Config{
 				Addr:        ":9090",
@@ -92,6 +96,7 @@ func TestLoadConfig(t *testing.T) {
 				},
 				RequestTimeout:       2 * time.Second,
 				ShutdownTimeout:      15 * time.Second,
+				LogFormat:            logFormatJSON,
 				CacheMissConcurrency: 4,
 				CacheFetchTimeout:    500 * time.Millisecond,
 				VisitorSalt:          "test-salt",
@@ -112,6 +117,7 @@ func TestLoadConfig(t *testing.T) {
 				RequestTimeout:       defaultRequestTimeout,
 				ShutdownTimeout:      defaultShutdownTimeout,
 				LogLevel:             slog.LevelDebug,
+				LogFormat:            logFormatText,
 				CacheMissConcurrency: defaultCacheMissConcurrency,
 				CacheFetchTimeout:    defaultCacheFetchTimeout,
 			},
@@ -134,9 +140,15 @@ func TestLoadConfig(t *testing.T) {
 				},
 				RequestTimeout:       defaultRequestTimeout,
 				ShutdownTimeout:      defaultShutdownTimeout,
+				LogFormat:            logFormatText,
 				CacheMissConcurrency: defaultCacheMissConcurrency,
 				CacheFetchTimeout:    defaultCacheFetchTimeout,
 			},
+		},
+		{
+			name:    "invalid log format",
+			env:     map[string]string{"LOG_FORMAT": "yaml"},
+			wantErr: "LOG_FORMAT",
 		},
 		{
 			name:    "missing database url",
@@ -252,6 +264,22 @@ func TestLoadConfig(t *testing.T) {
 				t.Errorf("LoadConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewLoggerFormat(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := Config{LogLevel: slog.LevelInfo, LogFormat: logFormatJSON}
+	cfg.NewLogger(&buf).Info("listening", "addr", ":8080")
+	if !strings.Contains(buf.String(), `"msg":"listening"`) {
+		t.Fatalf("json log = %q", buf.String())
+	}
+
+	buf.Reset()
+	cfg.LogFormat = logFormatText
+	cfg.NewLogger(&buf).Info("listening", "addr", ":8080")
+	if !strings.Contains(buf.String(), "msg=listening") || strings.Contains(buf.String(), `"msg"`) {
+		t.Fatalf("text log = %q", buf.String())
 	}
 }
 

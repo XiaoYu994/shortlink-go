@@ -2,7 +2,7 @@
 Package config 从环境变量加载进程配置，并在启动时校验。
 
 未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时或回源保护参数不合法时，LoadConfig 返回错误，
+连接池参数、请求超时、关机超时、日志格式或回源保护参数不合法时，LoadConfig 返回错误，
 由 main 终止启动。
 */
 package config
@@ -10,6 +10,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -32,6 +33,10 @@ const (
 	// 回源保护的默认值和 cache 包共用，避免两处漂移。
 	defaultCacheMissConcurrency = cache.DefaultMissConcurrency
 	defaultCacheFetchTimeout    = cache.DefaultFetchTimeout
+
+	// 本地默认 text，人眼能直接读。json 一行一条，给生产采集。
+	logFormatText = "text"
+	logFormatJSON = "json"
 )
 
 /*
@@ -46,6 +51,7 @@ type Config struct {
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
 	LogLevel        slog.Level    // 日志级别，默认 info
+	LogFormat       string        // text 或 json，默认 text
 
 	// CacheMissConcurrency 是普通缓存未命中的回源并发上限。
 	CacheMissConcurrency int
@@ -67,7 +73,7 @@ type Config struct {
 /*
 LoadConfig 从环境变量读取进程配置。
 未设置的可选项使用默认值；DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时或回源保护参数不合法时返回错误。
+连接池参数、请求超时、关机超时、日志格式或回源保护参数不合法时返回错误。
 
 REDIS_URL 是完整的连接串：redis://localhost:6379/0，没有密码也可以；
 需要 TLS 用 rediss://，需要密码和 DB 编号就写进 URL。
@@ -79,6 +85,7 @@ func LoadConfig() (Config, error) {
 		RequestTimeout:       defaultRequestTimeout,
 		ShutdownTimeout:      defaultShutdownTimeout,
 		LogLevel:             slog.LevelInfo,
+		LogFormat:            logFormatText,
 		CacheMissConcurrency: defaultCacheMissConcurrency,
 		CacheFetchTimeout:    defaultCacheFetchTimeout,
 	}
@@ -108,8 +115,12 @@ func LoadConfig() (Config, error) {
 			return Config{}, fmt.Errorf("LOG_LEVEL: %w", err)
 		}
 	}
+	format, err := parseLogFormat(os.Getenv("LOG_FORMAT"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.LogFormat = format
 
-	var err error
 	if cfg.Pool.MaxOpenConns, err = envInt("DB_MAX_OPEN_CONNS", cfg.Pool.MaxOpenConns); err != nil {
 		return Config{}, err
 	}
@@ -155,6 +166,33 @@ func ownAddr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+/*
+NewLogger 按 LOG_FORMAT 构造日志。调用前格式已经校验过。
+text 方便在终端里读；json 给生产采集。这里只认 json，其余按 text，
+避免 LoadConfig 之外的调用方因为拼写把进程打成没日志。
+*/
+func (cfg Config) NewLogger(w io.Writer) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
+	var handler slog.Handler
+	if cfg.LogFormat == logFormatJSON {
+		handler = slog.NewJSONHandler(w, opts)
+	} else {
+		handler = slog.NewTextHandler(w, opts)
+	}
+	return slog.New(handler)
+}
+
+func parseLogFormat(raw string) (string, error) {
+	switch raw {
+	case "", logFormatText:
+		return logFormatText, nil
+	case logFormatJSON:
+		return logFormatJSON, nil
+	default:
+		return "", fmt.Errorf("LOG_FORMAT must be text or json, got %q", raw)
+	}
 }
 
 func validate(cfg Config) error {

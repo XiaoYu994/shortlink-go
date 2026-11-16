@@ -99,7 +99,7 @@ curl -i localhost:8081/readyz    # console 就绪，Ping PostgreSQL
 
 `/healthz` 返回 200 和 `ok`。`/readyz` 就绪时返回 200 和 `ok`，否则 503 和 `unavailable`。console 探 PostgreSQL；redirector 不探依赖，Redis 或数据库出问题时它仍然返回 200 并降级服务，这类故障要从指标里看（`shortlink_cache_gets_total{result="fallback"}`、`shortlink_cache_shed_total`、`shortlink_store_operations_total{result="error"}`）。编排器应用 `/readyz` 决定是否接流量，用 `/healthz` 决定是否重启。两个路径都在进程端口上，不经过公网入口。
 
-日志级别由 `LOG_LEVEL` 控制，默认 `info`；可选 `debug`、`warn`、`error`。
+日志级别由 `LOG_LEVEL` 控制，默认 `info`；可选 `debug`、`warn`、`error`。日志格式由 `LOG_FORMAT` 控制，`text`（默认）或 `json`。本地用 `text`；生产用 `json`。
 
 ## 指标
 
