@@ -1,4 +1,6 @@
-# 本地开发用。Prometheus 在容器里抓宿主机上 make run-* 起的两个进程。
+# 默认端口下的抓取配置，给人看。
+# make prometheus 和 make up 会按 ADDR、CONSOLE_ADDR 生成
+# deploy/prometheus.local.yml，容器挂的是那一份。
 # 两个进程的指标名相同，用 job 区分；查询时按 job 过滤。
 global:
   scrape_interval: 5s

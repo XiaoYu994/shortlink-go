@@ -2,20 +2,26 @@
 -include .env
 export
 
+# 跳转进程读 ADDR，管理进程读 CONSOLE_ADDR。两边不能共用一个地址。
+ADDR ?= :8080
+CONSOLE_ADDR ?= :8081
+redirector_port := $(lastword $(subst :, ,$(ADDR)))
+console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
+
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 .PHONY: help run-redirector run-console build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
-	test-db test-integration smoke deps-up up prometheus down psql redis-cli
+	test-db test-integration smoke deps-up up prometheus prometheus-config down psql redis-cli
 
 help: ## 列出所有命令
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
 
-run-redirector: ## 启动跳转进程（ADDR 默认 :8080）
-	go run ./cmd/redirector
+run-redirector: ## 启动跳转进程（ADDR，默认 :8080）
+	ADDR=$(ADDR) go run ./cmd/redirector
 
-run-console: ## 启动管理进程（本机固定 :8081）
-	ADDR=:8081 go run ./cmd/console serve
+run-console: ## 启动管理进程（CONSOLE_ADDR，默认 :8081）
+	CONSOLE_ADDR=$(CONSOLE_ADDR) go run ./cmd/console serve
 
 build: ## 编译到 bin/redirector 和 bin/console
 	go build -o bin/redirector ./cmd/redirector
@@ -72,11 +78,31 @@ smoke: test-db build ## 启动真实进程做冒烟测试（独立端口，使�
 
 selfcheck: test-db verify test-integration smoke ## agent 自测：完整检查、集成测试和冒烟
 
-up: ## 启动 PostgreSQL、Redis 和 Prometheus
-	docker compose up -d --wait
+up: prometheus-config ## 启动 PostgreSQL、Redis 和 Prometheus
+	docker compose up -d --wait postgres redis
+	docker compose up -d --force-recreate --no-deps prometheus
 
-prometheus: ## 启动本地 Prometheus
-	docker compose up -d prometheus
+prometheus-config: ## 按两个监听地址生成 Prometheus 抓取配置
+	@mkdir -p deploy
+	@{ \
+		printf '%s\n' '# 由 make 生成。端口来自 ADDR 和 CONSOLE_ADDR。'; \
+		printf '%s\n' 'global:'; \
+		printf '%s\n' '  scrape_interval: 5s'; \
+		printf '%s\n' '  scrape_timeout: 4s'; \
+		printf '%s\n' ''; \
+		printf '%s\n' 'scrape_configs:'; \
+		printf '%s\n' '  - job_name: redirector'; \
+		printf '%s\n' '    static_configs:'; \
+		printf '%s\n' '      - targets:'; \
+		printf '%s\n' '          - host.docker.internal:$(redirector_port)'; \
+		printf '%s\n' '  - job_name: console'; \
+		printf '%s\n' '    static_configs:'; \
+		printf '%s\n' '      - targets:'; \
+		printf '%s\n' '          - host.docker.internal:$(console_port)'; \
+	} > deploy/prometheus.local.yml
+
+prometheus: prometheus-config ## 启动本地 Prometheus，抓取端口跟随 ADDR / CONSOLE_ADDR
+	docker compose up -d --force-recreate --no-deps prometheus
 
 down: ## 停止依赖（数据保留；加 -v 才会清空）
 	docker compose down

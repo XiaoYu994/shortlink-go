@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	defaultAddr = ":8080"
+	defaultAddr        = ":8080"
+	defaultConsoleAddr = ":8081"
 	// defaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
 	defaultShutdownTimeout = 10 * time.Second
 	/*
@@ -138,6 +139,22 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+/*
+ConsoleAddr 是管理进程的监听地址。
+只认 CONSOLE_ADDR，没设时用 :8081，不读 ADDR。
+ADDR 是跳转进程的端口，管理进程再读它就会和跳转进程抢同一个端口。
+*/
+func ConsoleAddr() string {
+	return ownAddr("CONSOLE_ADDR", defaultConsoleAddr)
+}
+
+func ownAddr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func validate(cfg Config) error {

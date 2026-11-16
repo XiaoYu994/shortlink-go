@@ -180,10 +180,10 @@ DATABASE_URL=$TEST_DATABASE_URL
 REDIS_URL=$TEST_REDIS_URL
 export DATABASE_URL REDIS_URL
 
-REDIRECTOR_ADDR=${SMOKE_REDIRECTOR_ADDR:-127.0.0.1:18080}
-CONSOLE_ADDR=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
-REDIRECTOR_BASE=http://$REDIRECTOR_ADDR
-CONSOLE_BASE=http://$CONSOLE_ADDR
+redirector_addr=${SMOKE_REDIRECTOR_ADDR:-127.0.0.1:18080}
+console_addr=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
+REDIRECTOR_BASE=http://$redirector_addr
+CONSOLE_BASE=http://$console_addr
 export LOG_LEVEL=error
 # redirector 没有盐会拒绝启动。CI 从 .env.example 生成 .env，本机可能还没配。
 VISITOR_SALT=${VISITOR_SALT:-smoke-visitor-salt}
@@ -195,10 +195,10 @@ SMOKE_OTHER_KEY=slk_ffeeddccbbaa99887766554433221100ffeeddccbbaa9988776655443322
 seed_key smoke "$SMOKE_API_KEY"
 seed_key smoke-other "$SMOKE_OTHER_KEY"
 
-# 两个进程各自读 ADDR；.env 里的 ADDR 被这里的赋值覆盖。
-ADDR=$REDIRECTOR_ADDR ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
+# 前缀赋值只影响这一条命令，盖过 .env 里的监听地址。
+ADDR=$redirector_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
-ADDR=$CONSOLE_ADDR ./bin/console serve >"$CONSOLE_LOG" 2>&1 &
+CONSOLE_ADDR=$console_addr ./bin/console serve >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
 wait_ready "$REDIRECTOR_BASE" "$REDIRECTOR_PID" redirector

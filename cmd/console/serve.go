@@ -31,6 +31,7 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
+	cfg.Addr = config.ConsoleAddr()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

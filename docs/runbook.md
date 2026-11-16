@@ -28,11 +28,11 @@ make migrate
 然后在两个终端分别启动：
 
 ```bash
-make run-redirector   # 公开跳转，:8080
+make run-redirector   # 公开跳转，默认 :8080
 ```
 
 ```bash
-make run-console      # 管理 API，:8081
+make run-console      # 管理 API，默认 :8081
 ```
 
 `make up` 只启动数据库，不执行 SQL。以前用初始化脚本建过表、但没有 `schema_migrations` 的数据卷，`make migrate` 会在 `CREATE TABLE links` 处失败。学习用的 compose 库可以删掉数据卷再来一次（这会清空该卷里的数据）：
@@ -79,14 +79,14 @@ PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，�
 两个进程各开一个终端：
 
 ```bash
-make run-redirector   # 公开跳转，ADDR 来自 .env，默认 :8080
+make run-redirector   # 公开跳转，ADDR，默认 :8080
 ```
 
 ```bash
-make run-console      # 管理 API，本机固定 :8081
+make run-console      # 管理 API，CONSOLE_ADDR，默认 :8081
 ```
 
-看到 `connected to postgres`、`connected to redis` 和 `listening addr=:8080` / `:8081` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`；`run-console` 用 `ADDR=:8081` 覆盖 `.env` 里的地址。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥命令 `make console ...` 不启动 HTTP，也不需要 Redis。
+看到 `connected to postgres`、`connected to redis` 和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥命令 `make console ...` 不启动 HTTP，也不需要 Redis。
 
 检查：
 
@@ -149,7 +149,7 @@ redis-cli -h localhost -p 6379 TTL shortlink:link:AbC123xy
 make prometheus
 ```
 
-Prometheus UI：http://localhost:9090。抓取目标是 `host.docker.internal:8080/metrics`（job `redirector`）和 `host.docker.internal:8081/metrics`（job `console`），所以两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
+Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程的 `/metrics`，端口来自 `ADDR` 和 `CONSOLE_ADDR`（默认 `8080` 和 `8081`，job 分别是 `redirector` 和 `console`）。两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。改了端口要重新执行 `make prometheus`，容器才会换上新的抓取配置。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
 ## 基线压测（无缓存）
 
@@ -527,7 +527,7 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | 现象 | 处理 |
 | --- | --- |
 | `DATABASE_URL is required` | `.env` 缺失，或没有通过 `make run-*` / `make console` 启动 |
-| console 端口被占用 | 本机 `:8081` 已有服务；停掉它，或临时改 Makefile 的 `run-console` 地址 |
+| console 端口被占用 | 换 `CONSOLE_ADDR`，例如 `make run-console CONSOLE_ADDR=:18081`；改端口后重新 `make prometheus` |
 | 新短码立刻跳转 404 | 确认创建走 console、跳转走 redirector；console 创建后会写穿 Redis，绕过 console 直接写库不会清掉负缓存 |
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |

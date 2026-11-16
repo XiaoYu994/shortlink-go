@@ -145,7 +145,8 @@ GET /api/v1/links/{code}/stats
 
 `config.LoadConfig` 在启动时读取并校验：
 
-- `ADDR`：监听地址，默认 `:8080`。两个 HTTP 进程各自读取自己的环境；本机开发时 console 由 Makefile 固定为 `:8081`
+- `ADDR`：跳转进程的监听地址，默认 `:8080`
+- `CONSOLE_ADDR`：管理进程的监听地址，默认 `:8081`。不读 `ADDR`，避免和跳转进程抢同一个端口
 - `DATABASE_URL`：必填
 - `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS`
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
@@ -164,7 +165,7 @@ GET /api/v1/links/{code}/stats
 
 ## 监控
 
-两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，分别抓取 `host.docker.internal:8080/metrics`（redirector）和 `host.docker.internal:8081/metrics`（console），配置在 `deploy/prometheus.yml`；两个 job 的指标名相同，查询时用 `job` 区分。`/metrics` 与业务共用端口，公网隔离由部署层保证。
+两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，按 `ADDR` 和 `CONSOLE_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080` 和 `8081`），生成的配置在 `deploy/prometheus.local.yml`；两个 job 的指标名相同，查询时用 `job` 区分。`/metrics` 与业务共用端口，公网隔离由部署层保证。
 
 ## 尚未实现
 

@@ -7,13 +7,13 @@
 ```bash
 # 先按 docs/runbook.md 准备 .env（DATABASE_URL、REDIS_URL、VISITOR_SALT），并启动数据库
 make migrate
-make run-redirector   # 终端 1：公开跳转，监听 :8080
+make run-redirector   # 终端 1：公开跳转，默认 :8080，用 ADDR 改
 ```
 
 另开一个终端启动管理进程：
 
 ```bash
-make run-console      # 管理 API，监听 :8081
+make run-console      # 管理 API，默认 :8081，用 CONSOLE_ADDR 改
 curl -i localhost:8080/healthz
 ```
 

@@ -9,6 +9,23 @@ import (
 	"shortlink/internal/postgres"
 )
 
+func TestConsoleAddr(t *testing.T) {
+	t.Run("prefers CONSOLE_ADDR", func(t *testing.T) {
+		t.Setenv("CONSOLE_ADDR", ":18081")
+		t.Setenv("ADDR", ":8080")
+		if got := ConsoleAddr(); got != ":18081" {
+			t.Fatalf("ConsoleAddr() = %q, want :18081", got)
+		}
+	})
+	t.Run("console default ignores ADDR", func(t *testing.T) {
+		t.Setenv("CONSOLE_ADDR", "")
+		t.Setenv("ADDR", ":8080")
+		if got := ConsoleAddr(); got != ":8081" {
+			t.Fatalf("ConsoleAddr() = %q, want :8081", got)
+		}
+	})
+}
+
 func TestLoadConfig(t *testing.T) {
 	// make test 会导出 .env。每个子测试都要把 LoadConfig 读取的变量设一遍，空字符串表示未配置。
 	base := map[string]string{

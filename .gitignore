@@ -19,3 +19,6 @@ vendor/
 
 # 本地配置，可能含密码
 .env
+
+# make prometheus / make up 按监听端口生成
+deploy/prometheus.local.yml
