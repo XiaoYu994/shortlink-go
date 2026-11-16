@@ -156,7 +156,7 @@ GET /api/v1/links/{code}/stats
 - `CACHE_FETCH_TIMEOUT`：默认 `1s`，单次回源超时；必须为正且不超过 `REQUEST_TIMEOUT`
 - `REDIS_URL`：必填，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。`main` 用它 Ping，连不上则进程退出
 - `VISITOR_SALT`：访客哈希的 HMAC 密钥。redirector 启动时必填，为空直接报错；console 不用。生产从密钥管理注入，不能提交真实值
-- `TRUST_PROXY_HEADERS`：默认 `false`；为 `true` 时从 `X-Forwarded-For` 第一段取客户端 IP。只能开在可信反向代理后面
+- `TRUST_PROXY_HEADERS`：默认 `false`；为 `true` 时从 `X-Forwarded-For` 最右一段取客户端 IP。只能开在可信反向代理后面。`deploy/nginx.conf` 把这个头覆盖成 `$remote_addr`
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 
 ## 退出

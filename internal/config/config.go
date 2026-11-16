@@ -58,8 +58,8 @@ type Config struct {
 	*/
 	VisitorSalt string
 	/*
-		TrustProxyHeaders 为 true 时从 X-Forwarded-For 取客户端 IP。
-		只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。
+		TrustProxyHeaders 为 true 时从 X-Forwarded-For 的最右一段取客户端 IP。
+		最左一段在代理追加头时可以由客户端伪造。只能开在可信反向代理后面。
 	*/
 	TrustProxyHeaders bool
 }

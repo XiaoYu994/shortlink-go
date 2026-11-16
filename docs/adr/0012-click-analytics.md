@@ -97,8 +97,8 @@ type Click struct {
   - 不存原始 IP 和 User-Agent，也不写进日志。HMAC 是伪匿名，不是匿名化；盐是密钥，不能提交到仓库。
   - 盐变化会让同一天内新旧哈希分裂；需要换盐时在 UTC 零点后做，并接受当天的 UV 可能偏高。
   - IP 或盐拿不到时不记访客，点击趋势和维度照常记录。
-- **客户端 IP**：默认取 `RemoteAddr` 的 host。部署在反向代理后，`TRUST_PROXY_HEADERS=true` 时取 `X-Forwarded-For` 的第一个合法 IP；这个开关只能开在可信代理后面，否则客户端可以伪造 IP 刷高 UV。
-- **长度上限**：`User-Agent` 参与分类和哈希前截到 512 字节，`Referer` 超过 2048 字节直接归 `other`，避免恶意超长头放大内存和哈希开销。`X-Forwarded-For` 只取第一段并校验成 IP。
+- **客户端 IP**：默认取 `RemoteAddr` 的 host。部署在反向代理后，`TRUST_PROXY_HEADERS=true` 时取 `X-Forwarded-For` 的最右一段合法 IP。nginx 的 `$proxy_add_x_forwarded_for` 会把对端地址追加在末尾，最左一段是客户端带来的，可以伪造。最右一段不是合法 IP 时不往左找，改回连接地址。请求里有多行 `X-Forwarded-For` 时按逗号拼成一行再取：有的代理另起一行追加，只读第一行会读到客户端带来的值。`deploy/nginx.conf` 直接把该头覆盖成 `$remote_addr`。这个开关只能开在可信代理后面。
+- **长度上限**：`User-Agent` 参与分类和哈希前截到 512 字节，`Referer` 超过 2048 字节直接归 `other`，避免恶意超长头放大内存和哈希开销。`X-Forwarded-For` 只取最右一段并校验成 IP。
 - **配置**：`VISITOR_SALT` 由 `config.LoadConfig` 读取；redirector 启动时为空则直接报错，避免静默丢 UV。`TRUST_PROXY_HEADERS` 默认 `false`。console 不用盐。
 
 ### 写入路径

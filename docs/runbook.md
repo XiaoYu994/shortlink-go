@@ -11,7 +11,7 @@ REDIS_URL=redis://localhost:6379/0
 VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`。
+`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`。打开之后取 `X-Forwarded-For` 的最右一段。
 
 `.env` 已被 gitignore，不会提交。
 
@@ -452,7 +452,7 @@ curl -s localhost:8081/api/v1/links/AbC123xy/stats \
 
 默认查最近 8 个 UTC 日（`to` 为今天，`from` 为 `to - 7 天`）。可以用 `?from=...&to=...` 指定 RFC3339 时间，跨度不超过 90 天。`total_clicks` 是终身累计，`clicks` 是日趋势；`devices` 和 `clients` 固定返回全部类别，没有数据的为 0。`unique_visitors` 是每天 UV 相加，不是跨天去重。
 
-访客哈希依赖 `VISITOR_SALT`。换盐会让当天的新旧哈希分裂，UV 可能偏高，安排在 UTC 零点后换。`TRUST_PROXY_HEADERS=false` 时用连接地址，代理后面看到的 IP 会都一样，UV 会偏低；确认代理可信后再打开。
+访客哈希依赖 `VISITOR_SALT`。换盐会让当天的新旧哈希分裂，UV 可能偏高，安排在 UTC 零点后换。`TRUST_PROXY_HEADERS=false` 时用连接地址，代理后面看到的 IP 会都一样，UV 会偏低；确认代理可信后再打开。打开后使用 `X-Forwarded-For` 的最右一段。不要用会把客户端原头留在左边的追加方式；`deploy/nginx.conf` 覆盖成 `$remote_addr`。
 
 ## 查看数据库
 

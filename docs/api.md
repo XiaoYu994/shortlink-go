@@ -190,7 +190,7 @@ curl -i localhost:8080/r/AbC123xy
 - 客户端：`browser`、`bot`、`cli`、`other`。
 - 访客：`HMAC-SHA256(VISITOR_SALT, 按天盐 + IP + User-Agent)` 的前 16 字节。不存原始 IP 和 User-Agent。
 
-客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才看 `X-Forwarded-For` 的第一段；这个开关只能开在可信反向代理后面，否则客户端可以伪造 IP 刷高 UV。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
+客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才看 `X-Forwarded-For` 的最右一段。代理如果追加而不是覆盖，最左一段是客户端带来的，可以伪造；最右一段不是合法 IP 时改回连接地址，不往左找。`deploy/nginx.conf` 把这个头覆盖成代理看到的对端地址。这个开关只能开在可信反向代理后面。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
 
 ## 健康检查
 
