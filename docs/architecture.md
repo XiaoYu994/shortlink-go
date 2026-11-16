@@ -13,7 +13,7 @@
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
 | `console` | `POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除维护缓存）；`key` 命令只连 PostgreSQL |
 
-`redirector` 只挂公开跳转，不注册管理路由；API Key 鉴权只存在于 `console`。创建成功后 `console` 写穿正缓存；修改和删除提交后无条件覆盖缓存（删除写负缓存），`redirector` 读同一份缓存，所以新短码不会在负缓存里继续 404，改过的链接也不会继续跳旧地址。这次缓存写入不跟随请求取消：数据库已经提交后，客户端断开也不能跳过它。回源写缓存一律用 `SET NX`，在途旧快照盖不掉管理写的新值。两个进程各自监听、各自扩容、各自暴露 `/metrics`，连接池也是各一份，总连接数是两边之和。部署时由反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console；短链公开地址不变。宿主机进程用 `deploy/nginx.conf`，不转发 `/metrics`、`/healthz` 和 `/readyz`。`/healthz` 只表示进程活着；`/readyz` 失败返回 503，让编排器摘流量而不是重启进程。console 的 `/readyz` 在 1 秒内 Ping PostgreSQL；redirector 的不探依赖，启动完成就算就绪，Redis 或数据库故障时它仍要留在流量里降级服务。
+`redirector` 只挂公开跳转，不注册管理路由；API Key 鉴权只存在于 `console`。创建成功后 `console` 写穿正缓存；修改和删除提交后无条件覆盖缓存（删除写负缓存），`redirector` 读同一份缓存，所以新短码不会在负缓存里继续 404，改过的链接也不会继续跳旧地址。这次缓存写入不跟随请求取消：数据库已经提交后，客户端断开也不能跳过它。回源写缓存一律用 `SET NX`，在途旧快照盖不掉管理写的新值。两个进程各自监听、各自扩容、各自暴露 `/metrics`，连接池也是各一份，总连接数是两边之和。部署时由反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console；短链公开地址不变。宿主机进程用 `deploy/nginx.conf`，容器栈用 `deploy/nginx.stack.conf`。两份都不转发 `/metrics`、`/healthz` 和 `/readyz`。`/healthz` 只表示进程活着；`/readyz` 失败返回 503，让编排器摘流量而不是重启进程。console 的 `/readyz` 在 1 秒内 Ping PostgreSQL；redirector 的不探依赖，启动完成就算就绪，Redis 或数据库故障时它仍要留在流量里降级服务。
 
 这是按流量和故障域把一个服务部署两次，不是微服务：数据所有权没有拆开，进程之间也没有 HTTP/RPC 调用。决策见 [ADR 0009](adr/0009-process-split-and-credentials.md)。
 
@@ -24,6 +24,7 @@ shortlink/
 ├── cmd/redirector/      # 公开跳转进程：GET /r/{code}、/healthz、/readyz、/metrics
 ├── cmd/console/         # 管理进程：短链增删改查和统计；另有租户和 API Key 运维命令
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
+├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
 │   ├── httpapi/         # handler、路由、中间件；定义 LinkStore、LinkAdminStore、LinkStatsStore
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
@@ -166,7 +167,7 @@ GET /api/v1/links/{code}/stats
 
 ## 监控
 
-两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，按 `ADDR` 和 `CONSOLE_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080` 和 `8081`），生成的配置在 `deploy/prometheus.local.yml`；两个 job 的指标名相同，查询时用 `job` 区分。`/metrics` 与业务共用端口，公网隔离由部署层保证。
+两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，按 `ADDR` 和 `CONSOLE_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080` 和 `8081`），生成的配置在 `deploy/prometheus.local.yml`；两个 job 的指标名相同，查询时用 `job` 区分。`/metrics` 与业务共用端口。公网入口是 `deploy/nginx.conf`（宿主机进程）和 `deploy/nginx.stack.conf`（容器栈），都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。Prometheus 和探活直接打进程端口。宿主机入口：`docker compose --profile edge up -d nginx`，地址 `127.0.0.1:8088`。容器栈：`make stack`，入口 `127.0.0.1:28088`，进程端口 `127.0.0.1:28080` 和 `127.0.0.1:28081`。`make up` 不启动这套栈。
 
 ## 尚未实现
 

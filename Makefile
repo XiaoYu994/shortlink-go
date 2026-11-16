@@ -12,7 +12,7 @@ console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 .PHONY: help run-redirector run-console build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
-	test-db test-integration smoke deps-up up prometheus prometheus-config down psql redis-cli
+	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli
 
 help: ## 列出所有命令
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -77,6 +77,10 @@ smoke: test-db build ## 启动真实进程做冒烟测试（独立端口，使�
 	./scripts/smoke.sh
 
 selfcheck: test-db verify test-integration smoke ## agent 自测：完整检查、集成测试和冒烟
+
+stack: ## 构建并启动可选应用栈（profile app，不随 up 启动）
+	docker compose up -d --wait postgres redis
+	docker compose --profile app up -d --build --wait redirector console gateway
 
 up: prometheus-config ## 启动 PostgreSQL、Redis 和 Prometheus
 	docker compose up -d --wait postgres redis

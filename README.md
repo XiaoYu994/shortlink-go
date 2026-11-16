@@ -40,6 +40,7 @@ curl -i localhost:8080/r/AbC123xy
 
 两个进程共用 PostgreSQL、Redis 和 `internal/` 里的代码，进程之间不互相调用。
 部署时由反向代理把 `/r/` 转到 redirector，把 `/api/v1/` 转到 console；短链的公开地址不变。
+宿主机上的进程用 `deploy/nginx.conf`（compose profile `edge`）。容器里跑两个进程用根目录的 `Dockerfile` 和 profile `app`，入口是 `deploy/nginx.stack.conf`。`/healthz` 只表示进程活着；`/readyz` 表示可以接流量，console 会探 PostgreSQL，redirector 启动完成就算就绪；这两个路径和 `/metrics` 都不经过公网入口。
 
 ## 验证
 

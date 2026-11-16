@@ -28,6 +28,6 @@
 
 - 缓存效果有基线，验收不靠感觉。
 - 测试必须使用注入的 Registry，不能用 `prometheus.DefaultRegisterer`；指标只注册一次，路由可以重复组装。
-- `/metrics` 和 `/healthz` 同属运维面，不进 `/api/v1`；应用不做鉴权，公网隔离靠部署层。
-- 抓取会进访问日志和 HTTP 指标，暂时接受。
+- `/metrics`、`/healthz` 和 `/readyz` 同属运维面，不进 `/api/v1`；应用不做鉴权，公网隔离靠部署层。
+- 抓取不进访问日志和 HTTP 指标。`/metrics` 与业务同端口，公网隔离靠 `deploy/nginx.conf` 和 `deploy/nginx.stack.conf` 不转发这条路径。`/healthz` 和 `/readyz` 同样不转发，探活直连进程端口。
 - 慢请求在这个阶段靠耗时直方图和日志排查；追踪留到指标不够用的时候。

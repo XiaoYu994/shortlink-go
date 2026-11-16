@@ -1,0 +1,8 @@
+.git
+.github
+.env
+.env.*
+bin
+docs
+*.md
+deploy/prometheus.local.yml

@@ -42,8 +42,8 @@
   - HTTP 指标在构造 `Server` 时注册一次，路由组装只套中间件、不注册：现有测试会在同一个 `Server` 上多次组装路由（`internal/httpapi/requestid_test.go`），第二次注册就 panic
   - 自建的 Registry 是空的，Go 运行时指标（`go_goroutines` 等）要自己注册
   - `/metrics` 用 `promhttp.HandlerFor(reg, promhttp.HandlerOpts{})` 暴露，不用 `promhttp.Handler()`（后者默认抓 `DefaultGatherer`）
-  - 与业务共用 `ADDR` 端口；“不对公网开放”由部署层保证（反向代理不转发或网络策略限制），应用本身不做鉴权
-  - 抓取也走中间件链，会被 logging 记日志、被 HTTP 指标统计一次；暂时接受，噪声影响排查时再挪到链外
+  - 与业务共用 `ADDR` 端口；“不对公网开放”由部署层保证。`deploy/nginx.conf` 和 `deploy/nginx.stack.conf` 只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`；应用本身不做鉴权
+  - 抓取仍走中间件链，但 logging 和 HTTP 指标跳过 `/metrics`，避免抓取噪声混进业务数据；`timeout` 仍作用在抓取上
 - [x] HTTP 指标中间件：按路由模式、方法、状态码记请求数和耗时直方图
   - label 只用取值有限的维度，短码、request_id 不能做 label
   - 路由模式用 `mux.Handler(r)` 查，未匹配的归到一个固定值；`mux.Handler` 对 405 也返回空 pattern，会归进同一个值，状态码 label 仍能区分
