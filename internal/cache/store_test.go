@@ -1187,6 +1187,35 @@ func TestStoreDeleteWritesNegative(t *testing.T) {
 }
 
 /*
+TestDeleteWritesCacheWhenRequestAlreadyCanceled 覆盖提交之后的缓存写入。
+数据库已经成功，请求 ctx 却已经取消。负缓存仍要写上，
+否则跳转会一直命中删除前的正缓存，直到 TTL。
+*/
+func TestDeleteWritesCacheWhenRequestAlreadyCanceled(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	next := &fakeStore{deleteFn: func(context.Context, int64, string) error { return nil }}
+	s := newTestStore(t, next, rdb)
+	s.writeCache(context.Background(), keyPrefix+code, &link.Link{
+		ID: 7, Code: code, URL: "https://example.com/old",
+	}, writeOverwrite)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Delete(ctx, 1, code); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got := rdb.Get(context.Background(), keyPrefix+code).Val(); got != "null" {
+		t.Errorf("cached value = %q, want null", got)
+	}
+	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); n != 2 {
+		t.Errorf("writes{result=success} = %v, want 2", n)
+	}
+}
+
+/*
 TestStoreOriginWriteDoesNotOverwriteNewValue 固定 ADR 0011 的交错语义：
 在途回源读到旧值，修改提交后已经无条件覆盖缓存，旧回源的 SET NX 必须失败，
 不能把新值盖回去。

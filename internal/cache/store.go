@@ -42,6 +42,13 @@ const (
 	*/
 	DefaultFetchTimeout = time.Second
 
+	/*
+		committedWriteTimeout 是管理写提交之后更新缓存的上限。
+		这段不跟请求取消走：客户端断开或请求超时的时候，数据库已经提交。
+		若这时跳过 SET，删除的链接会继续跳转，直到正缓存 TTL（最长 1 小时）。
+	*/
+	committedWriteTimeout = time.Second
+
 	getsMetricName     = "shortlink_cache_gets_total"
 	writesMetricName   = "shortlink_cache_writes_total"
 	durationMetricName = "shortlink_cache_operation_duration_seconds"
@@ -192,7 +199,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := s.next.Create(ctx, l); err != nil {
 		return err
 	}
-	s.writeCache(ctx, keyPrefix+l.Code, l, writeOverwrite)
+	s.writeCommitted(ctx, keyPrefix+l.Code, l)
 	return nil
 }
 
@@ -275,9 +282,9 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 	}
 	key := keyPrefix + code
 	if updated.Expired(time.Now()) {
-		s.writeCache(ctx, key, nil, writeOverwrite)
+		s.writeCommitted(ctx, key, nil)
 	} else {
-		s.writeCache(ctx, key, &updated.Link, writeOverwrite)
+		s.writeCommitted(ctx, key, &updated.Link)
 	}
 	return updated, nil
 }
@@ -290,7 +297,7 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	if err := s.next.Delete(ctx, tenantID, code); err != nil {
 		return err
 	}
-	s.writeCache(ctx, keyPrefix+code, nil, writeOverwrite)
+	s.writeCommitted(ctx, keyPrefix+code, nil)
 	return nil
 }
 
@@ -364,7 +371,22 @@ func usableCachedLink(cached *link.Link, code string) bool {
 }
 
 /*
-writeCache 失败只影响下次命中。ctx 已取消时不记成写失败。
+writeCommitted 在数据库提交之后更新缓存。
+请求 ctx 可能已经取消：客户端断开，或者请求超时发生在提交之后。
+WithoutCancel 丢掉取消和 deadline，只留日志要用的 value；
+再套一段独立超时，避免 Redis 卡住时这个 handler 一直不返回。
+*/
+func (s *Store) writeCommitted(ctx context.Context, key string, l *link.Link) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
+	defer cancel()
+	s.writeCache(writeCtx, key, l, writeOverwrite)
+}
+
+/*
+writeCache 失败只影响下次命中。
+回源填充（SET NX）在 ctx 已取消时不记成写失败：那是调用方走了，不是 Redis 故障。
+管理写（无条件 SET）已经提交了数据库，取消也要记日志和 error，
+否则缓存会静默停在旧值上。
 
 mode 决定写入方式，不能只按 l 是否为 nil 判断：
 回源的正、负缓存都用 SET NX，管理写（包括删除的负缓存）都用无条件 SET。
@@ -374,6 +396,10 @@ TTL 向下随机抖动，避免同一批写入的 key 集中过期。
 */
 func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode writeMode) {
 	if ctx.Err() != nil {
+		if mode == writeOverwrite {
+			s.logger.WarnContext(ctx, "write cache", "key", key, "err", ctx.Err())
+			s.writes.WithLabelValues(writeError).Inc()
+		}
 		return
 	}
 
@@ -404,8 +430,11 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 		setErr = s.rdb.Set(ctx, key, data, jitteredTTL(ttl)).Err()
 		written = setErr == nil
 	}
-	// 调用中取消同样不记。拨号超时不会让 ctx.Err() 非空，仍记成 error。
-	if setErr != nil && ctx.Err() != nil {
+	/*
+		回源填充被调用方取消时不记。拨号超时不会让 ctx.Err() 非空，仍记成 error。
+		管理写的 ctx 是独立超时；这段超时也算没写上缓存，要记下来。
+	*/
+	if setErr != nil && ctx.Err() != nil && mode == writeNX {
 		return
 	}
 	if setErr != nil {

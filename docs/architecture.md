@@ -13,7 +13,7 @@
 | `redirector` | `GET /r/{code}`、`/healthz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
 | `console` | `POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除维护缓存）；`key` 命令只连 PostgreSQL |
 
-`redirector` 只挂公开跳转，不注册管理路由；API Key 鉴权只存在于 `console`。创建成功后 `console` 写穿正缓存；修改和删除提交后无条件覆盖缓存（删除写负缓存），`redirector` 读同一份缓存，所以新短码不会在负缓存里继续 404，改过的链接也不会继续跳旧地址。回源写缓存一律用 `SET NX`，在途旧快照盖不掉管理写的新值。两个进程各自监听、各自扩容、各自暴露 `/metrics`，连接池也是各一份，总连接数是两边之和。部署时由反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console；短链公开地址不变。
+`redirector` 只挂公开跳转，不注册管理路由；API Key 鉴权只存在于 `console`。创建成功后 `console` 写穿正缓存；修改和删除提交后无条件覆盖缓存（删除写负缓存），`redirector` 读同一份缓存，所以新短码不会在负缓存里继续 404，改过的链接也不会继续跳旧地址。这次缓存写入不跟随请求取消：数据库已经提交后，客户端断开也不能跳过它。回源写缓存一律用 `SET NX`，在途旧快照盖不掉管理写的新值。两个进程各自监听、各自扩容、各自暴露 `/metrics`，连接池也是各一份，总连接数是两边之和。部署时由反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console；短链公开地址不变。
 
 这是按流量和故障域把一个服务部署两次，不是微服务：数据所有权没有拆开，进程之间也没有 HTTP/RPC 调用。决策见 [ADR 0009](adr/0009-process-split-and-credentials.md)。
 

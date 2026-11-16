@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -210,7 +213,7 @@ func TestCreateDoesNotCount(t *testing.T) {
 	}
 }
 
-func TestWriteCanceledDuringSetDoesNotCount(t *testing.T) {
+func TestWriteNXCanceledDuringSetDoesNotCount(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	t.Cleanup(func() { _ = rdb.Close() })
 
@@ -223,9 +226,10 @@ func TestWriteCanceledDuringSetDoesNotCount(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	errCh := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		errCh <- s.Create(ctx, &link.Link{Code: "x", URL: "https://example.com"})
+		s.writeCache(ctx, keyPrefix+"x", &link.Link{Code: "x", URL: "https://example.com"}, writeNX)
+		close(done)
 	}()
 
 	select {
@@ -234,8 +238,10 @@ func TestWriteCanceledDuringSetDoesNotCount(t *testing.T) {
 		t.Fatal("timed out waiting for SET to start")
 	}
 	cancel()
-	if err := <-errCh; err != nil {
-		t.Fatalf("Create: %v", err)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for writeCache")
 	}
 
 	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); n != 0 {
@@ -246,6 +252,30 @@ func TestWriteCanceledDuringSetDoesNotCount(t *testing.T) {
 	}
 	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeSkipped)); n != 0 {
 		t.Errorf("writes{result=%q} = %v, want 0", writeSkipped, n)
+	}
+}
+
+func TestCommittedWriteErrorIsCountedWhenRequestCanceled(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	_ = rdb.Close()
+
+	var logs bytes.Buffer
+	reg := prometheus.NewRegistry()
+	s := New(&fakeStore{}, rdb, reg, Options{
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Create(ctx, &link.Link{Code: "x", URL: "https://example.com"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); n != 1 {
+		t.Errorf("writes{result=%q} = %v, want 1", writeError, n)
+	}
+	if !strings.Contains(logs.String(), "write cache") {
+		t.Errorf("log = %q, want write cache", logs.String())
 	}
 }
 
