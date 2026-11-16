@@ -66,7 +66,7 @@
   - 2026-11-12 缓存压测：客户端 19,077 req/s（基线 10,105）、服务端跳转 p50 1.4ms / p99 4.7ms（基线 3.2 / 21.5ms），数据库连接池零使用，详见 runbook
 - [x] 缓存雪崩防护：正、负缓存 TTL 向下随机抖动最多 10%；Redis 读失败时限制回源并发，超出的快速返回 503
 - [x] singleflight 的共享回源改用独立 ctx，领头请求取消不再连累等待者
-  - 回源用 `context.WithoutCancel` 派生 ctx 并保留原 deadline；回源许可只包住数据库调用，见 ADR 0006
+  - 回源用 `context.WithoutCancel` 派生 ctx，deadline 是 `CACHE_FETCH_TIMEOUT`，不再保留请求 deadline；回源许可只包住数据库调用，见 ADR 0008
 - [x] `ClickRecorder`：非阻塞投递、批量写出、关停时不丢数据
 - [x] `ClickRecorder` 的 dropped 计数暴露到 `/metrics`
   - `shortlink_clicks_dropped_total`：缓冲满时加一。`shortlink_clicks_written_total{result}` 记录写出成功和失败的点击数。关停时排空 channel，受一份 `SHUTDOWN_TIMEOUT` 限制，再关数据库。设计见 [ADR 0007](adr/0007-async-click-recording.md)

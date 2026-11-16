@@ -31,7 +31,7 @@
 - 组合顺序固定为 `HTTP -> cache -> storemetrics -> postgres`。缓存命中不进入存储指标，`shortlink_store_*` 只统计真正打到数据库的调用；缓存效果和数据库耗时可以分开看。
 - `Create` 成功后写穿正缓存，覆盖可能存在的负缓存；查找回源写负缓存用 `SET NX`，避免和创建并发时后到的负缓存覆盖正缓存。
 - 并发未命中用 `singleflight` 按 cache key 合并，同一个短码同时只有一个请求回源。
-- `singleflight` 的共享回源用 `context.WithoutCancel` 派生独立 ctx，并保留原来的 deadline。领头请求取消时，等待者不再跟着拿到 `context.Canceled`；回源仍受 `REQUEST_TIMEOUT` 约束。
+- `singleflight` 的共享回源用 `context.WithoutCancel` 派生独立 ctx。最初保留请求的 deadline；[ADR 0008](0008-cold-cache-read-path.md) 改为独立的 `CACHE_FETCH_TIMEOUT`，不再沿用请求 deadline。领头请求取消时，等待者不再跟着拿到 `context.Canceled`。
 - 正、负缓存 TTL 都向下随机抖动最多 10%，避免同一批写入的 key 在同一时间集中失效。
 - Redis 读失败时最多 8 个请求同时回源，取不到许可的直接返回实现了 `Temporary()` 的错误，HTTP 层映射成 503。许可只包住数据库调用，写缓存不占着它。
 
