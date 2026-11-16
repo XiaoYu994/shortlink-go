@@ -81,8 +81,9 @@
 ## 阶段 6：一个 SaaS 功能
 
 - [x] 多租户加 API Key 鉴权（中间件加 context 传值）
-  - 只包 `POST /api/v1/links`。`Authorization: Bearer slk_` 加 64 位十六进制，库存 SHA-256。租户放进 context，创建时写入 `links.tenant_id`。`/r/{code}`、`/healthz`、`/metrics` 不鉴权
-  - 还没有签发入口。能写数据库的运维人员才能插入哈希；持有密钥的调用方不能再签发
+  - `Authorization: Bearer slk_` 加 64 位十六进制，库存 SHA-256。租户放进 context，创建时写入 `links.tenant_id`，请求体不能带租户。`/r/{code}`、`/healthz`、`/metrics` 不鉴权
+  - 每个管理路由单独包 `authenticate`：创建，以及第 7 阶段的列表、详情、修改、删除和统计。`ServeMux` 没有路由组，套在 `/api/v1/` 上的中间件不会被更具体的路由继承。缺失、畸形、过期和吊销都返回 401
+  - 签发入口是下面的 `console key`，没有公开的签发 HTTP 接口。持有密钥的调用方不能再签发
 - [x] 拆分 `cmd/redirector` 和 `cmd/console`（[ADR 0009](adr/0009-process-split-and-credentials.md)）
   - 两个 `main`、两套部署，共用 PostgreSQL、Redis 和 `internal/`，进程之间不调用。redirector 只做公开跳转、缓存和点击；console 做管理 API
   - `httpapi` 提供 `NewRedirector` / `NewConsole` 和 `RedirectRoutes` / `ConsoleRoutes`，两组路由各自注册运维端点；测试覆盖路由隔离
