@@ -16,8 +16,8 @@ import (
 /*
 Open 建立客户端并 Ping。NewClient 不连网络；Ping 失败时关掉客户端，避免留下连接池。
 
-超时和重试比 go-redis 默认值短。默认读超时 5 秒、重试 3 次，
-Redis 挂掉时一次 GET 可能超过 REQUEST_TIMEOUT，请求还没回源就超时了。
+超时和重试比 go-redis 默认值短。默认读超时 5 秒、命令重试 3 次、拨号重试 5 次，
+Redis 挂掉时一次 GET 会超过 REQUEST_TIMEOUT，请求还没回源就超时了。
 */
 func Open(ctx context.Context, redisURL string) (*redis.Client, error) {
 	opts, err := newOptions(redisURL)
@@ -49,5 +49,12 @@ func newOptions(redisURL string) (*redis.Options, error) {
 	opts.ReadTimeout = 200 * time.Millisecond
 	opts.WriteTimeout = 200 * time.Millisecond
 	opts.MaxRetries = 1 // 0 表示使用默认的 3 次重试；-1 表示不重试
+	/*
+		DialerRetries 小于等于 0 会被 go-redis 改回默认的 5 次。读超时管不到拨号：
+		5 次拨号每次最多 DialTimeout，再加这一次命令重试，Redis 不可达时
+		一次命令要到 6 秒。1 表示只拨一次；命令重试仍会再拨一次，
+		两次合计留在 REQUEST_TIMEOUT 里，失败后还能回源。
+	*/
+	opts.DialerRetries = 1
 	return opts, nil
 }

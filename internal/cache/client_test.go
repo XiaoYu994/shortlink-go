@@ -92,6 +92,9 @@ func TestNewOptions(t *testing.T) {
 			if opts.MaxRetries != 1 {
 				t.Errorf("MaxRetries = %d, want 1", opts.MaxRetries)
 			}
+			if opts.DialerRetries != 1 {
+				t.Errorf("DialerRetries = %d, want 1", opts.DialerRetries)
+			}
 		})
 	}
 }
