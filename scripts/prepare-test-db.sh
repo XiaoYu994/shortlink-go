@@ -1,7 +1,9 @@
 #!/bin/sh
 # 准备 TEST_DATABASE_URL 指向的测试库：库不存在就创建，然后清掉 public
 # 并执行 migrations/。先 up、再 down、再 up，确认回滚 SQL 也能用。
-# 只动测试库：库名必须以 _test 结尾。
+# 库名规则和 cmd/migrate 的 up、down 相同，而且必须在任何写操作之前检查：
+# 只接受 shortlink_test，或以 shortlink_ 开头并且以 _test 结尾。
+# 只看「以 _test 结尾」会先清空别的项目的测试库，随后迁移被拒绝。
 #
 # 不负责启动 PostgreSQL/Redis：用项目自带的 compose 时先 make deps-up，
 # 用自己的实例时直接配置 .env。没有本机 psql 时用 postgres 镜像里的客户端，
@@ -40,15 +42,22 @@ case $TEST_DATABASE_URL in
 esac
 
 # 从 URL 里取库名：postgres://user:pass@host:port/dbname?params
+# 白名单必须写在 CREATE DATABASE 和 DROP SCHEMA 之前。
 db=${TEST_DATABASE_URL#*://}
 db=${db#*/}
 db=${db%%\?*}
 case "$db" in
-	*_test) ;;
-	*) echo "TEST_DATABASE_URL 的库名必须以 _test 结尾，当前是 '$db'" >&2; exit 1 ;;
-esac
-case "$db" in
 	*[!0-9A-Za-z_]*) echo "测试库名只能包含字母、数字和下划线，当前是 '$db'" >&2; exit 1 ;;
+esac
+# cmd/migrate：up 允许 shortlink 或以 shortlink_ 开头；down 还要求以 _test 结尾。
+# 本脚本会执行 down，所以两个条件都要满足。shortlink 本身不能 down。
+case "$db" in
+	shortlink_test) ;;
+	shortlink_*_test) ;;
+	*)
+		echo "TEST_DATABASE_URL 的库名必须是 shortlink_test，或 shortlink_ 开头并且以 _test 结尾，当前是 '$db'" >&2
+		exit 1
+		;;
 esac
 
 # 同一实例的维护库连接串，用来幂等创建测试库。

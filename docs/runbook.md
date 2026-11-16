@@ -485,7 +485,7 @@ make selfcheck        # test-db + verify + test-integration + smoke
 
 `make test-integration` 连接 `.env` 里的 `TEST_DATABASE_URL`，删掉 public schema，
 再用迁移工具升到最新、降到空、再升到最新，确认 down SQL 可用，然后带 `TEST_*` 跑 `go test -race`。
-测试库每次都会被清空，所以库名必须以 `_test` 结尾，防止误清开发库；应用的
+测试库每次都会被清空。库名必须是 `shortlink_test`，或 `shortlink_` 开头并且以 `_test` 结尾，和 `cmd/migrate` 的 up、down 白名单一致；只以 `_test` 结尾并不够，准备脚本会在删库之前拒绝。应用的
 `DATABASE_URL` 不会被测试使用。准备测试库不依赖 compose：本机没有 psql 时会用
 `postgres:17-alpine` 镜像里的客户端。使用项目自带的 compose 时先跑 `make deps-up`；
 使用自己的 PostgreSQL/Redis 时跳过它，确保 `.env` 指向已有实例即可。
@@ -506,8 +506,8 @@ TEST_REDIS_URL=redis://localhost:6379/0
 Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用 `test-` 前缀的唯一短码，
 结束后只删除自己写入的 key，不会清空 Redis。
 
-使用自己的 PostgreSQL 时，把 `TEST_DATABASE_URL` 指过去即可；准备脚本会自动创建
-不存在的 `_test` 库（数据库用户需要 CREATEDB 权限），然后重建 schema。Redis
+使用自己的 PostgreSQL 时，把 `TEST_DATABASE_URL` 指过去即可；库名仍要符合上面的白名单。准备脚本会自动创建
+不存在的测试库（数据库用户需要 CREATEDB 权限），然后重建 schema。Redis
 同样用 `TEST_REDIS_URL` 指向自己的实例。
 
 ## CI
@@ -541,4 +541,5 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `relation "links" already exists` | 库是旧初始化脚本建的，没有 `schema_migrations`。学习用的 compose 库可以 `docker compose down -v`，再 `make deps-up` 和 `make migrate` |
 | `refusing to migrate "<库名>": not a shortlink database` | 库名不是 `shortlink` 也不是 `shortlink_` 开头；确认 `DATABASE_URL` 指向本项目的库 |
 | `make up` / `make deps-up` 报端口占用 | 本机已有 PostgreSQL 占用 5432；不要启动 compose 的 PostgreSQL，把 `.env` 指向已有实例 |
-| 测试清空了链接 | 确认 `TEST_DATABASE_URL` 指向 `_test` 库；应用的 `DATABASE_URL` 不会被测试使用 |
+| 测试清空了链接 | 确认 `TEST_DATABASE_URL` 的库名是 `shortlink_test` 或以 `shortlink_` 开头并且以 `_test` 结尾；应用的 `DATABASE_URL` 不会被测试使用 |
+| 准备测试库报库名不符合 | 不要指向别的项目的测试库，只以 `_test` 结尾不够。改成 `shortlink_test` 后再跑 |
