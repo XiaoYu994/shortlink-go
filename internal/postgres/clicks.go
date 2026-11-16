@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -87,8 +89,14 @@ type clickVisitorKey struct {
 RecordClicks 把一个点击批次写进三张日聚合表和 links.clicks，全部在同一个事务里。
 任何一步失败都回滚，这批点击整体丢掉，和 ADR 0007 的失败语义一致。
 
-已经删除的链接由 JOIN links 过滤掉，不会产生统计行；links.clicks 的 UPDATE
-本来也匹配不到行。删除和点击并发时仍可能留下孤儿统计行，见 ADR 0012 的对账 SQL。
+加锁顺序和 Delete 一致，不能反过来：先按 id 锁 links，再写
+link_clicks_daily、link_dimension_daily、link_visitors_daily。
+删除是先锁链接再删统计。点击如果先锁日表再锁链接，两边会互相等待，
+PostgreSQL 判死锁后回滚一方：删除变成 500，或者整批点击丢掉。
+后面几步的写入顺序不用再管：能碰到同一行统计数据的两个事务，
+都要先拿到同一条链接的锁，已经被它排成先后。
+
+已经删除的链接锁不到，后面的 JOIN 同样跳过，不会产生统计行。
 */
 func (s *Store) RecordClicks(ctx context.Context, clicks []click.Click) error {
 	daily, dimensions, visitors, totals := aggregateClicks(clicks)
@@ -102,6 +110,9 @@ func (s *Store) RecordClicks(ctx context.Context, clicks []click.Click) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := lockLinks(ctx, tx, totals); err != nil {
+		return err
+	}
 	if err := insertDailyClicks(ctx, tx, daily); err != nil {
 		return err
 	}
@@ -175,6 +186,33 @@ validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 255 字�
 */
 func validDimensionValue(v string) bool {
 	return v != "" && len(v) <= 255 && utf8.ValidString(v)
+}
+
+/*
+lockLinks 按 id 升序锁住这批点击涉及的链接。
+加锁顺序由 SQL 的 ORDER BY 决定，传进去的 id 不用先排序：
+两个批次涉及同一组链接时，都从 id 小的开始锁，只会排队。
+Delete 也是先锁 links，所以删除和点击不会交叉持有对方下一步要的行。
+已经删掉的链接没有行可锁，后面的写入会跳过它。
+*/
+func lockLinks(ctx context.Context, tx *sql.Tx, totals map[int64]int64) error {
+	ids := slices.Collect(maps.Keys(totals))
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM links WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`, ids)
+	if err != nil {
+		return fmt.Errorf("lock links: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("lock links: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("lock links: %w", err)
+	}
+	return nil
 }
 
 func insertDailyClicks(ctx context.Context, tx *sql.Tx, daily map[clickDayKey]int64) error {

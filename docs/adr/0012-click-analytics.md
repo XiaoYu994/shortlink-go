@@ -163,8 +163,8 @@ type Click struct {
 
 ### 删除、孤儿行和保留
 
-- 删除链接时在同一事务里删除 `link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily` 中该链接的行，再删 `links` 行。
-- 与删除并发的点击批次可能看到删除前的快照，留下孤儿统计行；按链接查询不可见。对账 SQL 沿用 ADR 0010 的做法，正常结果应为 0：
+- 删除链接时在同一事务里先锁 `links` 行，再删除 `link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`，最后删 `links` 行。点击批次用同一顺序：先按 id 锁 `links`，再写三张日表。顺序相反会与点击事务死锁。点击批次锁 `links` 时按 id 升序（SQL 里的 `ORDER BY`），多个 redirector 涉及同一批链接也只会排队。三张日表内部不用再排序：能碰到同一行统计数据的两个事务，都要先拿到同一条链接的锁。
+- 与删除并发的点击批次在拿到链接锁之前如果链接已经删除，`JOIN links` 匹配不到，不会插入统计行。对账 SQL 沿用 ADR 0010 的做法，正常结果应为 0：
 
   ```sql
   SELECT 'link_clicks_daily' AS tbl, count(*) AS orphans

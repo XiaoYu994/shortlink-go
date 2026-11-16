@@ -207,8 +207,12 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 
 /*
 Delete 硬删除链接和它的统计行，放在同一个事务里。
-先锁住链接行再删统计，避免同一事务里链接被并发修改。
-与删除并发的点击批次可能留下孤儿统计行，按链接查询不可见，ADR 0012 用对账 SQL 发现。
+
+先 FOR UPDATE 锁住这一条链接，再按固定顺序删三张统计表：
+link_clicks_daily、link_dimension_daily、link_visitors_daily。
+RecordClicks 用同一顺序：先按 id 锁 links，再写这三张表。
+顺序相反时，删除持有链接、点击持有日表行，两边互相等待，
+PostgreSQL 会判死锁并回滚其中一方。
 */
 func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	tx, err := s.db.BeginTx(ctx, nil)

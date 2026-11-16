@@ -2,10 +2,14 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"shortlink/internal/click"
+	"shortlink/internal/link"
 )
 
 func TestRecordClicksWritesAggregates(t *testing.T) {
@@ -116,6 +120,109 @@ func TestRecordClicksIgnoresInvalidDimensions(t *testing.T) {
 	}
 	if visitors != 0 {
 		t.Errorf("visitor rows = %d, want 0 for invalid hash", visitors)
+	}
+}
+
+/*
+TestRecordClicksAndDeleteDoNotDeadlock 覆盖已经复现的锁序交叉：
+点击先锁日表、删除先锁 links 时，PostgreSQL 会回滚其中一方。
+两边现在都先锁 links。并发跑多次，任何 deadlock detected 都算失败。
+*/
+func TestRecordClicksAndDeleteDoNotDeadlock(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 16, 8, 0, 0, 0, time.UTC)
+
+	for round := 0; round < 30; round++ {
+		created := createLink(t, store, tenantID, "https://example.com/deadlock")
+		if err := store.RecordClicks(ctx, []click.Click{{
+			LinkID: created.ID, At: at, Referrer: "example.com",
+			Device: click.DeviceDesktop, Client: click.ClientBrowser,
+		}}); err != nil {
+			t.Fatalf("seed clicks: %v", err)
+		}
+
+		errCh := make(chan error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errCh <- store.RecordClicks(ctx, []click.Click{{
+				LinkID: created.ID, At: at, Referrer: "example.com",
+				Device: click.DeviceDesktop, Client: click.ClientBrowser,
+			}})
+		}()
+		go func() {
+			defer wg.Done()
+			err := store.Delete(ctx, tenantID, created.Code)
+			if errors.Is(err, link.ErrNotFound) {
+				err = nil
+			}
+			errCh <- err
+		}()
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			if err == nil {
+				continue
+			}
+			if strings.Contains(err.Error(), "deadlock detected") {
+				t.Fatalf("round %d: deadlock: %v", round, err)
+			}
+			t.Fatalf("round %d: %v", round, err)
+		}
+	}
+}
+
+/*
+TestConcurrentRecordClicksAccumulate 模拟两个 redirector 同时写同一批链接。
+两边的批次互相排队，谁也不能盖掉对方的计数：ON CONFLICT 是累加，不是覆盖。
+这个测试不负责发现死锁，窗口太小，旧的加锁顺序也能跑过；
+锁序由 TestRecordClicksAndDeleteDoNotDeadlock 看住。
+*/
+func TestConcurrentRecordClicksAccumulate(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	const (
+		writers = 2
+		batches = 15
+	)
+
+	var clicks []click.Click
+	for range 6 {
+		created := createLink(t, store, tenantID, "https://example.com/batch")
+		clicks = append(clicks, click.Click{
+			LinkID: created.ID, At: at, Referrer: "example.com",
+			Device: click.DeviceDesktop, Client: click.ClientBrowser,
+		})
+	}
+
+	errCh := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range batches {
+				if err := store.RecordClicks(ctx, clicks); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	const want = writers * batches
+	for _, c := range clicks {
+		assertLinkClicks(t, store, c.LinkID, want)
+		assertDailyClicks(t, store, c.LinkID, "2026-11-16", want)
+		assertDimensionClicks(t, store, c.LinkID, "2026-11-16", dimensionDevice, click.DeviceDesktop, want)
 	}
 }
 
