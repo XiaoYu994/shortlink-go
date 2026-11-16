@@ -153,6 +153,7 @@ GET /api/v1/links/{code}/stats
 - `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
 - `REQUEST_TIMEOUT`：默认 `5s`，单个请求的处理时限，超时返回 504
 - `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
+- `DRAIN_DELAY`：默认 `5s`，关闭监听前 `/readyz` 返回 503 的等待，盖住编排器的一个探测周期；`0s` 表示不等
 - `CACHE_MISS_CONCURRENCY`：默认 `8`，普通缓存未命中时进程内同时回源数据库的最大请求数，超出返回 503
 - `CACHE_FETCH_TIMEOUT`：默认 `1s`，单次回源超时；必须为正且不超过 `REQUEST_TIMEOUT`
 - `REDIS_URL`：必填，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。`main` 用它 Ping，连不上则进程退出
@@ -163,7 +164,7 @@ GET /api/v1/links/{code}/stats
 
 ## 退出
 
-两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后关闭 HTTP 监听，等待正在处理的请求结束，上限是 `SHUTDOWN_TIMEOUT`。`run` 返回后 `defer` 先让 `ClickRecorder` 把缓冲里的点击写完（只有 redirector 有这一步；同样受一份新的 `SHUTDOWN_TIMEOUT` 限制，已经开始的那一批还会用完自己的写入超时，默认 2s），再关闭 Redis 客户端和数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，进程立刻退出。进程崩溃或收到 SIGKILL 时，缓冲区里还没写完的点击会丢掉。
+两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后先把 `/readyz` 打成 503，等 `DRAIN_DELAY`（默认 5s，`0s` 表示跳过），再关闭 HTTP 监听。等待期间监听还开着，这段时间进来的请求照常处理；`/healthz` 仍返回 200，避免编排器把正在退出的进程重启。然后 `Shutdown` 等待这些请求结束，上限是 `SHUTDOWN_TIMEOUT`。`run` 返回后 `defer` 先让 `ClickRecorder` 把缓冲里的点击写完（只有 redirector 有这一步；同样受一份新的 `SHUTDOWN_TIMEOUT` 限制，已经开始的那一批还会用完自己的写入超时，默认 2s），再关闭 Redis 客户端和数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，摘流等待和 `Shutdown` 都会被立刻打断。进程崩溃或收到 SIGKILL 时，缓冲区里还没写完的点击会丢掉。容器的停止宽限要盖住 `DRAIN_DELAY`、两份 `SHUTDOWN_TIMEOUT` 和在途批次的写入超时，否则进程会在写完之前被杀掉；compose 里两个进程都是 `stop_grace_period: 30s`。这一步只对主动探测 `/readyz` 的编排器生效。`deploy/nginx.conf` 和 `deploy/nginx.stack.conf` 不探这个路径，开源 nginx 也没有主动健康检查，关停时它们仍会把请求打到已经关掉的监听上。
 
 ## 监控
 

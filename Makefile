@@ -93,6 +93,10 @@ prometheus-config: ## 按两个监听地址生成 Prometheus 抓取配置
 		printf '%s\n' 'global:'; \
 		printf '%s\n' '  scrape_interval: 5s'; \
 		printf '%s\n' '  scrape_timeout: 4s'; \
+		printf '%s\n' '  evaluation_interval: 15s'; \
+		printf '%s\n' ''; \
+		printf '%s\n' 'rule_files:'; \
+		printf '%s\n' '  - alerts.yml'; \
 		printf '%s\n' ''; \
 		printf '%s\n' 'scrape_configs:'; \
 		printf '%s\n' '  - job_name: redirector'; \

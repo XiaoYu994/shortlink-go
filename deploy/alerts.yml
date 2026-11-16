@@ -1,0 +1,15 @@
+groups:
+  - name: shortlink
+    rules:
+      - alert: ShortlinkClicksLost
+        # 丢弃和写出失败都是点击没记下。失败的批次不重试，不会事后补上。
+        expr: |
+          increase(shortlink_clicks_dropped_total[5m]) > 0
+          or
+          increase(shortlink_clicks_written_total{result="error"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 点击没有全部记下
+          description: 5 分钟内有点击被丢弃，或写出失败。这些点击不会补上。

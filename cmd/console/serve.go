@@ -112,6 +112,18 @@ func runServe() error {
 
 	stop()
 
+	/*
+		先把 /readyz 打成 503，等 DRAIN_DELAY，再关监听。
+		监听还开着，这段时间进来的请求照常处理。
+		/healthz 仍然是 200，避免把正在退出的进程当成需要重启。
+		第二次信号会立刻退出，不等这段延迟。
+	*/
+	srv.SetDraining()
+	logger.Info("draining", "delay", cfg.DrainDelay)
+	if cfg.DrainDelay > 0 {
+		time.Sleep(cfg.DrainDelay)
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {

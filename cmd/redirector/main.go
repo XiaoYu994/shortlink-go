@@ -136,10 +136,12 @@ func run() error {
 	logger.Info("listening", "addr", cfg.Addr)
 
 	/*
-		收到 SIGINT（Ctrl+C）或 SIGTERM（容器停止）后停止接受新连接，
-		并等待正在处理的请求结束，上限是 SHUTDOWN_TIMEOUT。
-		正在处理的请求有自己的 REQUEST_TIMEOUT 兜底，慢查询不会把退出拖满。
-		收到信号后马上 stop，第二次信号恢复默认行为，进程会立刻退出。
+		收到 SIGINT（Ctrl+C）或 SIGTERM（容器停止）后，先把 /readyz 打成 503 并等 DRAIN_DELAY，
+		再关闭监听。监听还开着时，这段时间进来的请求照常处理。
+		/healthz 仍然是 200，避免把正在退出的进程当成需要重启。
+		Shutdown 等待这些请求结束，上限是 SHUTDOWN_TIMEOUT。
+		它们有自己的 REQUEST_TIMEOUT 兜底，慢查询不会把退出拖满。
+		收到信号后马上 stop，第二次信号恢复默认行为，摘流等待和 Shutdown 都会被立刻打断。
 		Shutdown 使用新的超时 context：信号 context 此时已经取消。
 		Shutdown 返回、run 退出后，defer 先排空点击缓冲，再关闭 Redis 和数据库。
 		排空另有一份 SHUTDOWN_TIMEOUT。进程在这之前被杀掉的话，缓冲区里的点击会丢掉。
@@ -164,6 +166,12 @@ func run() error {
 	}
 
 	stop()
+
+	srv.SetDraining()
+	logger.Info("draining", "delay", cfg.DrainDelay)
+	if cfg.DrainDelay > 0 {
+		time.Sleep(cfg.DrainDelay)
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()

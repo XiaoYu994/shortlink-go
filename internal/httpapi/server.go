@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -90,6 +91,11 @@ type Server struct {
 	*/
 	ready      []ReadyCheck
 	readyWired bool
+	/*
+		draining 为 true 时 /readyz 直接返回 503。关停时先置上，等探针把副本摘掉，再关闭监听。
+		/healthz 不看它：进程还活着，不该被当成需要重启。
+	*/
+	draining atomic.Bool
 }
 
 // serverDeps 是 newServer 的参数，避免一长串容易错位的位置参数。

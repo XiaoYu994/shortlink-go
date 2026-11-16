@@ -21,7 +21,7 @@
 
 - 跳转路径不再为计数等待数据库。计数会少的情况有两种：缓冲满（`shortlink_clicks_dropped_total`）和写失败（`shortlink_clicks_written_total{result="error"}`）。dropped 一直是 0 不代表没丢点击。
 - 关停时，已经开始的普通批次继续用自己的 `writeTimeout`（默认 2s），不跟 `Close` 的 ctx 取消，避免把已经交给数据库的点击丢掉。channel 关闭之后的满批和尾部共用 `Close` 的 ctx。`main` 在 HTTP `Shutdown` 之后为 `Close` 另起一份 `SHUTDOWN_TIMEOUT`，排空被这一份时限盖住，不会按批次数再乘 `writeTimeout`。
-- 整个退出因此是 HTTP 的 `SHUTDOWN_TIMEOUT`，加上可能还在写的那一批 `writeTimeout`，再加上排空的 `SHUTDOWN_TIMEOUT`。ctx 到期后 `Close` 仍会等当前这一批结束，再关数据库；没写完的点击丢掉，并打错误日志。第二次信号立刻结束进程。进程崩溃或收到 SIGKILL（包括 Kubernetes 默认在终止宽限后发送的那一次）会丢掉缓冲区里还没写完的点击。
+- 收到信号后先等 `DRAIN_DELAY`（默认 5s，这段时间 `/readyz` 返回 503），再进入 HTTP `Shutdown`。整个退出因此是 `DRAIN_DELAY`，加上 HTTP 的 `SHUTDOWN_TIMEOUT`，加上可能还在写的那一批 `writeTimeout`，再加上排空的 `SHUTDOWN_TIMEOUT`。ctx 到期后 `Close` 仍会等当前这一批结束，再关数据库；没写完的点击丢掉，并打错误日志。第二次信号立刻结束进程。进程崩溃或收到 SIGKILL（包括 Kubernetes 默认在终止宽限后发送的那一次）会丢掉缓冲区里还没写完的点击。
 
 ## 参考
 

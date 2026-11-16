@@ -84,6 +84,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # 默认 DRAIN_DELAY 是 5s，和下面的 interval 一样。宽限要盖住摘流、
+    # SHUTDOWN_TIMEOUT，以及 redirector 再排空点击的一份 SHUTDOWN_TIMEOUT
+    # 和在途批次写入（2s）。更短的话，容器会在 Shutdown 完成前收到 SIGKILL。
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
       interval: 5s
@@ -113,6 +117,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # 和 redirector 同一份宽限：DRAIN_DELAY 加 SHUTDOWN_TIMEOUT，留出余量。
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
       interval: 5s

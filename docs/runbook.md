@@ -97,7 +97,7 @@ curl -i localhost:8081/healthz   # console 存活
 curl -i localhost:8081/readyz    # console 就绪，Ping PostgreSQL
 ```
 
-`/healthz` 返回 200 和 `ok`。`/readyz` 就绪时返回 200 和 `ok`，否则 503 和 `unavailable`。console 探 PostgreSQL；redirector 不探依赖，Redis 或数据库出问题时它仍然返回 200 并降级服务，这类故障要从指标里看（`shortlink_cache_gets_total{result="fallback"}`、`shortlink_cache_shed_total`、`shortlink_store_operations_total{result="error"}`）。编排器应用 `/readyz` 决定是否接流量，用 `/healthz` 决定是否重启。两个路径都在进程端口上，不经过公网入口。
+`/healthz` 返回 200 和 `ok`。`/readyz` 就绪时返回 200 和 `ok`，否则 503 和 `unavailable`。console 探 PostgreSQL；redirector 不探依赖，Redis 或数据库出问题时它仍然返回 200 并降级服务，这类故障要从指标里看（`shortlink_cache_gets_total{result="fallback"}`、`shortlink_cache_shed_total`、`shortlink_store_operations_total{result="error"}`）。编排器应用 `/readyz` 决定是否接流量，用 `/healthz` 决定是否重启。关停时 `/readyz` 先返回 503，等 `DRAIN_DELAY`（默认 5s）再关监听；这段时间 `/healthz` 仍是 200，监听还开着，新请求照常处理。两个路径都在进程端口上，不经过公网入口。
 
 日志级别由 `LOG_LEVEL` 控制，默认 `info`；可选 `debug`、`warn`、`error`。日志格式由 `LOG_FORMAT` 控制，`text`（默认）或 `json`。本地用 `text`；生产用 `json`。
 
@@ -137,7 +137,7 @@ curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。两个进程都可能写：console 在创建、修改、删除后维护缓存，redirector 回源时写。`skipped` 表示回源的 `SET NX` 没写进去（key 已有更新的值，可能是并发的创建或管理写）
 - `shortlink_cache_operation_duration_seconds`：缓存操作耗时，`operation` 为 `get`、`set`，用来区分慢在 Redis 还是数据库
 - `shortlink_clicks_dropped_total`：点击缓冲满了没记下的次数。只有 redirector 有，一启动就是 0
-- `shortlink_clicks_written_total`：交给存储的点击数，`result` 为 `success` 或 `error`。只有 redirector 有，一启动两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`
+- `shortlink_clicks_written_total`：交给存储的点击数，`result` 为 `success` 或 `error`。只有 redirector 有，一启动两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`。5 分钟内这个 `error` 或 `shortlink_clicks_dropped_total` 有增加，告警 `ShortlinkClicksLost` 会 firing；没有 Alertmanager，只在 Prometheus 的 Alerts 页能看到
 
 Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志和 HTTP 指标。
 
@@ -166,6 +166,8 @@ make prometheus
 ```
 
 Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程的 `/metrics`，端口来自 `ADDR` 和 `CONSOLE_ADDR`（默认 `8080` 和 `8081`，job 分别是 `redirector` 和 `console`）。两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。改了端口要重新执行 `make prometheus`，容器才会换上新的抓取配置。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
+
+告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次。`ShortlinkClicksLost`：5 分钟窗口里 `shortlink_clicks_dropped_total` 或 `shortlink_clicks_written_total{result="error"}` 有增加，这个条件保持 1 分钟后状态变成 firing。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
 
 ## 基线压测（无缓存）
 
@@ -495,12 +497,13 @@ GET 50 条热链接，全部命中缓存。
 - **Redis 不可达时的停顿**：上面的 7 到 10 秒是改之前量到的。`DialerRetries` 已经设为 1
   （`internal/cache/client.go`），每次取连接只拨一次；命令重试仍会再拨一次，
   一次命令从约 6 秒降到约 1 秒，留在 `REQUEST_TIMEOUT` 里。这一节没有重跑压测。
-- **关停没有摘流量这一步**：进程收到 SIGTERM 直接关监听，`/readyz` 不会先变成 503。
-  现在靠 nginx 的被动重试兜住；换成不重试的负载均衡，每次重启一个副本会丢个位数到十几个请求。
-  用主动探测的编排器时，应该先让 `/readyz` 返回 503、等探测周期过去，再 `Shutdown`。
-- **点击丢失都有计数，但没有告警**：数据库停机和流量突增时点击按设计丢弃，每一次都记在
-  `shortlink_clicks_dropped_total` 或 `shortlink_clicks_written_total{result="error"}` 里。
-  加副本不能线性提高写入能力，合计上限约 6,300 次/秒。
+- **关停会先摘流量，但这份 nginx 不会因此停发**：收到 SIGTERM 后 `/readyz` 立刻返回 503，
+  等 `DRAIN_DELAY`（默认 5s，和 compose 健康检查间隔一样）再关监听；`/healthz` 仍是 200。
+  主动探测的编排器可以在这段时间里把副本摘掉。本仓库的 nginx 不探 `/readyz`，
+  开源 nginx 也没有主动健康检查，默认的 `proxy_next_upstream` 也不重试 503。
+  上面关掉重试时的 27 个连接被拒绝，这份改动盖不住，这一节没有重跑。
+- **点击丢失有告警**：`deploy/alerts.yml` 的 `ShortlinkClicksLost` 在 5 分钟内出现 dropped
+  或写出失败时变为 firing。没有 Alertmanager。加副本不能线性提高写入能力，合计上限约 6,300 次/秒，这条没有变。
 - **连接预算按副本数算**：每个 redirector 最多占 `DB_MAX_OPEN_CONNS` 个连接，实际用到 9 个；
   默认配置下 `max_connections=100` 大约能放 9 个 redirector 加 1 个 console。
   加副本时回源总并发是 `CACHE_MISS_CONCURRENCY` 乘副本数，数据库跟不上时应该调小单副本的值。
@@ -658,7 +661,7 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 
 ## 停止
 
-前台运行的 redirector / console 各自用 `Ctrl+C` 停止：进程不再接受新请求，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。redirector 请求结束后再把点击缓冲写完，最多再等一份 `SHUTDOWN_TIMEOUT`；若当时有一批正在写，那一批还会用完自己的写入超时（默认 2s）。然后关闭 Redis 和数据库。再按一次 `Ctrl+C` 会立刻退出。进程崩溃或被 SIGKILL 时，缓冲区里还没写完的点击会丢掉。`make down` 只停止项目自带的 compose 服务。
+前台运行的 redirector / console 各自用 `Ctrl+C` 停止：进程先让 `/readyz` 返回 503，等 `DRAIN_DELAY`（默认 5s），再不再接受新连接，并等待正在处理的请求结束，最多 `SHUTDOWN_TIMEOUT`（默认 10s）。等待期间监听还开着，`/healthz` 仍是 200，新请求照常处理。redirector 请求结束后再把点击缓冲写完，最多再等一份 `SHUTDOWN_TIMEOUT`；若当时有一批正在写，那一批还会用完自己的写入超时（默认 2s）。然后关闭 Redis 和数据库。再按一次 `Ctrl+C` 会立刻退出，包括还在等 `DRAIN_DELAY` 的时候。进程崩溃或被 SIGKILL 时，缓冲区里还没写完的点击会丢掉。`make down` 只停止项目自带的 compose 服务。
 
 ## 常见问题
 

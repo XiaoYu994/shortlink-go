@@ -2,7 +2,7 @@
 Package config 从环境变量加载进程配置，并在启动时校验。
 
 未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、日志格式或回源保护参数不合法时，LoadConfig 返回错误，
+连接池参数、请求超时、关机超时、摘流等待、日志格式或回源保护参数不合法时，LoadConfig 返回错误，
 由 main 终止启动。
 */
 package config
@@ -25,6 +25,8 @@ const (
 	defaultConsoleAddr = ":8081"
 	// defaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
 	defaultShutdownTimeout = 10 * time.Second
+	// defaultDrainDelay 与 docker-compose.yml 里健康检查的 interval 一致，盖住一个探测周期。
+	defaultDrainDelay = 5 * time.Second
 	/*
 		defaultRequestTimeout 是单个请求的处理时限。main 让读写超时比它宽松，
 		保证读完 body，并在超时后还有时间把 504 写回客户端。
@@ -50,8 +52,14 @@ type Config struct {
 	Pool            postgres.PoolConfig
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
-	LogLevel        slog.Level    // 日志级别，默认 info
-	LogFormat       string        // text 或 json，默认 text
+	/*
+		DrainDelay 是关闭监听之前的等待。这段时间 /readyz 返回 503，
+		给主动探测的编排器一个周期把副本摘掉。0 表示不等。
+		容器的停止宽限要盖住它，再加上 SHUTDOWN_TIMEOUT。
+	*/
+	DrainDelay time.Duration
+	LogLevel   slog.Level // 日志级别，默认 info
+	LogFormat  string     // text 或 json，默认 text
 
 	// CacheMissConcurrency 是普通缓存未命中的回源并发上限。
 	CacheMissConcurrency int
@@ -73,7 +81,7 @@ type Config struct {
 /*
 LoadConfig 从环境变量读取进程配置。
 未设置的可选项使用默认值；DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、日志格式或回源保护参数不合法时返回错误。
+连接池参数、请求超时、关机超时、摘流等待、日志格式或回源保护参数不合法时返回错误。
 
 REDIS_URL 是完整的连接串：redis://localhost:6379/0，没有密码也可以；
 需要 TLS 用 rediss://，需要密码和 DB 编号就写进 URL。
@@ -84,6 +92,7 @@ func LoadConfig() (Config, error) {
 		Pool:                 postgres.DefaultPoolConfig(),
 		RequestTimeout:       defaultRequestTimeout,
 		ShutdownTimeout:      defaultShutdownTimeout,
+		DrainDelay:           defaultDrainDelay,
 		LogLevel:             slog.LevelInfo,
 		LogFormat:            logFormatText,
 		CacheMissConcurrency: defaultCacheMissConcurrency,
@@ -137,6 +146,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ShutdownTimeout, err = envDuration("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.DrainDelay, err = envDuration("DRAIN_DELAY", cfg.DrainDelay); err != nil {
 		return Config{}, err
 	}
 	if cfg.CacheMissConcurrency, err = envInt("CACHE_MISS_CONCURRENCY", cfg.CacheMissConcurrency); err != nil {
@@ -210,6 +222,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.ShutdownTimeout <= 0 {
 		return errors.New("SHUTDOWN_TIMEOUT must be positive")
+	}
+	if cfg.DrainDelay < 0 {
+		return errors.New("DRAIN_DELAY must not be negative")
 	}
 	if cfg.CacheMissConcurrency <= 0 {
 		return errors.New("CACHE_MISS_CONCURRENCY must be positive")

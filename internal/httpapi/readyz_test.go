@@ -74,6 +74,32 @@ func TestReadyz(t *testing.T) {
 		assertReady(t, rec, http.StatusServiceUnavailable, "unavailable\n")
 	})
 
+	t.Run("draining skips checks", func(t *testing.T) {
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		srv := testServer(logger, memorystore.New(), 5*time.Second, newTestRegistry(), nil)
+		pinged := false
+		srv.SetReadiness(ReadyCheck{Name: "postgres", Ping: func(context.Context) error {
+			pinged = true
+			return nil
+		}})
+		srv.SetDraining()
+
+		rec := httptest.NewRecorder()
+		srv.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		assertReady(t, rec, http.StatusServiceUnavailable, "unavailable\n")
+		if pinged {
+			t.Error("readiness ping ran while draining")
+		}
+		if logs.Len() != 0 {
+			t.Errorf("log = %q, want empty", logs.String())
+		}
+
+		health := httptest.NewRecorder()
+		srv.RedirectRoutes().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		assertReady(t, health, http.StatusOK, "ok\n")
+	})
+
 	t.Run("canceled probe is not logged", func(t *testing.T) {
 		var logs bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))

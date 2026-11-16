@@ -39,8 +39,24 @@ func (s *Server) SetReadiness(checks ...ReadyCheck) {
 	s.readyWired = true
 }
 
+/*
+SetDraining 让 /readyz 开始返回 503，/healthz 不变。
+
+关停时先调用它，等一个探测周期，再关闭监听。
+监听还没关，这段时间进来的请求照常处理。存活探针如果也失败，
+编排器会把正在退出的进程当成需要重启。
+*/
+func (s *Server) SetDraining() {
+	s.draining.Store(true)
+}
+
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// 关停已经开始。不再探依赖，也不要把每次探针记成故障。
+	if s.draining.Load() {
+		writeUnavailable(w)
+		return
+	}
 	if !s.readyWired {
 		s.logger.WarnContext(r.Context(), "readiness check failed", "check", "unconfigured")
 		writeUnavailable(w)
