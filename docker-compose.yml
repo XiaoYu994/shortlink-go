@@ -29,10 +29,17 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.55.1
+    # Docker Desktop 在 WSL 里绑定单个文件会报 mount 源不存在。
+    # 挂目录，配置文件用 make 生成的 prometheus.local.yml。
+    command:
+      - --config.file=/etc/prometheus/prometheus.local.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
-      - ./deploy/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy:/etc/prometheus:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
