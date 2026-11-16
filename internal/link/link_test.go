@@ -2,9 +2,11 @@ package link
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestNewLink(t *testing.T) {
@@ -139,5 +141,54 @@ func TestDayStartAndKey(t *testing.T) {
 	}
 	if got, want := DayKey(at), "2026-11-15"; got != want {
 		t.Errorf("DayKey = %q, want %q", got, want)
+	}
+}
+
+/*
+FuzzValidateURL 锁住接受下来的 URL：等于去掉首尾空白后的输入，能再校验一次，
+并且是带 host 的 http/https，中间没有空白。
+go test 只跑种子。持续生成输入用 go test -fuzz=FuzzValidateURL。
+*/
+func FuzzValidateURL(f *testing.F) {
+	f.Add("https://example.com/a/b?q=1#frag")
+	f.Add("  https://example.com  ")
+	f.Add("HTTPS://example.com")
+	f.Add("")
+	f.Add("javascript:alert(1)")
+	f.Add("https://example.com/a b")
+	f.Add("https://example.com/%zz")
+	f.Add("http://:8080")
+	f.Fuzz(func(t *testing.T, raw string) {
+		got, err := ValidateURL(raw)
+		if err != nil {
+			var verr *ValidationError
+			if !errors.As(err, &verr) {
+				t.Fatalf("ValidateURL(%q) error = %v, want *ValidationError", raw, err)
+			}
+			return
+		}
+		if strings.TrimSpace(raw) != got {
+			t.Fatalf("ValidateURL(%q) = %q, want trimmed input", raw, got)
+		}
+		again, err := ValidateURL(got)
+		if err != nil || again != got {
+			t.Fatalf("round trip %q -> %q, %v", got, again, err)
+		}
+		parsed, err := url.Parse(got)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+			t.Fatalf("accepted %q", got)
+		}
+		if strings.ContainsFunc(got, unicode.IsSpace) {
+			t.Fatalf("accepted whitespace in %q", got)
+		}
+	})
+}
+
+func BenchmarkValidateURL(b *testing.B) {
+	const raw = "https://example.com/a/b?q=1"
+	for range b.N {
+		if _, err := ValidateURL(raw); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

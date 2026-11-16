@@ -51,3 +51,52 @@ func TestValidCode(t *testing.T) {
 		})
 	}
 }
+
+/*
+FuzzValidCode 锁住短码格式：长度必须是 CodeLength，并且每个字节都在字母表里。
+go test 只跑种子。持续生成输入用 go test -fuzz=FuzzValidCode。
+*/
+func FuzzValidCode(f *testing.F) {
+	f.Add("AbC123xy")
+	f.Add("12345678")
+	f.Add("")
+	f.Add("AbC123x")
+	f.Add("AbC123xyZ")
+	f.Add("AbC123-y")
+	f.Add("AbC 23xy")
+	f.Add("AbC123é")
+	f.Fuzz(func(t *testing.T, code string) {
+		got := ValidCode(code)
+		want := len(code) == CodeLength
+		if want {
+			for i := range len(code) {
+				if strings.IndexByte(alphabet, code[i]) < 0 {
+					want = false
+					break
+				}
+			}
+		}
+		if got != want {
+			t.Fatalf("ValidCode(%q) = %v, want %v", code, got, want)
+		}
+	})
+}
+
+func BenchmarkValidCode(b *testing.B) {
+	const code = "AbC123xy"
+	for range b.N {
+		ValidCode(code)
+	}
+}
+
+func BenchmarkGenerateCode(b *testing.B) {
+	for range b.N {
+		code, err := GenerateCode()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(code) != CodeLength {
+			b.Fatalf("len = %d", len(code))
+		}
+	}
+}
