@@ -19,7 +19,7 @@ import (
 newTestStore 每次测试前清空测试库里的租户、密钥和链接，再插入一个租户。
 没有设置 TEST_DATABASE_URL 时跳过；库名不以 _test 结尾时失败，避免误清开发库。
 */
-func newTestStore(t *testing.T) (*Store, int64) {
+func newTestStore(t testing.TB) (*Store, int64) {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -68,7 +68,7 @@ func newTestStore(t *testing.T) (*Store, int64) {
 	return NewStore(db), tenantID
 }
 
-func mustLink(t *testing.T, rawURL string, tenantID int64) *link.Link {
+func mustLink(t testing.TB, rawURL string, tenantID int64) *link.Link {
 	t.Helper()
 	l, err := link.NewLink(rawURL, nil)
 	if err != nil {

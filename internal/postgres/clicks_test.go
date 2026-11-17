@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -275,5 +276,65 @@ SELECT count(*) FROM link_visitors_daily WHERE link_id = $1 AND day = $2::date`,
 	}
 	if got != want {
 		t.Errorf("visitor rows[%d %s] = %d, want %d", linkID, day, got, want)
+	}
+}
+
+/*
+benchClicks 造一批点击：batch 条点击均匀落在 ids 这些链接上，同一天，
+来源、设备各有几种取值，访客哈希 16 字节且互不相同。
+形状接近热链接压测里 Recorder 交给存储的一批。
+*/
+func benchClicks(ids []int64, batch int) []click.Click {
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	referrers := []string{"news.ycombinator.com", "example.com", click.ReferrerDirect}
+	devices := []string{click.DeviceDesktop, click.DeviceMobile}
+	clicks := make([]click.Click, 0, batch)
+	for i := range batch {
+		clicks = append(clicks, click.Click{
+			LinkID:      ids[i%len(ids)],
+			At:          at,
+			Referrer:    referrers[i%len(referrers)],
+			Device:      devices[i%len(devices)],
+			Client:      click.ClientBrowser,
+			VisitorHash: fmt.Appendf(nil, "visitor-%08d", i),
+		})
+	}
+	return clicks
+}
+
+// BenchmarkAggregateClicks 只量 Go 里的去重聚合，不连数据库。
+func BenchmarkAggregateClicks(b *testing.B) {
+	ids := make([]int64, 50)
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	clicks := benchClicks(ids, 100)
+	b.ReportAllocs()
+	for b.Loop() {
+		aggregateClicks(clicks)
+	}
+}
+
+/*
+BenchmarkRecordClicks 量一批 100 条点击写进真实数据库要多久。
+Recorder 只有一个 goroutine 同步写，所以 100 除以这里的每批耗时，
+就是单个写入者每秒能写出的点击数上限。没有 TEST_DATABASE_URL 时跳过。
+
+访客哈希每轮都一样，第一轮之后 link_visitors_daily 走 ON CONFLICT DO NOTHING，
+和热链接上回访访客的情况一致。
+*/
+func BenchmarkRecordClicks(b *testing.B) {
+	store, tenantID := newTestStore(b)
+	ids := make([]int64, 50)
+	for i := range ids {
+		ids[i] = createLink(b, store, tenantID, fmt.Sprintf("https://example.com/bench-%d", i)).ID
+	}
+	clicks := benchClicks(ids, 100)
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := store.RecordClicks(ctx, clicks); err != nil {
+			b.Fatalf("RecordClicks: %v", err)
+		}
 	}
 }

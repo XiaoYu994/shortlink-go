@@ -19,7 +19,7 @@ func insertTenant(t *testing.T, store *Store, name string) int64 {
 	return id
 }
 
-func createLink(t *testing.T, store *Store, tenantID int64, rawURL string) *link.Link {
+func createLink(t testing.TB, store *Store, tenantID int64, rawURL string) *link.Link {
 	t.Helper()
 	l := mustLink(t, rawURL, tenantID)
 	if err := store.Create(context.Background(), l); err != nil {

@@ -74,3 +74,9 @@
 - [x] 列表按历史点击和今日点击排序
 - [x] 配置和文档同步
 - [x] 集成测试和 `make smoke` 覆盖管理、统计和租户隔离；压一轮观察 dropped 和连接池（runbook“点击写入压测”）
+
+## 阶段 8：性能剖析
+
+- [x] redirector 的 pprof 端点：单独的回环监听，默认不开（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)）
+- [x] 点击写入的 benchmark 和剖析，定位单写入者上限的来源（runbook“点击写入剖析”）
+- [ ] 按剖析结论决定是否改点击写入：合并语句、调大批次或多个写入者，先写 ADR

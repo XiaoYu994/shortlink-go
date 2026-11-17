@@ -566,6 +566,119 @@ GET 50 条热链接，全部命中缓存。
   地址还在、但一直不应答的拨号（黑盒地址）这次没有在 3,000 req/s 下再测；
   单次请求的上限是一次 `DialTimeout` 加一次命令重试。
 
+## 点击写入剖析（2026-11-17）
+
+目标：多副本演练里单个 redirector 的点击写入上限约 4,660 次/秒，找出时间花在哪。
+这一轮只定位，不改设计。
+
+### 怎么采
+
+benchmark 不需要启动进程，反馈最快：
+
+```bash
+# 只量 Go 里的聚合，不连库
+go test ./internal/postgres -run '^$' -bench AggregateClicks
+# 一批 100 条写进测试库；需要 TEST_DATABASE_URL
+go test ./internal/postgres -run '^$' -bench RecordClicks -benchtime 5s -cpuprofile cpu.out
+go tool pprof -http :0 cpu.out
+```
+
+真实进程要先打开剖析端口（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)），再在压测期间采样：
+
+```bash
+PPROF_ADDR=127.0.0.1:6060 make run-redirector
+
+go tool pprof -http :0 'http://127.0.0.1:6060/debug/pprof/profile?seconds=10'   # CPU
+curl -o trace.out 'http://127.0.0.1:6060/debug/pprof/trace?seconds=2'           # 执行跟踪
+go tool trace trace.out
+curl 'http://127.0.0.1:6060/debug/pprof/goroutine?debug=1'                      # 每个 goroutine 停在哪
+go tool pprof -http :0 http://127.0.0.1:6060/debug/pprof/block                  # channel、锁上的阻塞
+```
+
+三种数据回答的问题不一样：
+
+| 工具 | 统计什么 | Java 里接近的东西 |
+| --- | --- | --- |
+| CPU profile | 只有正在 CPU 上执行的时间；等网络、等锁不计入 | async-profiler 的 cpu 模式 |
+| block / mutex profile | goroutine 阻塞在 channel、锁上的时间；不含网络 I/O | JFR 的 monitor 事件 |
+| execution trace | 每个 goroutine 每一刻在运行、等网络、等调度还是在系统调用里 | async-profiler 的 wall 模式 |
+
+`go tool trace -pprof=net trace.out > net.pprof` 可以把 trace 里的网络等待导成 pprof 格式，
+再用 `go tool pprof -top -cum` 按函数看；`net` 可以换成 `sync`、`sched`、`syscall`。
+
+### 环境
+
+| 项目 | 配置 |
+| --- | --- |
+| 机器 | 16 vCPU 的 WSL2 VM，可用内存约 1.5 GiB |
+| 依赖 | 一次性的 PostgreSQL 17 和 Redis 7 容器，数据库默认配置 |
+| 应用 | 单个 `bin/redirector` 和 `bin/console`，全部默认配置，`LOG_LEVEL=warn` |
+| 流量 | 50 条热链接轮询，全部命中缓存；固定 Referer 和 Chrome User-Agent；实际 8,801 req/s，20 秒 |
+| 一批的形状 | 100 条点击、50 条链接、同一天；benchmark 和压测一致 |
+
+### 结果
+
+benchmark：
+
+| 项目 | 每批耗时 |
+| --- | --- |
+| `BenchmarkAggregateClicks`（Go 里的聚合） | 0.053 ms，242 次分配 |
+| `BenchmarkRecordClicks`（写进数据库） | 11.9 到 12.5 ms（3 次） |
+| 同上，`synchronous_commit=off` | 10.4 ms |
+
+压测：176,022 次 302，写出成功 114,742（5,737 次/秒），dropped 61,280，写出失败 0。
+写出加 dropped 等于 302。每批合 17.4 ms，比 benchmark 慢，因为压测工具和 2 个 CPU 的跳转负载在同一台机器上。
+
+写入 goroutine（`Recorder.loop`）的时间去向：
+
+| 来源 | 数值 | 占比 |
+| --- | --- | --- |
+| trace，2 秒窗口里等网络（等 PostgreSQL 应答） | 1.86 s | 93% |
+| CPU profile，10 秒窗口里在 CPU 上 | 0.59 s | 6% |
+| trace，等调度 | 5.9 ms | 0.3% |
+
+goroutine dump 里 `loop` 停在 `flush` → `write` → `RecordClicks` 上，不是停在取 channel。
+
+PostgreSQL 一侧的语句耗时（`log_min_duration_statement=0`，300 批平均）：
+
+| 语句 | 执行耗时 |
+| --- | --- |
+| `BEGIN` | 0.02 ms |
+| 锁 `links`（`FOR UPDATE`） | 0.09 ms |
+| upsert `link_clicks_daily` | 1.10 ms |
+| upsert `link_dimension_daily` | 3.55 ms |
+| insert `link_visitors_daily` | 1.48 ms |
+| update `links.clicks` | 0.57 ms |
+| `COMMIT` | 2.25 ms |
+| 合计 | 约 9.1 ms，加上各语句的 bind 约 9.3 ms |
+
+### 结论
+
+- **瓶颈是数据库往返，不是 Go 代码**。写入 goroutine 93% 的时间在等 PostgreSQL，
+  Go 里的聚合每批 0.05 ms。优化 `aggregateClicks` 的分配没有意义。
+- **上限来自“一个 goroutine 同步写”**：每批写完才取下一批，所以上限就是 100 除以每批耗时。
+  benchmark 的 12 ms 对应约 8,300 次/秒，压测里的 17 ms 对应 5,700 次/秒。
+- **最贵的一条是维度表的 upsert**，占服务端时间的 38%：一批 100 条点击展开成三个维度，
+  行数是其他表的几倍。其次是 `COMMIT`（24%）和访客表（16%）。
+- **`synchronous_commit=off` 只省 1.5 ms 左右**，换来的是数据库崩溃时丢最近的提交。不值得。
+- 12 ms 里服务端占 9.3 ms，剩下约 2.6 ms 是 7 次往返的网络和驱动开销。
+
+改不改、怎么改还没有决定。候选是调大批次（每条点击摊到的 `COMMIT` 和往返更少）、
+把几条语句合成一次往返、以及多个写入者；多个写入者要先回答演练里测到的行锁排队问题。
+
+### 读数注意
+
+- CPU profile 里 `RecordClicks` 只占 3%，不代表它快：等网络的时间不算 CPU。
+  看“为什么慢”要用 trace 或数据库一侧的语句耗时，只看火焰图会找不到。
+- 整个进程 10 秒里用了 20 秒 CPU，其中 `runtime.futex` 占 23%，是调度器在唤醒和停放线程，
+  属于大量短请求的正常开销，和点击写入无关。
+- mutex profile 里几乎全是 `runtime.unlock`：Go 1.22 起它也统计运行时内部的锁。
+  `Recorder` 的读写锁和 Prometheus 计数器都没有出现在里面。
+- block profile 的大头是 `chanrecv` 和 `selectgo`，其中包括空闲时等 channel 的时间，
+  不能直接当成“被堵住”。
+- 语句耗时是在 benchmark 下量的，没有并发的跳转负载；压测下的每批耗时更长。
+- 所有组件在同一台机器上，绝对数字只用于本机前后对比。
+
 ## 签发 API Key
 
 `make` 会加载 `.env`，所以下面的命令能读到 `DATABASE_URL`。直接 `go run` 时要先导出环境变量。命令不连接 Redis。
