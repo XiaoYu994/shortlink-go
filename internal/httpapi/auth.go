@@ -43,7 +43,8 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (tenant.Tenan
 
 /*
 authenticate 只包管理 API。/r/、/healthz、/readyz、/metrics 不经过它。
-密钥格式不对和未知密钥都是 401。数据库故障沿用存储错误的映射，不伪装成密钥无效。
+密钥缺失、格式不对、未知、过期和吊销都是 401，响应不区分是哪一种。
+数据库故障沿用存储错误的映射，不伪装成密钥无效。
 */
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,10 @@ Command migrate 把 PostgreSQL 迁到最新结构。
 
 相当于 Java 里的 Flyway：每个版本一对 up/down SQL，执行记录在 schema_migrations。
 不在 HTTP 进程启动时跑。redirector 和 console 以后会同时启动，改表是部署步骤。
+表结构只由这个命令改：compose 不把 migrations/ 挂进数据库的初始化目录。
+
+没有选 goose：goose 把 up 和 down 写在同一个文件里，整份 SQL 交给 psql 时
+会把回滚也执行掉。这里 up 和 down 分文件。
 
 连接用 golang-migrate 的 postgres 驱动（lib/pq），这样 DATABASE_URL 保持
 postgres://，不用改成 pgx5://。业务进程仍然用 pgx。
