@@ -33,20 +33,29 @@ func (s *Server) RedirectRoutes() http.Handler {
 
 /*
 ConsoleRoutes 返回管理进程的路由：短链增删改查、统计、存活检查、就绪检查和指标。
-鉴权只包管理 API。公开跳转、存活检查、就绪检查和指标不认密钥。
-每个管理路由单独包 authenticate：ServeMux 没有路由组，
+鉴权和限流只包管理 API。公开跳转、存活检查、就绪检查和指标不认密钥，也不限流。
+每个管理路由单独包：ServeMux 没有路由组，
 套在 /api/v1/ 前缀上的中间件不会被更具体的路由继承。
 */
 func (s *Server) ConsoleRoutes() http.Handler {
 	mux := http.NewServeMux()
 	s.registerOperational(mux)
-	mux.Handle("POST "+apiV1Prefix+"/links", s.authenticate(http.HandlerFunc(s.handleCreate)))
-	mux.Handle("GET "+apiV1Prefix+"/links", s.authenticate(http.HandlerFunc(s.handleList)))
-	mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.authenticate(http.HandlerFunc(s.handleGet)))
-	mux.Handle("PATCH "+apiV1Prefix+"/links/{code}", s.authenticate(http.HandlerFunc(s.handleUpdate)))
-	mux.Handle("DELETE "+apiV1Prefix+"/links/{code}", s.authenticate(http.HandlerFunc(s.handleDelete)))
-	mux.Handle("GET "+apiV1Prefix+"/links/{code}/stats", s.authenticate(http.HandlerFunc(s.handleStats)))
+	mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(s.handleCreate))
+	mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(s.handleList))
+	mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(s.handleGet))
+	mux.Handle("PATCH "+apiV1Prefix+"/links/{code}", s.consoleRoute(s.handleUpdate))
+	mux.Handle("DELETE "+apiV1Prefix+"/links/{code}", s.consoleRoute(s.handleDelete))
+	mux.Handle("GET "+apiV1Prefix+"/links/{code}/stats", s.consoleRoute(s.handleStats))
 	return s.withMiddleware(mux)
+}
+
+/*
+consoleRoute 给管理 handler 套上鉴权和按租户限流。
+顺序不能反：限流要读 authenticate 写进 context 的租户和速率。
+超限的请求不会进入 handler，也不会查库或更新缓存。
+*/
+func (s *Server) consoleRoute(h http.HandlerFunc) http.Handler {
+	return s.authenticate(s.rateLimit(h))
 }
 
 // registerOperational 注册两个进程都有的运维端点。

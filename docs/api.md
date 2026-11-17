@@ -20,7 +20,7 @@
 
 本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。宿主机进程的入口是 `deploy/nginx.conf`，容器栈的入口是 `deploy/nginx.stack.conf`。两份都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 和 `/readyz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放，由这层反向代理不转发。
 
-管理 API 的租户只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不返回 403，也不透露链接是否存在。
+管理 API 的租户只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不返回 403，也不透露链接是否存在。每个管理请求先鉴权、再按租户限流；超限返回 429 和 `Retry-After`。链接总数还有每租户配额，满了返回 403。两者都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
 
 ## 创建短链
 
@@ -54,6 +54,30 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 - `expires_at` 可选，用 RFC3339 时间，例如 `"2026-12-01T00:00:00Z"`。省略或 `null` 表示永不过期。必须是将来的时间，到期时刻本身算过期。格式不对时错误信息是 `invalid expires_at`。过期后短码仍被占着，跳转返回 404。响应里带上同一个时刻；没有设置时响应不包含这个字段。
 - 未知字段返回 400。`expires_at` 拼错时如果被静默忽略，会创建一条永不过期的链接。
 - 响应新增 `created_at`、`clicks` 和 `clicks_today`；新链接的计数都是 0。这是兼容扩展，老客户端可以忽略。
+
+配额和限流：
+
+- 租户的链接总数有上限，已过期但没删除的链接也占配额，删除链接会释放一个名额。满了返回 403：
+
+  ```http
+  HTTP/1.1 403 Forbidden
+  Content-Type: application/json; charset=utf-8
+
+  {"error":"link quota exceeded"}
+  ```
+
+- 管理 API 按租户限流。超限返回 429，`Retry-After` 是整数秒，至少 1：
+
+  ```http
+  HTTP/1.1 429 Too Many Requests
+  Retry-After: 1
+  Content-Type: application/json; charset=utf-8
+
+  {"error":"rate limit exceeded"}
+  ```
+
+- 限制是每租户的配置，`rate_limit_per_second` 为 0 表示不限流，`link_quota` 为 0 表示不能再创建。console 多副本时每个副本各自限流，实际总量是配置值乘以副本数。
+- 403 和 429 都是租户策略，不是存储故障；重试前先删链接或等 `Retry-After`。
 
 ## 管理接口的链接表示
 
@@ -224,10 +248,11 @@ curl -i localhost:8081/metrics   # console
 两个进程各自返回 Prometheus 文本格式，指标名相同，用 Prometheus 的 `job` 区分。redirector 暴露 Go 运行时、进程、HTTP、缓存、存储、连接池和点击指标；console 暴露 Go 运行时、进程、HTTP、存储和连接池指标，以及创建、修改、删除时写缓存的计数。目前暴露的指标：
 
 - `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`）
+- `shortlink_rate_limited_total`（被按租户限流拒绝的管理请求数；没有 label。两个进程都暴露，只有 console 会累加，redirector 恒为 0）
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
 - `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建、修改、删除和回源写缓存都会计数；`skipped` 表示回源的 `SET NX` 发现 key 已有更新的值，可能是并发的创建或管理写）
 - `shortlink_cache_operation_duration_seconds`（缓存操作耗时，`operation` 为 `get`、`set`，`result` 取值同上面两个计数器）
-- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）
+- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`quota_exceeded`、`canceled`、`timeout`、`error`）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 - `process_*`（进程 CPU、内存、文件描述符）
 - `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）

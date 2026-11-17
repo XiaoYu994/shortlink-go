@@ -11,6 +11,7 @@ import (
 const (
 	httpRequestsMetricName = "shortlink_http_requests_total"
 	httpDurationMetricName = "shortlink_http_request_duration_seconds"
+	rateLimitedMetricName  = "shortlink_rate_limited_total"
 	// routeUnmatched 是路由未匹配时统一的 route label 值，避免把 404 的路径写进 label。
 	routeUnmatched = "unmatched"
 	// methodOther 收拢未注册的 HTTP 方法，避免客户端随意构造方法把 label 撑开。
@@ -29,8 +30,9 @@ newServer 里创建并注册一次；RedirectRoutes 和 ConsoleRoutes 每次只�
 不能在这里注册，否则测试在同一个 Server 上重复调用路由方法时会 panic。
 */
 type httpMetrics struct {
-	requests *prometheus.CounterVec
-	duration *prometheus.HistogramVec
+	requests    *prometheus.CounterVec
+	duration    *prometheus.HistogramVec
+	rateLimited prometheus.Counter
 }
 
 func newHTTPMetrics(registry *prometheus.Registry) *httpMetrics {
@@ -44,8 +46,13 @@ func newHTTPMetrics(registry *prometheus.Registry) *httpMetrics {
 			Help:    "HTTP request duration in seconds by route, method, and status.",
 			Buckets: durationBuckets,
 		}, []string{"route", "method", "status"}),
+		// 租户 ID 不能做 label：租户数量无上界，会把时间序列撑开。这里只记总数。
+		rateLimited: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: rateLimitedMetricName,
+			Help: "Total number of management API requests rejected by the per-tenant rate limiter.",
+		}),
 	}
-	registry.MustRegister(m.requests, m.duration)
+	registry.MustRegister(m.requests, m.duration, m.rateLimited)
 	return m
 }
 

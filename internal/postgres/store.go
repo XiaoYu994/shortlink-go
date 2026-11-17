@@ -24,13 +24,34 @@ import (
 const (
 	linksTable = "links"
 
-	insertLinkSQL = `INSERT INTO ` + linksTable + ` (code, url, expires_at, tenant_id) VALUES ($1, $2, $3, $4) RETURNING id, created_at`
+	/*
+		占配额和插入链接在同一条语句里完成，两条动作一起提交或一起回滚。
+		quota 只在 link_count < link_quota 时加一；EXISTS (SELECT 1 FROM quota)
+		靠它的 RETURNING 判断是否拿到了配额，数据修改 CTE 的改动只有 RETURNING 能看到。
+		租户行不存在时照常插入链接，不加计数：这是 ADR 0010 允许的孤儿引用，
+		只会在直接调用存储时出现，HTTP 路径的租户一定来自鉴权。
+		语句失败（例如短码冲突）时配额更新随语句一起回滚，重试不会重复计数。
+	*/
+	insertLinkSQL = `WITH quota AS (
+    UPDATE tenants
+    SET link_count = link_count + 1
+    WHERE id = $4 AND link_count < link_quota
+    RETURNING 1
+)
+INSERT INTO links (code, url, expires_at, tenant_id)
+SELECT $1, $2, $3, $4
+WHERE EXISTS (SELECT 1 FROM quota)
+   OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = $4)
+RETURNING id, created_at`
 	/*
 		过期行留在表里，短码继续占着。查询把它看成找不到。
 		到期时刻本身算过期，界限是 expires_at > now()。
 	*/
 	getLinkSQL = `SELECT id, code, url, expires_at, created_at, tenant_id FROM ` + linksTable + `
 WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())`
+
+	// quotaExceededSQL 只在插入没有返回行时执行，区分配额不足和租户不存在。
+	quotaExceededSQL = `SELECT link_count >= link_quota FROM tenants WHERE id = $1`
 
 	/*
 		maxCodeAttempts 是短码冲突时的最大重试次数。
@@ -92,8 +113,9 @@ func Open(ctx context.Context, dsn string, cfg PoolConfig) (*sql.DB, error) {
 }
 
 /*
-Create 生成随机短码并插入数据库，成功后回填 ID、Code 和 CreatedAt。
-短码冲突时重新生成，最多重试 maxCodeAttempts 次。
+Create 生成随机短码，在同一语句里占用配额并插入链接，成功后回填 ID、Code 和 CreatedAt。
+配额不足返回 link.ErrQuotaExceeded，不写链接也不增加计数。
+短码冲突时重新生成，最多重试 maxCodeAttempts 次；冲突的语句会连同计数一起回滚。
 */
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	for range maxCodeAttempts {
@@ -107,12 +129,43 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			l.Code = code
 			return nil
 		}
+		if errors.Is(err, sql.ErrNoRows) {
+			exceeded, checkErr := s.quotaExceeded(ctx, l.TenantID)
+			if checkErr != nil {
+				return checkErr
+			}
+			if exceeded {
+				return link.ErrQuotaExceeded
+			}
+			/*
+				插入没有返回行，复查时配额又够了：并发的删除刚释放了配额。
+				重新走一遍即可，换一个短码没有副作用。
+			*/
+			continue
+		}
 		if isUniqueViolation(err) {
 			continue
 		}
 		return fmt.Errorf("insert link: %w", err)
 	}
 	return fmt.Errorf("insert link: code collision after %d attempts", maxCodeAttempts)
+}
+
+/*
+quotaExceeded 复查租户是否真的没有配额。
+插入语句只在租户存在且计数已满时不返回行；租户不存在时链接照常写入，
+所以查不到租户按「没有超配额」处理，交给调用方走其他分支。
+*/
+func (s *Store) quotaExceeded(ctx context.Context, tenantID int64) (bool, error) {
+	var exceeded bool
+	err := s.db.QueryRowContext(ctx, quotaExceededSQL, tenantID).Scan(&exceeded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check link quota: %w", err)
+	}
+	return exceeded, nil
 }
 
 /*
@@ -133,7 +186,7 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 }
 
 /*
-Authenticate 用 API Key 的哈希查找租户。
+Authenticate 用 API Key 的哈希查找租户，同时读出限流配置。
 格式不对、查无此密钥、已过期、已吊销都是 ErrUnauthenticated。
 这几种情况共用一个错误，调用方返回同一个 401，不透露密钥是否存在过。
 其他错误原样往上送，避免把数据库故障说成密钥无效。
@@ -149,12 +202,12 @@ func (s *Store) Authenticate(ctx context.Context, token string) (tenant.Tenant, 
 	var tn tenant.Tenant
 	var externalID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-SELECT t.id, t.external_id
+SELECT t.id, t.external_id, t.rate_limit_per_second
 FROM api_keys k
 JOIN tenants t ON t.id = k.tenant_id
 WHERE k.key_hash = $1
   AND k.revoked_at IS NULL
-  AND (k.expires_at IS NULL OR k.expires_at > now())`, tenant.HashAPIKey(token)).Scan(&tn.ID, &externalID)
+  AND (k.expires_at IS NULL OR k.expires_at > now())`, tenant.HashAPIKey(token)).Scan(&tn.ID, &externalID, &tn.RateLimit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tenant.Tenant{}, tenant.ErrUnauthenticated
 	}

@@ -20,10 +20,14 @@ const usageText = `用法:
   console key issue --tenant ID [--expires RFC3339]
   console key list --tenant ID
   console key revoke --id ID
+  console tenant show --tenant ID
+  console tenant set --tenant ID [--link-quota N] [--rate-limit N]
 
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期。
---name 会新建租户；已有租户用 --tenant。密钥命令只读 DATABASE_URL，不连接 Redis。
+--name 会新建租户；已有租户用 --tenant。密钥和租户命令只读 DATABASE_URL，不连接 Redis。
+tenant show 看配额和限流；set 至少给一个选项。--link-quota 是链接总数上限，
+--rate-limit 是管理 API 每秒请求数，0 表示不限制。
 `
 
 func writeUsage(w io.Writer) {
@@ -35,6 +39,8 @@ type adminStore interface {
 	IssueAPIKey(ctx context.Context, p postgres.IssueAPIKeyParams) (postgres.IssuedAPIKey, error)
 	ListAPIKeys(ctx context.Context, tenantID int64) ([]postgres.APIKey, error)
 	RevokeAPIKey(ctx context.Context, keyID int64) error
+	GetTenantLimits(ctx context.Context, tenantID int64) (postgres.TenantLimits, error)
+	SetTenantLimits(ctx context.Context, tenantID int64, p postgres.SetTenantLimitsParams) (postgres.TenantLimits, error)
 }
 
 type command func(ctx context.Context, store adminStore, stdout io.Writer) error
@@ -48,21 +54,30 @@ func parseCommand(args []string, stderr io.Writer) (command, error) {
 		writeUsage(stderr)
 		return nil, nil
 	}
-	if len(args) < 2 || args[0] != "key" {
+	if len(args) < 2 {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
-	switch args[1] {
-	case "issue":
-		return parseIssue(args[2:], stderr)
-	case "list":
-		return parseList(args[2:], stderr)
-	case "revoke":
-		return parseRevoke(args[2:], stderr)
-	default:
-		writeUsage(stderr)
-		return nil, errUsage
+	switch args[0] {
+	case "key":
+		switch args[1] {
+		case "issue":
+			return parseIssue(args[2:], stderr)
+		case "list":
+			return parseList(args[2:], stderr)
+		case "revoke":
+			return parseRevoke(args[2:], stderr)
+		}
+	case "tenant":
+		switch args[1] {
+		case "show":
+			return parseTenantShow(args[2:], stderr)
+		case "set":
+			return parseTenantSet(args[2:], stderr)
+		}
 	}
+	writeUsage(stderr)
+	return nil, errUsage
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
@@ -154,6 +169,87 @@ func parseRevoke(args []string, stderr io.Writer) (command, error) {
 		_, err := fmt.Fprintf(stdout, "revoked: %d\n", id)
 		return err
 	}, nil
+}
+
+func parseTenantShow(args []string, stderr io.Writer) (command, error) {
+	fs := newFlagSet("tenant show", stderr)
+	tenantID := fs.Int64("tenant", 0, "租户 ID")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, nil
+		}
+		return nil, errUsage
+	}
+	if fs.NArg() != 0 || *tenantID <= 0 {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	id := *tenantID
+	return func(ctx context.Context, store adminStore, stdout io.Writer) error {
+		limits, err := store.GetTenantLimits(ctx, id)
+		if err != nil {
+			return err
+		}
+		return printTenantLimits(stdout, limits)
+	}, nil
+}
+
+/*
+parseTenantSet 至少要求一个限制选项。
+用 flag.Visit 判断选项有没有出现：默认值和显式传 0 要能区分开，
+把 --rate-limit 0 当成「没传」会改不掉已有的值。
+*/
+func parseTenantSet(args []string, stderr io.Writer) (command, error) {
+	fs := newFlagSet("tenant set", stderr)
+	tenantID := fs.Int64("tenant", 0, "租户 ID")
+	linkQuota := fs.Int64("link-quota", 0, "链接总数上限")
+	rateLimit := fs.Int("rate-limit", 0, "管理 API 每秒请求数，0 表示不限制")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, nil
+		}
+		return nil, errUsage
+	}
+	if fs.NArg() != 0 || *tenantID <= 0 {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+
+	set := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["link-quota"] && !set["rate-limit"] {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	if *linkQuota < 0 || *rateLimit < 0 {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+
+	params := postgres.SetTenantLimitsParams{}
+	if set["link-quota"] {
+		params.LinkQuota = linkQuota
+	}
+	if set["rate-limit"] {
+		params.RateLimit = rateLimit
+	}
+	id := *tenantID
+	return func(ctx context.Context, store adminStore, stdout io.Writer) error {
+		limits, err := store.SetTenantLimits(ctx, id, params)
+		if err != nil {
+			return err
+		}
+		return printTenantLimits(stdout, limits)
+	}, nil
+}
+
+func printTenantLimits(w io.Writer, limits postgres.TenantLimits) error {
+	if _, err := fmt.Fprint(w, "id\tname\tlink_count\tlink_quota\trate_limit_per_second\n"); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "%d\t%s\t%d\t%d\t%d\n",
+		limits.ID, limits.Name, limits.LinkCount, limits.LinkQuota, limits.RateLimit)
+	return err
 }
 
 func printIssued(w io.Writer, issued postgres.IssuedAPIKey) error {

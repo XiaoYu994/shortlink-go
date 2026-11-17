@@ -64,6 +64,8 @@ func TestCreateRecordsResult(t *testing.T) {
 		wantResult string
 	}{
 		{"success", nil, resultSuccess},
+		{"quota exceeded", link.ErrQuotaExceeded, resultQuotaExceeded},
+		{"wrapped quota exceeded", fmt.Errorf("insert link: %w", link.ErrQuotaExceeded), resultQuotaExceeded},
 		{"error", errors.New("db down"), resultError},
 	}
 	for _, tt := range tests {

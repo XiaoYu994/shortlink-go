@@ -1,6 +1,7 @@
 #!/bin/sh
 # 冒烟测试：启动 redirector 和 console 两个真实进程，按 docs/api.md 的契约走一遍
-# 健康检查、创建、跳转、HEAD、404、非法参数、过期、路由隔离、访客去重和指标，最后检查 SIGTERM 优雅退出。
+# 健康检查、创建、跳转、HEAD、404、非法参数、过期、路由隔离、访客去重、配额、限流和指标，
+# 最后检查 SIGTERM 优雅退出。
 #
 # 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/redirector、bin/console
 # 已构建、测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
@@ -345,6 +346,45 @@ assert_eq "$status" 302 '过期前跳转'
 sleep 4
 status=$(request "$REDIRECTOR_BASE" GET "/r/$expired_code")
 assert_eq "$status" 404 '过期后不跳转'
+
+echo 'smoke: quota'
+# 把冒烟租户的配额压到当前链接数（含刚过期的链接），下一次创建应被拒绝。
+# 链接在删除时才释放配额，过期不释放。
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+	"UPDATE tenants SET link_quota = link_count WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	|| fail '设置冒烟租户配额失败'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/over-quota"}')
+assert_eq "$status" 403 '超过链接配额'
+grep -q '"link quota exceeded"' "$TMP/body" || fail "配额不足的响应体不对: $(cat "$TMP/body")"
+
+status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$expired_code")
+assert_eq "$status" 204 '删除过期链接释放配额'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/after-quota-release"}')
+assert_eq "$status" 201 '删除链接后可以继续创建'
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+	"UPDATE tenants SET link_quota = 1000 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	|| fail '恢复冒烟租户配额失败'
+
+echo 'smoke: rate limit'
+# 速率 1/s、突发 1：第一次放行，紧接着的第二次应 429 并带 Retry-After。
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+	"UPDATE tenants SET rate_limit_per_second = 1 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	|| fail '设置冒烟租户限流失败'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/rate-limit-1"}')
+assert_eq "$status" 201 '限流前的第一次创建'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/rate-limit-2"}')
+assert_eq "$status" 429 '超过速率限制'
+grep -q '"rate limit exceeded"' "$TMP/body" || fail "限流的响应体不对: $(cat "$TMP/body")"
+retry_after=$(header Retry-After)
+case "$retry_after" in
+	''|*[!0-9]*) fail "Retry-After 不是整数秒: '$retry_after'" ;;
+esac
+[ "$retry_after" -ge 1 ] || fail "Retry-After 小于 1: $retry_after"
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+	"UPDATE tenants SET rate_limit_per_second = 10 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	|| fail '恢复冒烟租户限流失败'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/rate-limit-restored"}')
+assert_eq "$status" 201 '限流改回后立即生效'
 
 echo 'smoke: metrics'
 status=$(request "$REDIRECTOR_BASE" GET /metrics)

@@ -82,9 +82,11 @@ type Server struct {
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
-	clicks         ClickRecorder
-	visitorSalt    []byte
-	trustProxy     bool
+	// limiter 是管理 API 的进程内按租户令牌桶，redirector 不用。
+	limiter     *tenantRateLimiter
+	clicks      ClickRecorder
+	visitorSalt []byte
+	trustProxy  bool
 	/*
 		ready 是 /readyz 要问的检查项，readyWired 记录 SetReadiness 有没有调用过。
 		两者分开：没接线要返回 503，接了线但一项都不查是合法的（redirector 就是这样）。
@@ -162,6 +164,7 @@ func newServer(d serverDeps) *Server {
 		requestTimeout: d.requestTimeout,
 		registry:       d.registry,
 		metrics:        newHTTPMetrics(d.registry),
+		limiter:        newTenantRateLimiter(),
 		clicks:         d.clicks,
 		visitorSalt:    d.visitorSalt,
 		trustProxy:     d.trustProxyHeaders,

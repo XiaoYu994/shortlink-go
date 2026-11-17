@@ -120,7 +120,7 @@ curl -s -o /dev/null localhost:8080/healthz
 curl -s localhost:8080/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|shortlink_clicks_|go_sql_)'
 
 curl -s -o /dev/null localhost:8081/healthz
-curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_store_|shortlink_cache_|go_sql_)'
+curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_http_|shortlink_rate_limited_|shortlink_store_|shortlink_cache_|go_sql_)'
 ```
 
 两个进程各暴露一份。计数发生在响应写完之后，没出现过的 label 也不会输出。刚启动后直接抓 `/metrics`，正文里还没有 `shortlink_http_*`，所以上面先访问一次 `/healthz`。
@@ -131,7 +131,8 @@ curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `process_*`：进程 CPU、内存、文件描述符，一启动就有
 - `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），每个进程各一份，一启动就有
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`
-- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 调过管理接口后出现对应操作
+- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`quota_exceeded`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 调过管理接口后出现对应操作
+- `shortlink_rate_limited_total`：被按租户限流拒绝的管理请求数，没有 label。两个进程都暴露，只有 console 会累加；对照 `shortlink_http_requests_total{status="429"}` 看是哪个接口
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。只有 redirector 读取，发生过跳转才出现
 - `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。只有 redirector 有；按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
 - `shortlink_cache_writes_total`：写缓存结果（`success`、`skipped`、`error`）。两个进程都可能写：console 在创建、修改、删除后维护缓存，redirector 回源时写。`skipped` 表示回源的 `SET NX` 没写进去（key 已有更新的值，可能是并发的创建或管理写）
@@ -694,6 +695,36 @@ make console ARGS="key revoke --id 1"
 `key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`key list` 只显示编号和时间，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
 
 已有租户再发一把密钥时用 `--tenant`。`--name` 每次都新建租户，名称不必唯一。`--external-id` 只在新建时写入，并且不能重复。
+
+## 查看和调整租户配额与限流
+
+租户行上有三个值：`link_count`（当前拥有的链接数，含已过期链接）、`link_quota`（链接总数上限，默认 1000）、`rate_limit_per_second`（管理 API 每秒请求数，默认 10）。用运维命令查看和修改，不给管理 API 加写接口。命令只连 PostgreSQL，不连接 Redis。
+
+```bash
+# 当前值：id、name、link_count、link_quota、rate_limit_per_second
+make console ARGS="tenant show --tenant 1"
+
+# 调低链接配额，或只改限流；可以两个一起给
+make console ARGS="tenant set --tenant 1 --link-quota 500"
+make console ARGS="tenant set --tenant 1 --rate-limit 20"
+make console ARGS="tenant set --tenant 1 --link-quota 500 --rate-limit 20"
+
+# 0 表示不限流；link_quota 为 0 表示不能再创建
+make console ARGS="tenant set --tenant 1 --rate-limit 0"
+```
+
+规则：
+
+- 配额满时 `POST /api/v1/links` 返回 403 `{"error":"link quota exceeded"}`。过期链接仍占配额，删除链接才释放一个名额。
+- `link_quota` 调到 `link_count` 以下不会删除已有链接，只是在删除腾出配额前不能新建。
+- 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
+- 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
+- 绕过应用直接改 `links` 会让 `link_count` 漂移。需要时按实际情况重算：
+
+```sql
+UPDATE tenants t
+SET link_count = (SELECT count(*) FROM links l WHERE l.tenant_id = t.id);
+```
 
 ## 创建一条短链
 

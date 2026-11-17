@@ -2,8 +2,9 @@
 Command console 是管理进程，也是租户和 API Key 的运维入口。
 
 console serve 提供短链增删改查、点击统计、/healthz、/readyz 和 /metrics；
-console key issue/list/revoke 签发密钥、列出状态和吊销，明文只写到标准输出，不进日志。
-密钥命令只连 PostgreSQL，不加载 Redis。进程拆分见 ADR 0009。
+console key issue/list/revoke 签发密钥、列出状态和吊销，明文只写到标准输出，不进日志；
+console tenant show/set 查看和调整租户的链接配额与管理 API 限流。
+运维命令只连 PostgreSQL，不加载 Redis。进程拆分见 ADR 0009。
 */
 package main
 

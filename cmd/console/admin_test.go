@@ -25,6 +25,12 @@ func TestConsoleUsageDoesNotOpenStore(t *testing.T) {
 		{name: "issue extra", args: []string{"key", "issue", "--name", "acme", "extra"}, want: errUsage},
 		{name: "list missing tenant", args: []string{"key", "list"}, want: errUsage},
 		{name: "revoke missing id", args: []string{"key", "revoke"}, want: errUsage},
+		{name: "tenant only", args: []string{"tenant"}, want: errUsage},
+		{name: "bad tenant subcommand", args: []string{"tenant", "delete"}, want: errUsage},
+		{name: "tenant show missing tenant", args: []string{"tenant", "show"}, want: errUsage},
+		{name: "tenant set missing tenant", args: []string{"tenant", "set"}, want: errUsage},
+		{name: "tenant set no options", args: []string{"tenant", "set", "--tenant", "1"}, want: errUsage},
+		{name: "tenant set negative", args: []string{"tenant", "set", "--tenant", "1", "--link-quota", "-1"}, want: errUsage},
 		{name: "help", args: []string{"help"}},
 		{name: "issue help", args: []string{"key", "issue", "-h"}},
 	}
@@ -145,12 +151,55 @@ func TestConsoleIssueForExistingTenant(t *testing.T) {
 	}
 }
 
+func TestConsoleTenantShowAndSet(t *testing.T) {
+	limits := postgres.TenantLimits{ID: 7, Name: "acme", LinkCount: 3, LinkQuota: 1000, RateLimit: 10}
+	store := &fakeAdmin{limits: limits}
+	open := func(context.Context) (adminStore, io.Closer, error) {
+		return store, io.NopCloser(nil), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"tenant", "show", "--tenant", "7"}, &stdout, &stderr, open); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if store.shown != 7 {
+		t.Fatalf("shown tenant = %d, want 7", store.shown)
+	}
+	want := "id\tname\tlink_count\tlink_quota\trate_limit_per_second\n7\tacme\t3\t1000\t10\n"
+	if stdout.String() != want {
+		t.Fatalf("show stdout = %q, want %q", stdout.String(), want)
+	}
+
+	stdout.Reset()
+	if err := run([]string{"tenant", "set", "--tenant", "7", "--link-quota", "5"}, &stdout, &stderr, open); err != nil {
+		t.Fatalf("set link quota: %v", err)
+	}
+	if store.setTenant != 7 || store.setParams.LinkQuota == nil || *store.setParams.LinkQuota != 5 {
+		t.Fatalf("set tenant = %d, params = %+v", store.setTenant, store.setParams)
+	}
+	if store.setParams.RateLimit != nil {
+		t.Fatalf("RateLimit = %v, want nil", *store.setParams.RateLimit)
+	}
+
+	stdout.Reset()
+	if err := run([]string{"tenant", "set", "--tenant", "7", "--rate-limit", "0"}, &stdout, &stderr, open); err != nil {
+		t.Fatalf("set rate limit: %v", err)
+	}
+	if store.setParams.LinkQuota != nil || store.setParams.RateLimit == nil || *store.setParams.RateLimit != 0 {
+		t.Fatalf("params = %+v, want rate limit 0 and no quota", store.setParams)
+	}
+}
+
 type fakeAdmin struct {
-	params  postgres.IssueAPIKeyParams
-	issued  postgres.IssuedAPIKey
-	keys    []postgres.APIKey
-	listed  int64
-	revoked int64
+	params    postgres.IssueAPIKeyParams
+	issued    postgres.IssuedAPIKey
+	keys      []postgres.APIKey
+	listed    int64
+	revoked   int64
+	limits    postgres.TenantLimits
+	shown     int64
+	setTenant int64
+	setParams postgres.SetTenantLimitsParams
 }
 
 func (f *fakeAdmin) IssueAPIKey(_ context.Context, p postgres.IssueAPIKeyParams) (postgres.IssuedAPIKey, error) {
@@ -166,4 +215,15 @@ func (f *fakeAdmin) ListAPIKeys(_ context.Context, tenantID int64) ([]postgres.A
 func (f *fakeAdmin) RevokeAPIKey(_ context.Context, keyID int64) error {
 	f.revoked = keyID
 	return nil
+}
+
+func (f *fakeAdmin) GetTenantLimits(_ context.Context, tenantID int64) (postgres.TenantLimits, error) {
+	f.shown = tenantID
+	return f.limits, nil
+}
+
+func (f *fakeAdmin) SetTenantLimits(_ context.Context, tenantID int64, p postgres.SetTenantLimitsParams) (postgres.TenantLimits, error) {
+	f.setTenant = tenantID
+	f.setParams = p
+	return f.limits, nil
 }

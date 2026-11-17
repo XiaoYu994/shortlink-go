@@ -23,11 +23,12 @@ const (
 	operationDelete    = "delete"
 	operationStats     = "stats"
 
-	resultSuccess  = "success"
-	resultNotFound = "not_found"
-	resultCanceled = "canceled"
-	resultTimeout  = "timeout"
-	resultError    = "error"
+	resultSuccess       = "success"
+	resultNotFound      = "not_found"
+	resultQuotaExceeded = "quota_exceeded"
+	resultCanceled      = "canceled"
+	resultTimeout       = "timeout"
+	resultError         = "error"
 )
 
 /*
@@ -139,7 +140,8 @@ func (s *Store) observe(operation string, err error, d time.Duration) {
 
 /*
 classifyResult 把存储错误分成指标结果。
-context 错误和 ErrNotFound 都是 non-nil，要排在通用错误前面。
+context 错误、ErrNotFound 和配额不足都是 non-nil，要排在通用错误前面。
+配额不足是策略生效，不是存储故障，单独一类才能和真正的创建失败区分开。
 */
 func classifyResult(err error) string {
 	switch {
@@ -147,6 +149,8 @@ func classifyResult(err error) string {
 		return resultSuccess
 	case errors.Is(err, link.ErrNotFound):
 		return resultNotFound
+	case errors.Is(err, link.ErrQuotaExceeded):
+		return resultQuotaExceeded
 	case errors.Is(err, context.Canceled):
 		return resultCanceled
 	case errors.Is(err, context.DeadlineExceeded):

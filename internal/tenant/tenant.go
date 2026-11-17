@@ -19,10 +19,13 @@ var ErrUnauthenticated = errors.New("unauthenticated")
 /*
 Tenant 是鉴权通过后放进 context 的身份。
 ID 是本地主键。ExternalID 留给以后的平台租户，没有时为空。
+RateLimit 是管理 API 的每秒请求数，和租户在同一行读出，限流中间件据此
+调整进程内的令牌桶，改库后下一次请求就生效；0 表示不限制。
 */
 type Tenant struct {
 	ID         int64
 	ExternalID string
+	RateLimit  int
 }
 
 const (

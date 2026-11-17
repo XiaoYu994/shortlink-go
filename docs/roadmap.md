@@ -80,3 +80,10 @@
 - [x] redirector 的 pprof 端点：单独的回环监听，默认不开（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)）
 - [x] 点击写入的 benchmark 和剖析，定位单写入者上限的来源（runbook“点击写入剖析”）
 - [ ] 按剖析结论决定是否改点击写入：合并语句、调大批次或多个写入者，先写 ADR
+
+## 阶段 9：限流和链接配额
+
+决策见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)，操作见 [runbook](runbook.md)。
+
+- [x] 每租户链接配额：`tenants.link_count` 和 `link_quota`，创建时原子占配额、删除释放，超限 403
+- [x] 管理 API 按租户限流：进程内令牌桶，超限 429 带 `Retry-After`，空闲桶自动清理
