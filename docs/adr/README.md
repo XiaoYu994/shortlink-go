@@ -29,6 +29,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0010](0010-app-level-referential-integrity.md) | 引用完整性放在应用层，不使用数据库外键 | Accepted |
 | [0011](0011-link-crud-api.md) | 短链管理 API 的增删改查和排序 | Accepted |
 | [0012](0012-click-analytics.md) | 点击统计：日聚合、客户端维度和统计接口 | Accepted |
+| [0013](0013-pprof-on-loopback-listener.md) | 剖析端点放在单独的回环监听上 | Accepted |
 
 ## 模板
 

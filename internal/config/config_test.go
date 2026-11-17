@@ -46,6 +46,7 @@ func TestLoadConfig(t *testing.T) {
 		"TRUST_PROXY_HEADERS":    "",
 		"LOG_LEVEL":              "",
 		"LOG_FORMAT":             "",
+		"PPROF_ADDR":             "",
 	}
 	defaults := Config{
 		Addr:                 defaultAddr,
@@ -167,6 +168,31 @@ func TestLoadConfig(t *testing.T) {
 				CacheMissConcurrency: defaultCacheMissConcurrency,
 				CacheFetchTimeout:    defaultCacheFetchTimeout,
 			},
+		},
+		{
+			name: "pprof on loopback",
+			env:  map[string]string{"PPROF_ADDR": "127.0.0.1:6060"},
+			want: func() Config { c := defaults; c.PprofAddr = "127.0.0.1:6060"; return c }(),
+		},
+		{
+			name: "pprof on localhost",
+			env:  map[string]string{"PPROF_ADDR": "localhost:6060"},
+			want: func() Config { c := defaults; c.PprofAddr = "localhost:6060"; return c }(),
+		},
+		{
+			name:    "pprof on all interfaces",
+			env:     map[string]string{"PPROF_ADDR": ":6060"},
+			wantErr: "PPROF_ADDR",
+		},
+		{
+			name:    "pprof on public address",
+			env:     map[string]string{"PPROF_ADDR": "0.0.0.0:6060"},
+			wantErr: "PPROF_ADDR",
+		},
+		{
+			name:    "pprof without port",
+			env:     map[string]string{"PPROF_ADDR": "127.0.0.1"},
+			wantErr: "PPROF_ADDR",
 		},
 		{
 			name:    "invalid log format",

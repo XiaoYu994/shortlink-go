@@ -161,6 +161,7 @@ GET /api/v1/links/{code}/stats
 - `TRUST_PROXY_HEADERS`：默认 `false`；为 `true` 时从 `X-Forwarded-For` 最右一段取客户端 IP。只能开在可信反向代理后面。`deploy/nginx.conf` 把这个头覆盖成 `$remote_addr`
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
+- `PPROF_ADDR`：默认为空，不开剖析端点。设置后 redirector 另起一个只有 `/debug/pprof/` 的监听；只接受回环地址，否则启动失败。console 不读它（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)）
 
 ## 退出
 

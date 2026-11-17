@@ -235,6 +235,11 @@ curl -i localhost:8081/metrics   # console
 
 它是运维端点，不版本化，公网隔离由部署层保证。
 
+## 剖析
+
+redirector 设了 `PPROF_ADDR` 时，在那个地址上另起一个监听提供 `/debug/pprof/`（Go 的 `net/http/pprof`）。
+默认不开，只接受回环地址；业务端口上没有这组路径。用法见 [runbook](runbook.md)。
+
 ## 请求编号
 
 经过路由的响应都带 `X-Request-ID`。调用方可以沿用自己的编号，但只接受长度不超过 128、由字母、数字、`.`、`_`、`-` 组成的值；其他值由服务端改成 32 位十六进制编号。同一次请求的访问日志和错误日志都有同一个 `request_id`。

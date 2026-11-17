@@ -2,7 +2,7 @@
 Package config 从环境变量加载进程配置，并在启动时校验。
 
 未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、摘流等待、日志格式或回源保护参数不合法时，LoadConfig 返回错误，
+连接池参数、请求超时、关机超时、摘流等待、日志格式、回源保护参数或剖析地址不合法时，LoadConfig 返回错误，
 由 main 终止启动。
 */
 package config
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"time"
@@ -76,6 +77,12 @@ type Config struct {
 		最左一段在代理追加头时可以由客户端伪造。只能开在可信反向代理后面。
 	*/
 	TrustProxyHeaders bool
+
+	/*
+		PprofAddr 是剖析端点的监听地址，为空时不开（默认）。
+		只接受回环地址：剖析数据里有堆内容，端点也没有鉴权。见 ADR 0013。
+	*/
+	PprofAddr string
 }
 
 /*
@@ -119,6 +126,7 @@ func LoadConfig() (Config, error) {
 		}
 		cfg.TrustProxyHeaders = trust
 	}
+	cfg.PprofAddr = os.Getenv("PPROF_ADDR")
 	if level := os.Getenv("LOG_LEVEL"); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
 			return Config{}, fmt.Errorf("LOG_LEVEL: %w", err)
@@ -235,7 +243,27 @@ func validate(cfg Config) error {
 	if cfg.CacheFetchTimeout > cfg.RequestTimeout {
 		return errors.New("CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT")
 	}
+	if cfg.PprofAddr != "" && !isLoopbackAddr(cfg.PprofAddr) {
+		return errors.New("PPROF_ADDR must be a loopback address such as 127.0.0.1:6060")
+	}
 	return nil
+}
+
+/*
+isLoopbackAddr 报告 host:port 的 host 是不是回环地址。
+":6060" 这种省略 host 的写法会监听所有网卡，不算；
+localhost 以外的主机名要解析才知道指向哪里，也不算。
+*/
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // envInt 读取整数环境变量。变量未设置时返回 def，调用方可以先放上默认值再覆盖。
