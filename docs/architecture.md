@@ -81,7 +81,7 @@ POST /api/v1/links
   -> json.Unmarshal
   -> link.NewLink 校验
   -> TenantID 取自 context
-  -> store.Create 生成随机短码，在同一语句里占配额并写库；配额满返回 403
+  -> store.Create 生成随机短码，在同一语句里占本月配额并写库；配额满返回 403
   -> 201 + Location: /r/{code}
 ```
 
@@ -119,7 +119,7 @@ GET/PATCH/DELETE /api/v1/links/{code}
   -> GetForTenant / Update / Delete，全部带 tenant_id，找不到一律 404
   -> PATCH：RawMessage 区分「没传」和「传了 null」，校验 URL 和将来时间
   -> Update/Delete 提交后由 cache.Store 无条件覆盖缓存（删除写负缓存）
-  -> Delete 在同一事务里释放一条链接配额
+  -> Delete 在同一事务里删除链接和统计行，不返还本月配额
 
 GET /api/v1/links/{code}/stats
   -> authenticate -> rateLimit -> 解析 from/to（默认 8 天，跨度不超过 90 天）
@@ -141,7 +141,7 @@ GET /api/v1/links/{code}/stats
 - `internal/click`：负责点击元数据分类和异步批量记录。GET 跳转成功后构造 `Click`（来源 host、设备、客户端、按天访客哈希），放进缓冲 channel；一条 goroutine 按 100 条或 1 秒把点击交给 `postgres.Store.RecordClicks`。缓冲满时 `shortlink_clicks_dropped_total` 加一；写出结果记在 `shortlink_clicks_written_total{result="success|error"}`。分类是启发式，不是安全边界；User-Agent 截到 512 字节，Referer 超长归 `other`。访客哈希是 HMAC-SHA256 的前 16 字节，盐按天参与哈希，不存原始 IP 和 UA。设计见 [ADR 0007](adr/0007-async-click-recording.md)、[ADR 0012](adr/0012-click-analytics.md)。
 - 进程指标由 `collectors.NewProcessCollector` 暴露为 `process_*`，连接池指标由 `collectors.NewDBStatsCollector` 暴露为 `go_sql_*`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`。
 - 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`、`tenant_id`；`code` 格式和 `url` 长度由 CHECK 约束兜底。`expires_at` 为 NULL 表示永不过期，跳转查询只返回 `expires_at IS NULL OR expires_at > now()` 的行；管理查询不按过期时间过滤。`tenant_id` 指向 `tenants.id`，`NOT NULL`，没有数据库外键；`links` 和 `api_keys` 各有 `(tenant_id, id)` 索引，`links` 另有 `(tenant_id, clicks DESC, id DESC)` 服务历史排序。引用完整性由应用层保证，见 [ADR 0010](adr/0010-app-level-referential-integrity.md)。API Key 的 SHA-256 存在 `api_keys.key_hash`，明文不入库。`api_keys.expires_at` 为空表示不过期，到期时刻本身算过期；`api_keys.revoked_at` 非空表示已吊销。鉴权把过期和吊销看成密钥无效。`tenants.external_id` 可空，留给以后的平台租户编号。运维命令在 `cmd/console`：`key issue`、`key list`、`key revoke`、`tenant show`、`tenant set`。表结构由 `cmd/migrate` 管理，当前版本记在 `schema_migrations`；HTTP 进程启动时不迁移。
-- 租户配额和限流：`tenants.link_count` 是当前拥有的链接数（含已过期链接），`link_quota` 是总数上限（默认 1000），`rate_limit_per_second` 是管理 API 每秒请求数（默认 10，0 表示不限制）。创建链接用一条 `WITH quota AS (UPDATE tenants ... WHERE link_count < link_quota RETURNING 1) INSERT INTO links ... SELECT ...` 原子占配额，短码冲突时整条语句连同计数一起回滚；配额满返回 `link.ErrQuotaExceeded`，HTTP 层映射成 403。删除链接在同一个事务里最后把计数减一（`GREATEST(..., 0)`）。过期链接不释放配额。鉴权把速率随租户一起读出，`httpapi.rateLimit` 按租户维护进程内 `x/time/rate` 令牌桶，超限 429 和 `Retry-After`；空闲超过 10 分钟的桶在请求路径里顺带清理，没有后台 goroutine。多副本时每个 console 各限各的。见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)。
+- 租户配额和限流：`tenants.link_usage` 是本月（UTC 自然月）已创建的链接数，`link_usage_month` 记录这个数所属月份，`link_quota` 是每月创建上限（默认 1000），`rate_limit_per_second` 是管理 API 每秒请求数（默认 10，0 表示不限制）。创建链接用一条 `WITH quota AS (UPDATE tenants ... WHERE 有效已用量 < link_quota RETURNING 1) INSERT INTO links ... SELECT ...` 原子占当月配额；记录的月份早于当前月时，同一条 `UPDATE` 先把用量按 0 算再加一，月份用 `GREATEST` 只前进不后退，跨月不依赖定时任务。短码冲突时整条语句连同用量一起回滚；配额满返回 `link.ErrQuotaExceeded`，HTTP 层映射成 403。计的是创建动作：链接过期或删除都不返还额度，删除事务也不再更新 `tenants` 行。所有读用量的地方（`tenant show/set` 的回显、配额满的补查）用同一个 `CASE` 表达式，避免跨月后看到上个月的数。鉴权把速率随租户一起读出，`httpapi.rateLimit` 按租户维护进程内 `x/time/rate` 令牌桶，超限 429 和 `Retry-After`；空闲超过 10 分钟的桶在请求路径里顺带清理，没有后台 goroutine。多副本时每个 console 各限各的。见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0015](adr/0015-monthly-link-quota.md)。
 - 点击日聚合：`link_clicks_daily` 主键 `(link_id, day)`，冗余 `tenant_id` 由写库时的 `JOIN links` 填充，索引 `(tenant_id, day, clicks DESC, link_id DESC)` 服务今日排序；`link_dimension_daily` 主键 `(link_id, day, dimension, value)`，`dimension` 是 `referrer`、`device`、`client`；`link_visitors_daily` 主键 `(link_id, day, visitor_hash)`，哈希 16 字节。三张表都不建外键。`links.clicks` 是终身累计的读模型，和日表在同一个事务里更新，一个批次要么全写要么全不写。删除链接时在同一事务里删三张统计表和 `links` 行。统计接口在只读的 `REPEATABLE READ` 事务里查询，同一批点击的各维度是同一个快照。见 [ADR 0012](adr/0012-click-analytics.md)。
 - 短码是 8 位 Base62 随机码，`crypto/rand` 生成；碰撞由唯一索引和最多 5 次重试处理。
 

@@ -79,7 +79,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	l.TenantID = tn.ID
 
 	if err := s.store.Create(r.Context(), l); err != nil {
-		// 配额是租户策略，不是存储故障：403 告诉调用方链接本身没问题，腾出配额再试。
+		// 配额是租户策略，不是存储故障：403 告诉调用方链接本身没问题，本月额度用完了，删除链接也换不回来。
 		// 用哨兵错误的文本，不把存储层包了一层的内部前缀暴露给客户端。
 		if errors.Is(err, link.ErrQuotaExceeded) {
 			s.writeError(r.Context(), w, http.StatusForbidden, link.ErrQuotaExceeded.Error())

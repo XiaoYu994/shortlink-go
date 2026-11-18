@@ -31,7 +31,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0012](0012-click-analytics.md) | 点击统计：日聚合、客户端维度和统计接口 | Accepted |
 | [0013](0013-pprof-on-loopback-listener.md) | 剖析端点放在单独的回环监听上 | Accepted |
 | [0014](0014-per-tenant-rate-limit-and-quota.md) | 按租户限流和链接配额 | Accepted |
-| [0015](0015-monthly-link-quota.md) | 链接配额按月计创建数，删除不返还 | Proposed |
+| [0015](0015-monthly-link-quota.md) | 链接配额按月计创建数，删除不返还 | Accepted |
 | [0016](0016-link-states-and-takedown.md) | 链接状态和下架：过期、停用、封禁 | Proposed |
 
 ## 模板

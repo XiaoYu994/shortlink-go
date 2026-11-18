@@ -25,17 +25,37 @@ const (
 	linksTable = "links"
 
 	/*
-		占配额和插入链接在同一条语句里完成，两条动作一起提交或一起回滚。
-		quota 只在 link_count < link_quota 时加一；EXISTS (SELECT 1 FROM quota)
-		靠它的 RETURNING 判断是否拿到了配额，数据修改 CTE 的改动只有 RETURNING 能看到。
-		租户行不存在时照常插入链接，不加计数：这是 ADR 0010 允许的孤儿引用，
+		当前月取数据库时钟的 UTC 月界。console 多副本时各自的系统时钟可能不同，
+		而跳转判断过期用的也是数据库时钟，所以月份也交给数据库算。
+		AT TIME ZONE 'UTC' 先把时刻换成 UTC 的墙上时间再截断，结果不依赖会话时区。
+	*/
+	currentMonthSQL = `date_trunc('month', now() AT TIME ZONE 'UTC')::date`
+
+	/*
+		effectiveUsageSQL 是「有效已用量」：记录的月份早于当前月时按 0 算。
+		跨月重置不依赖定时任务，读和写都必须用这个表达式；直接读 link_usage
+		会在跨月后、当月第一次创建前看到上个月的数。
+		月份在创建语句里用 GREATEST 只前进不后退，时钟回拨时不会把已经
+		记到新月份的用量再当成旧月份清一次。
+	*/
+	effectiveUsageSQL = `CASE WHEN link_usage_month < ` + currentMonthSQL + `
+    THEN 0 ELSE link_usage END`
+
+	/*
+		占本月配额和插入链接在同一条语句里完成，两条动作一起提交或一起回滚。
+		quota 把「本月已创建数」和它所属的月份一起更新：月份过期时先按 0 算再加一；
+		EXISTS (SELECT 1 FROM quota) 靠它的 RETURNING 判断是否拿到了配额，
+		数据修改 CTE 的改动只有 RETURNING 能看到。
+		租户行不存在时照常插入链接，不占配额：这是 ADR 0010 允许的孤儿引用，
 		只会在直接调用存储时出现，HTTP 路径的租户一定来自鉴权。
 		语句失败（例如短码冲突）时配额更新随语句一起回滚，重试不会重复计数。
 	*/
 	insertLinkSQL = `WITH quota AS (
     UPDATE tenants
-    SET link_count = link_count + 1
-    WHERE id = $4 AND link_count < link_quota
+    SET link_usage = (` + effectiveUsageSQL + `) + 1,
+        link_usage_month = GREATEST(link_usage_month, ` + currentMonthSQL + `)
+    WHERE id = $4
+      AND (` + effectiveUsageSQL + `) < link_quota
     RETURNING 1
 )
 INSERT INTO links (code, url, expires_at, tenant_id)
@@ -50,8 +70,8 @@ RETURNING id, created_at`
 	getLinkSQL = `SELECT id, code, url, expires_at, created_at, tenant_id FROM ` + linksTable + `
 WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())`
 
-	// quotaExceededSQL 只在插入没有返回行时执行，区分配额不足和租户不存在。
-	quotaExceededSQL = `SELECT link_count >= link_quota FROM tenants WHERE id = $1`
+	// quotaExceededSQL 只在插入没有返回行时执行，也用有效已用量区分配额不足和租户不存在。
+	quotaExceededSQL = `SELECT (` + effectiveUsageSQL + `) >= link_quota FROM tenants WHERE id = $1`
 
 	/*
 		maxCodeAttempts 是短码冲突时的最大重试次数。
@@ -113,9 +133,9 @@ func Open(ctx context.Context, dsn string, cfg PoolConfig) (*sql.DB, error) {
 }
 
 /*
-Create 生成随机短码，在同一语句里占用配额并插入链接，成功后回填 ID、Code 和 CreatedAt。
-配额不足返回 link.ErrQuotaExceeded，不写链接也不增加计数。
-短码冲突时重新生成，最多重试 maxCodeAttempts 次；冲突的语句会连同计数一起回滚。
+Create 生成随机短码，在同一语句里占用本月配额并插入链接，成功后回填 ID、Code 和 CreatedAt。
+本月配额不足返回 link.ErrQuotaExceeded，不写链接也不增加用量；删除链接不返还配额。
+短码冲突时重新生成，最多重试 maxCodeAttempts 次；冲突的语句会连同用量一起回滚。
 */
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	for range maxCodeAttempts {
@@ -138,7 +158,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 				return link.ErrQuotaExceeded
 			}
 			/*
-				插入没有返回行，复查时配额又够了：并发的删除刚释放了配额。
+				插入没有返回行，复查时又没满：两条语句之间配额被调高，或者正好跨月。
 				重新走一遍即可，换一个短码没有副作用。
 			*/
 			continue
@@ -152,8 +172,8 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 }
 
 /*
-quotaExceeded 复查租户是否真的没有配额。
-插入语句只在租户存在且计数已满时不返回行；租户不存在时链接照常写入，
+quotaExceeded 用和创建语句相同的「有效已用量」复查租户是否真的没有配额。
+插入语句只在租户存在且本月用量已满时不返回行；租户不存在时链接照常写入，
 所以查不到租户按「没有超配额」处理，交给调用方走其他分支。
 */
 func (s *Store) quotaExceeded(ctx context.Context, tenantID int64) (bool, error) {

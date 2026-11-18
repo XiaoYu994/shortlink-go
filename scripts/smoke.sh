@@ -348,19 +348,26 @@ status=$(request "$REDIRECTOR_BASE" GET "/r/$expired_code")
 assert_eq "$status" 404 '过期后不跳转'
 
 echo 'smoke: quota'
-# 把冒烟租户的配额压到当前链接数（含刚过期的链接），下一次创建应被拒绝。
-# 链接在删除时才释放配额，过期不释放。
+# 把冒烟租户的配额压到本月已创建数，下一次创建应被拒绝。
+# 配额按每月创建数计：删除不返还，跨月（UTC 自然月）才重新从 0 计。
 psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
-	"UPDATE tenants SET link_quota = link_count WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	"UPDATE tenants SET link_quota = link_usage WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
 	|| fail '设置冒烟租户配额失败'
 status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/over-quota"}')
-assert_eq "$status" 403 '超过链接配额'
+assert_eq "$status" 403 '超过本月链接配额'
 grep -q '"link quota exceeded"' "$TMP/body" || fail "配额不足的响应体不对: $(cat "$TMP/body")"
 
 status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$expired_code")
-assert_eq "$status" 204 '删除过期链接释放配额'
-status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/after-quota-release"}')
-assert_eq "$status" 201 '删除链接后可以继续创建'
+assert_eq "$status" 204 '删除链接'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/after-delete"}')
+assert_eq "$status" 403 '删除链接不返还配额'
+
+# 把用量所属月份改成上个月，创建语句懒重置后应恢复额度。
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+	"UPDATE tenants SET link_usage_month = (date_trunc('month', now() AT TIME ZONE 'UTC') - interval '1 month')::date WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	|| fail '把冒烟租户用量改到上个月失败'
+status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/new-month"}')
+assert_eq "$status" 201 '跨月后恢复链接配额'
 psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
 	"UPDATE tenants SET link_quota = 1000 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
 	|| fail '恢复冒烟租户配额失败'

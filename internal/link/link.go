@@ -29,9 +29,10 @@ const MaxURLLength = 2048
 var ErrNotFound = errors.New("link not found")
 
 /*
-ErrQuotaExceeded 表示租户的链接数已经达到配额，不能再创建。
-配额由 tenants.link_count 和 tenants.link_quota 在写库时原子判断；
-HTTP 层用 errors.Is 映射成 403。删除链接会释放配额。
+ErrQuotaExceeded 表示租户本月（UTC 自然月）的创建配额已经用完，不能再创建。
+配额由 tenants.link_usage、link_usage_month 和 link_quota 在写库时原子判断；
+HTTP 层用 errors.Is 映射成 403。删除链接不返还配额，
+下个月 1 日 00:00 UTC 起用量重新从 0 计。
 */
 var ErrQuotaExceeded = errors.New("link quota exceeded")
 

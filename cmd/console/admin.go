@@ -26,8 +26,9 @@ const usageText = `用法:
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期。
 --name 会新建租户；已有租户用 --tenant。密钥和租户命令只读 DATABASE_URL，不连接 Redis。
-tenant show 看配额和限流；set 至少给一个选项。--link-quota 是链接总数上限，
---rate-limit 是管理 API 每秒请求数，0 表示不限制。
+tenant show 看本月用量、配额和限流；set 至少给一个选项。--link-quota 是每个 UTC
+自然月最多能创建的链接数，0 表示不能创建；--rate-limit 是管理 API 每秒请求数，
+0 表示不限制。
 `
 
 func writeUsage(w io.Writer) {
@@ -202,7 +203,7 @@ parseTenantSet 至少要求一个限制选项。
 func parseTenantSet(args []string, stderr io.Writer) (command, error) {
 	fs := newFlagSet("tenant set", stderr)
 	tenantID := fs.Int64("tenant", 0, "租户 ID")
-	linkQuota := fs.Int64("link-quota", 0, "链接总数上限")
+	linkQuota := fs.Int64("link-quota", 0, "每个 UTC 自然月最多创建的链接数")
 	rateLimit := fs.Int("rate-limit", 0, "管理 API 每秒请求数，0 表示不限制")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -244,11 +245,11 @@ func parseTenantSet(args []string, stderr io.Writer) (command, error) {
 }
 
 func printTenantLimits(w io.Writer, limits postgres.TenantLimits) error {
-	if _, err := fmt.Fprint(w, "id\tname\tlink_count\tlink_quota\trate_limit_per_second\n"); err != nil {
+	if _, err := fmt.Fprint(w, "id\tname\tlink_usage\tlink_quota\trate_limit_per_second\n"); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintf(w, "%d\t%s\t%d\t%d\t%d\n",
-		limits.ID, limits.Name, limits.LinkCount, limits.LinkQuota, limits.RateLimit)
+		limits.ID, limits.Name, limits.LinkUsage, limits.LinkQuota, limits.RateLimit)
 	return err
 }
 

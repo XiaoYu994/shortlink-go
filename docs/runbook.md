@@ -698,10 +698,10 @@ make console ARGS="key revoke --id 1"
 
 ## 查看和调整租户配额与限流
 
-租户行上有三个值：`link_count`（当前拥有的链接数，含已过期链接）、`link_quota`（链接总数上限，默认 1000）、`rate_limit_per_second`（管理 API 每秒请求数，默认 10）。用运维命令查看和修改，不给管理 API 加写接口。命令只连 PostgreSQL，不连接 Redis。
+租户行上有几个值：`link_usage`（本月，即 UTC 自然月，已创建的链接数，删除不减）、`link_usage_month`（这个用量属于哪个月）、`link_quota`（每月创建上限，默认 1000）、`rate_limit_per_second`（管理 API 每秒请求数，默认 10）。用运维命令查看和修改，不给管理 API 加写接口。命令只连 PostgreSQL，不连接 Redis。
 
 ```bash
-# 当前值：id、name、link_count、link_quota、rate_limit_per_second
+# 当前值：id、name、link_usage、link_quota、rate_limit_per_second
 make console ARGS="tenant show --tenant 1"
 
 # 调低链接配额，或只改限流；可以两个一起给
@@ -709,22 +709,18 @@ make console ARGS="tenant set --tenant 1 --link-quota 500"
 make console ARGS="tenant set --tenant 1 --rate-limit 20"
 make console ARGS="tenant set --tenant 1 --link-quota 500 --rate-limit 20"
 
-# 0 表示不限流；link_quota 为 0 表示不能再创建
+# 0 表示不限流；link_quota 为 0 表示不能创建
 make console ARGS="tenant set --tenant 1 --rate-limit 0"
 ```
 
 规则：
 
-- 配额满时 `POST /api/v1/links` 返回 403 `{"error":"link quota exceeded"}`。过期链接仍占配额，删除链接才释放一个名额。
-- `link_quota` 调到 `link_count` 以下不会删除已有链接，只是在删除腾出配额前不能新建。
+- 配额满时 `POST /api/v1/links` 返回 403 `{"error":"link quota exceeded"}`。计的是创建动作：链接过期或删除都不返还额度，每月 1 日 00:00 UTC 起用量重新从 0 计。
+- `link_quota` 调到本月 `link_usage` 以下时，本月不能再创建，下月恢复；已有链接不受影响。
+- 要临时放宽只能调高 `link_quota`；没有清零本月用量的命令。
+- 用量不能再从 `links` 重算：删除是硬删除，本月创建后又删掉的链接数不回来，绕过应用直接往 `links` 插行也不会计入。不要手工改 `link_usage` 对账。
 - 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
-- 绕过应用直接改 `links` 会让 `link_count` 漂移。需要时按实际情况重算：
-
-```sql
-UPDATE tenants t
-SET link_count = (SELECT count(*) FROM links l WHERE l.tenant_id = t.id);
-```
 
 ## 创建一条短链
 

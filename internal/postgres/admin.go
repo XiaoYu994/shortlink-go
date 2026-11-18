@@ -206,7 +206,7 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 }
 
 /*
-Delete 硬删除链接和它的统计行，放在同一个事务里，最后释放一条配额。
+Delete 硬删除链接和它的统计行，放在同一个事务里。
 
 先 FOR UPDATE 锁住这一条链接，再按固定顺序删三张统计表：
 link_clicks_daily、link_dimension_daily、link_visitors_daily。
@@ -214,9 +214,8 @@ RecordClicks 用同一顺序：先按 id 锁 links，再写这三张表。
 顺序相反时，删除持有链接、点击持有日表行，两边互相等待，
 PostgreSQL 会判死锁并回滚其中一方。
 
-tenants 行放在最后更新。创建是先加 tenants.link_count、再插入新的 links 行，
-不会去锁已存在的链接行；删除先锁链接再等 tenants，两边没有环。
-计数用 GREATEST 兜底，外部把 link_count 改小之后也不会减成负数。
+删除不返还本月配额，也不再更新 tenants 行（ADR 0015），
+所以删除不会和同租户的创建争租户行锁。
 */
 func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -243,10 +242,6 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("delete link: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE tenants SET link_count = GREATEST(link_count - 1, 0) WHERE id = $1`, tenantID); err != nil {
-		return fmt.Errorf("release link quota: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete link: %w", err)
 	}
@@ -255,20 +250,20 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 
 /*
 TenantLimits 是租户配额和限流的运维视图。
-LinkCount 是当前拥有的链接数（含已过期链接），LinkQuota 是总数上限，
+LinkUsage 是本自然月（UTC）已创建的链接数，删除不返还；LinkQuota 是每月上限，
 RateLimit 是管理 API 每秒请求数，0 表示不限制。
 */
 type TenantLimits struct {
 	ID        int64
 	Name      string
-	LinkCount int64
+	LinkUsage int64
 	LinkQuota int64
 	RateLimit int
 }
 
 /*
 SetTenantLimitsParams 只修改非 nil 的字段。
-LinkQuota 调低到当前 LinkCount 以下时，已有链接不受影响，但在删除腾出配额前不能新建。
+LinkQuota 调低到本月 LinkUsage 以下时，本月不能再创建，下月恢复；已有链接不受影响。
 */
 type SetTenantLimitsParams struct {
 	LinkQuota *int64
@@ -283,7 +278,12 @@ var (
 )
 
 const (
-	tenantLimitColumns = `id, name, link_count, link_quota, rate_limit_per_second`
+	/*
+		SELECT 和 UPDATE ... RETURNING 都要回显「有效已用量」：跨月后、当月第一次
+		创建前，直接读 link_usage 会看到上个月的数。UPDATE 的 RETURNING 里求值的是
+		更新后的行，link_usage 和 link_usage_month 没有被 SET 改动，结果和 SELECT 一致。
+	*/
+	tenantLimitColumns = `id, name, (` + effectiveUsageSQL + `) AS link_usage, link_quota, rate_limit_per_second`
 
 	getTenantLimitsSQL = `SELECT ` + tenantLimitColumns + ` FROM tenants WHERE id = $1`
 
@@ -300,6 +300,7 @@ RETURNING ` + tenantLimitColumns
 
 /*
 GetTenantLimits 读一个租户的配额和限流配置。
+LinkUsage 用「有效已用量」：记录的月份早于当前月时返回 0，不返回上个月的数。
 租户不存在返回 ErrTenantNotFound，避免把写错的 ID 看成全是默认值。
 */
 func (s *Store) GetTenantLimits(ctx context.Context, tenantID int64) (TenantLimits, error) {
@@ -357,7 +358,7 @@ func (s *Store) SetTenantLimits(ctx context.Context, tenantID int64, p SetTenant
 
 func scanTenantLimits(scanner rowScanner) (TenantLimits, error) {
 	var got TenantLimits
-	err := scanner.Scan(&got.ID, &got.Name, &got.LinkCount, &got.LinkQuota, &got.RateLimit)
+	err := scanner.Scan(&got.ID, &got.Name, &got.LinkUsage, &got.LinkQuota, &got.RateLimit)
 	return got, err
 }
 

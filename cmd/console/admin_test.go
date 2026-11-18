@@ -152,7 +152,7 @@ func TestConsoleIssueForExistingTenant(t *testing.T) {
 }
 
 func TestConsoleTenantShowAndSet(t *testing.T) {
-	limits := postgres.TenantLimits{ID: 7, Name: "acme", LinkCount: 3, LinkQuota: 1000, RateLimit: 10}
+	limits := postgres.TenantLimits{ID: 7, Name: "acme", LinkUsage: 3, LinkQuota: 1000, RateLimit: 10}
 	store := &fakeAdmin{limits: limits}
 	open := func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
@@ -165,7 +165,7 @@ func TestConsoleTenantShowAndSet(t *testing.T) {
 	if store.shown != 7 {
 		t.Fatalf("shown tenant = %d, want 7", store.shown)
 	}
-	want := "id\tname\tlink_count\tlink_quota\trate_limit_per_second\n7\tacme\t3\t1000\t10\n"
+	want := "id\tname\tlink_usage\tlink_quota\trate_limit_per_second\n7\tacme\t3\t1000\t10\n"
 	if stdout.String() != want {
 		t.Fatalf("show stdout = %q, want %q", stdout.String(), want)
 	}

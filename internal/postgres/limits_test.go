@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"shortlink/internal/link"
 	"shortlink/internal/tenant"
@@ -19,22 +20,138 @@ func setTenantQuota(t *testing.T, store *Store, tenantID, quota int64) {
 	}
 }
 
-func countTenantLinks(t *testing.T, store *Store, tenantID int64) (links, counted int64) {
+/*
+setTenantUsage 把已用量和它所属的月份写成指定值，monthOffset 是相对数据库当前 UTC 月份的月数：
+-1 是上个月，0 是本月，1 是下个月。测试改不了数据库时钟，用月份偏移造跨月和时钟偏差；
+月份从数据库算，不写死某一天。
+*/
+func setTenantUsage(t *testing.T, store *Store, tenantID, usage int64, monthOffset int) {
+	t.Helper()
+	query := `UPDATE tenants
+SET link_usage = $2,
+    link_usage_month = (` + currentMonthSQL + ` + make_interval(months => $3::int))::date
+WHERE id = $1`
+	if _, err := store.db.Exec(query, tenantID, usage, monthOffset); err != nil {
+		t.Fatalf("set tenant usage: %v", err)
+	}
+}
+
+// readTenantUsage 读原始的用量列，不做有效已用量的判断：测试要同时断言用量和月份。
+func readTenantUsage(t *testing.T, store *Store, tenantID int64) (usage int64, month string) {
+	t.Helper()
+	var got time.Time
+	if err := store.db.QueryRow(
+		`SELECT link_usage, link_usage_month FROM tenants WHERE id = $1`, tenantID).Scan(&usage, &got); err != nil {
+		t.Fatalf("read tenant usage: %v", err)
+	}
+	return usage, got.UTC().Format(time.DateOnly)
+}
+
+// monthAtOffset 返回相对数据库当前 UTC 月份偏移的月份，用于断言月份写到了哪一个月。
+func monthAtOffset(t *testing.T, store *Store, offset int) string {
+	t.Helper()
+	var got time.Time
+	if err := store.db.QueryRow(
+		`SELECT (`+currentMonthSQL+` + make_interval(months => $1::int))::date`, offset).Scan(&got); err != nil {
+		t.Fatalf("query month: %v", err)
+	}
+	return got.UTC().Format(time.DateOnly)
+}
+
+func countTenantLinks(t *testing.T, store *Store, tenantID int64) (links, usage int64) {
 	t.Helper()
 	if err := store.db.QueryRow(`SELECT count(*) FROM links WHERE tenant_id = $1`, tenantID).Scan(&links); err != nil {
 		t.Fatalf("count links: %v", err)
 	}
-	if err := store.db.QueryRow(`SELECT link_count FROM tenants WHERE id = $1`, tenantID).Scan(&counted); err != nil {
-		t.Fatalf("read link_count: %v", err)
+	if err := store.db.QueryRow(`SELECT link_usage FROM tenants WHERE id = $1`, tenantID).Scan(&usage); err != nil {
+		t.Fatalf("read link_usage: %v", err)
 	}
-	return links, counted
+	return links, usage
 }
 
 /*
-TestCreateEnforcesQuotaAndDeleteReleases 覆盖配额的完整生命周期：
-满额后创建返回 ErrQuotaExceeded，过期链接仍然占配额，删除释放配额。
+TestCreateResetsStaleMonth 验证跨月懒重置：上个月已经用满配额，本月第一次创建成功，
+用量从 1 重新计，月份写成当前月。
 */
-func TestCreateEnforcesQuotaAndDeleteReleases(t *testing.T) {
+func TestCreateResetsStaleMonth(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	setTenantQuota(t, store, tenantID, 2)
+	setTenantUsage(t, store, tenantID, 2, -1)
+
+	if err := store.Create(context.Background(), mustLink(t, "https://example.com/new-month", tenantID)); err != nil {
+		t.Fatalf("Create after month rollover: %v", err)
+	}
+	usage, month := readTenantUsage(t, store, tenantID)
+	if usage != 1 {
+		t.Fatalf("link_usage = %d, want 1", usage)
+	}
+	if want := monthAtOffset(t, store, 0); month != want {
+		t.Fatalf("link_usage_month = %s, want current month %s", month, want)
+	}
+}
+
+// TestCreateDoesNotResetFutureMonth 验证月份只前进不后退：记录晚于当前月时照常加一，月份不变。
+func TestCreateDoesNotResetFutureMonth(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	setTenantQuota(t, store, tenantID, 10)
+	setTenantUsage(t, store, tenantID, 3, 1)
+
+	if err := store.Create(context.Background(), mustLink(t, "https://example.com/future-month", tenantID)); err != nil {
+		t.Fatalf("Create with future month: %v", err)
+	}
+	usage, month := readTenantUsage(t, store, tenantID)
+	if usage != 4 {
+		t.Fatalf("link_usage = %d, want 4", usage)
+	}
+	if want := monthAtOffset(t, store, 1); month != want {
+		t.Fatalf("link_usage_month = %s, want unchanged future month %s", month, want)
+	}
+}
+
+/*
+TestCreateRejectsExhaustedQuota 验证三种拒绝：本月用满、配额为 0、配额为 0 且月份过期。
+拒绝时不写链接，也不改写租户行；最后一种同时确认月份不会被 UPDATE 提前推进。
+*/
+func TestCreateRejectsExhaustedQuota(t *testing.T) {
+	tests := []struct {
+		name        string
+		quota       int64
+		usage       int64
+		monthOffset int
+	}{
+		{name: "month full", quota: 2, usage: 2, monthOffset: 0},
+		{name: "zero quota", quota: 0, usage: 0, monthOffset: 0},
+		{name: "zero quota with stale month", quota: 0, usage: 0, monthOffset: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, tenantID := newTestStore(t)
+			setTenantQuota(t, store, tenantID, tt.quota)
+			setTenantUsage(t, store, tenantID, tt.usage, tt.monthOffset)
+			beforeUsage, beforeMonth := readTenantUsage(t, store, tenantID)
+
+			err := store.Create(context.Background(), mustLink(t, "https://example.com/over-quota", tenantID))
+			if !errors.Is(err, link.ErrQuotaExceeded) {
+				t.Fatalf("Create error = %v, want ErrQuotaExceeded", err)
+			}
+
+			afterUsage, afterMonth := readTenantUsage(t, store, tenantID)
+			if afterUsage != beforeUsage || afterMonth != beforeMonth {
+				t.Fatalf("tenant row changed: usage %d -> %d, month %s -> %s",
+					beforeUsage, afterUsage, beforeMonth, afterMonth)
+			}
+			if links, _ := countTenantLinks(t, store, tenantID); links != 0 {
+				t.Fatalf("links = %d, want 0", links)
+			}
+		})
+	}
+}
+
+/*
+TestDeleteDoesNotReleaseQuota 验证删除不返还配额：
+用满后过期一条链接仍然不能创建；删掉它之后用量不变，也仍然不能创建。
+*/
+func TestDeleteDoesNotReleaseQuota(t *testing.T) {
 	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 	setTenantQuota(t, store, tenantID, 2)
@@ -42,44 +159,55 @@ func TestCreateEnforcesQuotaAndDeleteReleases(t *testing.T) {
 	first := createLink(t, store, tenantID, "https://example.com/first")
 	createLink(t, store, tenantID, "https://example.com/second")
 
-	err := store.Create(ctx, mustLink(t, "https://example.com/third", tenantID))
-	if !errors.Is(err, link.ErrQuotaExceeded) {
-		t.Fatalf("Create over quota error = %v, want ErrQuotaExceeded", err)
-	}
-
-	// 过期链接仍然存在、仍然可管理，也仍然占配额（ADR 0011）。
-	if _, err := store.db.Exec(`UPDATE links SET expires_at = now() - interval '1 minute' WHERE id = $1`, first.ID); err != nil {
+	// 过期不改变用量：配额数的是创建动作，不是当前有效链接数。
+	if _, err := store.db.Exec(
+		`UPDATE links SET expires_at = now() - interval '1 minute' WHERE id = $1`, first.ID); err != nil {
 		t.Fatalf("expire link: %v", err)
 	}
 	if err := store.Create(ctx, mustLink(t, "https://example.com/still-full", tenantID)); !errors.Is(err, link.ErrQuotaExceeded) {
 		t.Fatalf("Create with an expired link error = %v, want ErrQuotaExceeded", err)
 	}
 
-	if links, counted := countTenantLinks(t, store, tenantID); links != 2 || counted != 2 {
-		t.Fatalf("links = %d, link_count = %d, want 2 and 2", links, counted)
-	}
-
 	if err := store.Delete(ctx, tenantID, first.Code); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if links, counted := countTenantLinks(t, store, tenantID); links != 1 || counted != 1 {
-		t.Fatalf("after delete links = %d, link_count = %d, want 1 and 1", links, counted)
+	if links, usage := countTenantLinks(t, store, tenantID); links != 1 || usage != 2 {
+		t.Fatalf("after delete links = %d, link_usage = %d, want 1 and 2", links, usage)
 	}
-	createLink(t, store, tenantID, "https://example.com/after-delete")
-	if links, counted := countTenantLinks(t, store, tenantID); links != 2 || counted != 2 {
-		t.Fatalf("after refill links = %d, link_count = %d, want 2 and 2", links, counted)
+	if err := store.Create(ctx, mustLink(t, "https://example.com/after-delete", tenantID)); !errors.Is(err, link.ErrQuotaExceeded) {
+		t.Fatalf("Create after delete error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+// TestDeleteDoesNotTouchUsage 验证删除事务不再改写租户行：外部把用量改小后，删除也保持原值。
+func TestDeleteDoesNotTouchUsage(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	l := createLink(t, store, tenantID, "https://example.com/floor")
+	setTenantUsage(t, store, tenantID, 0, -1)
+	beforeUsage, beforeMonth := readTenantUsage(t, store, tenantID)
+
+	if err := store.Delete(ctx, tenantID, l.Code); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	afterUsage, afterMonth := readTenantUsage(t, store, tenantID)
+	if afterUsage != beforeUsage || afterMonth != beforeMonth {
+		t.Fatalf("tenant row changed: usage %d -> %d, month %s -> %s",
+			beforeUsage, afterUsage, beforeMonth, afterMonth)
 	}
 }
 
 /*
-TestCreateConcurrentRespectsQuota 用 20 个并发创建撞 5 个配额。
-计数和插入在同一条语句里，成功的次数必须正好等于配额，不能多写一条。
+TestCreateConcurrentRespectsMonthlyQuota 用 20 个并发创建撞一个上个月用满、配额为 5 的租户。
+重置和加一在同一条 UPDATE 里，成功的次数必须正好等于配额，不能多写一条。
 */
-func TestCreateConcurrentRespectsQuota(t *testing.T) {
+func TestCreateConcurrentRespectsMonthlyQuota(t *testing.T) {
 	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 	const quota = 5
 	setTenantQuota(t, store, tenantID, quota)
+	setTenantUsage(t, store, tenantID, quota, -1)
 
 	const workers = 20
 	links := make([]*link.Link, workers)
@@ -118,25 +246,11 @@ func TestCreateConcurrentRespectsQuota(t *testing.T) {
 	if created != quota || denied != workers-quota {
 		t.Fatalf("created = %d, denied = %d, want %d and %d", created, denied, quota, workers-quota)
 	}
-	if links, counted := countTenantLinks(t, store, tenantID); links != quota || counted != quota {
-		t.Fatalf("links = %d, link_count = %d, want %d and %d", links, counted, quota, quota)
+	if links, usage := countTenantLinks(t, store, tenantID); links != quota || usage != quota {
+		t.Fatalf("links = %d, link_usage = %d, want %d and %d", links, usage, quota, quota)
 	}
-}
-
-// TestDeleteDoesNotGoBelowZero 验证计数被外部改小后，删除不会把它减成负数。
-func TestDeleteDoesNotGoBelowZero(t *testing.T) {
-	store, tenantID := newTestStore(t)
-	ctx := context.Background()
-
-	l := createLink(t, store, tenantID, "https://example.com/floor")
-	if _, err := store.db.Exec(`UPDATE tenants SET link_count = 0 WHERE id = $1`, tenantID); err != nil {
-		t.Fatalf("reset link_count: %v", err)
-	}
-	if err := store.Delete(ctx, tenantID, l.Code); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if _, counted := countTenantLinks(t, store, tenantID); counted != 0 {
-		t.Fatalf("link_count = %d, want 0", counted)
+	if _, month := readTenantUsage(t, store, tenantID); month != monthAtOffset(t, store, 0) {
+		t.Fatalf("link_usage_month = %s, want current month %s", month, monthAtOffset(t, store, 0))
 	}
 }
 
@@ -167,6 +281,7 @@ func TestAuthenticateReturnsRateLimit(t *testing.T) {
 
 /*
 TestTenantLimits 验证运维命令背后的读写：默认值、只改一个字段、非法参数和租户不存在。
+Get 和 Set 的回显都用有效已用量，月份过期时返回 0，而不是上个月的数。
 */
 func TestTenantLimits(t *testing.T) {
 	store, tenantID := newTestStore(t)
@@ -176,7 +291,7 @@ func TestTenantLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTenantLimits: %v", err)
 	}
-	want := TenantLimits{ID: tenantID, Name: "test", LinkCount: 0, LinkQuota: 1000, RateLimit: 10}
+	want := TenantLimits{ID: tenantID, Name: "test", LinkUsage: 0, LinkQuota: 1000, RateLimit: 10}
 	if got != want {
 		t.Fatalf("GetTenantLimits = %+v, want %+v", got, want)
 	}
@@ -187,8 +302,8 @@ func TestTenantLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetTenantLimits rate: %v", err)
 	}
-	if got.LinkQuota != 1000 || got.RateLimit != 0 || got.LinkCount != 1 {
-		t.Fatalf("after rate update = %+v, want quota 1000, rate 0, count 1", got)
+	if got.LinkQuota != 1000 || got.RateLimit != 0 || got.LinkUsage != 1 {
+		t.Fatalf("after rate update = %+v, want quota 1000, rate 0, usage 1", got)
 	}
 
 	quota := int64(5)
@@ -198,6 +313,24 @@ func TestTenantLimits(t *testing.T) {
 	}
 	if got.LinkQuota != 5 || got.RateLimit != 0 {
 		t.Fatalf("after quota update = %+v, want quota 5, rate 0", got)
+	}
+
+	// 月份过期时 Get 和 Set 的回显都按 0 算，不暴露上个月的用量。
+	setTenantUsage(t, store, tenantID, 9, -1)
+	got, err = store.GetTenantLimits(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("GetTenantLimits stale month: %v", err)
+	}
+	if got.LinkUsage != 0 {
+		t.Fatalf("GetTenantLimits stale month usage = %d, want 0", got.LinkUsage)
+	}
+	rate = 5
+	got, err = store.SetTenantLimits(ctx, tenantID, SetTenantLimitsParams{RateLimit: &rate})
+	if err != nil {
+		t.Fatalf("SetTenantLimits stale month: %v", err)
+	}
+	if got.LinkUsage != 0 {
+		t.Fatalf("SetTenantLimits stale month usage = %d, want 0", got.LinkUsage)
 	}
 
 	if _, err := store.SetTenantLimits(ctx, tenantID, SetTenantLimitsParams{}); !errors.Is(err, ErrNoLimitChange) {
