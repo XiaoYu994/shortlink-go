@@ -61,8 +61,8 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 }
 
 /*
-GetByCode 按短码查找链接。找不到或已过期都返回 link.ErrNotFound，
-过期行仍留在 map 里，短码继续占着。
+GetByCode 按短码查找链接。找不到、已过期、已停用或已封禁都返回 link.ErrNotFound，
+这些行仍留在 map 里，短码继续占着。
 返回的 Link 是副本，调用方修改它不会影响存储里的数据。
 */
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
@@ -74,18 +74,26 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 	defer s.mu.RUnlock()
 
 	l, ok := s.links[code]
-	if !ok || l.Expired(time.Now()) {
+	if !ok || !l.Servable(time.Now()) {
 		return nil, link.ErrNotFound
 	}
 	l = copyLink(l)
 	return &l, nil
 }
 
-// copyLink 复制链接，并让 ExpiresAt 指向一块新的时间。
+// copyLink 复制链接，并让指针字段各指向一块新的内存。
 func copyLink(l link.Link) link.Link {
 	if l.ExpiresAt != nil {
 		t := *l.ExpiresAt
 		l.ExpiresAt = &t
+	}
+	if l.DisabledAt != nil {
+		t := *l.DisabledAt
+		l.DisabledAt = &t
+	}
+	if l.Ban != nil {
+		ban := *l.Ban
+		l.Ban = &ban
 	}
 	return l
 }

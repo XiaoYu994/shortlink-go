@@ -62,3 +62,4 @@
 - 管理员命令在 `cmd/console`：`key issue`、`key list`、`key revoke`。`cmd/server` 在拆分完成前继续提供全部 HTTP。命令不依赖 Redis。空库要先签发一把密钥，创建接口才调得通。不要加公开的签发路由。
 - handler 只读 context 里的租户。以后加会话或网关中间件时，不改创建逻辑。
 - 2026-11-15：拆分落地，`cmd/server` 已删除。本机 redirector 监听 `:8080`，console 用 `console serve` 监听 `:8081`；两个进程各自暴露指标，`make smoke` 同时启动两边。
+- 2026-11-18：`console link ban/unban` 是第一组需要 Redis 的运维命令：封禁和解封要先写数据库，再覆盖缓存，缓存写失败要报给操作的人（[ADR 0016](0016-link-states-and-takedown.md)）。`key`、`tenant` 命令不变，仍然只连 PostgreSQL。

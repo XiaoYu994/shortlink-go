@@ -86,7 +86,7 @@ make run-redirector   # 公开跳转，ADDR，默认 :8080
 make run-console      # 管理 API，CONSOLE_ADDR，默认 :8081
 ```
 
-看到 `connected to postgres`、`connected to redis` 和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥命令 `make console ...` 不启动 HTTP，也不需要 Redis。
+看到 `connected to postgres`、`connected to redis` 和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥和租户命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 需要 Redis。
 
 检查：
 
@@ -131,7 +131,7 @@ curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `process_*`：进程 CPU、内存、文件描述符，一启动就有
 - `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），每个进程各一份，一启动就有
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`
-- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`quota_exceeded`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 调过管理接口后出现对应操作
+- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`；`result` 为 `success`、`not_found`、`quota_exceeded`、`banned`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 的 HTTP 进程调过管理接口后出现对应操作；管理写写完正缓存后的复查也会多出 `operation="get"`。`ban`、`unban` 是装饰器的标签，`console link` 不经过它，也不会出现在 `/metrics` 里
 - `shortlink_rate_limited_total`：被按租户限流拒绝的管理请求数，没有 label。两个进程都暴露，只有 console 会累加；对照 `shortlink_http_requests_total{status="429"}` 看是哪个接口
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。只有 redirector 读取，发生过跳转才出现
 - `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。只有 redirector 有；按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
@@ -148,9 +148,10 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
 - 正缓存 TTL 取剩余寿命和 1 小时里更短的那个；没有到期时间时是 1 小时。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
-- 回源写缓存（正、负）都用 `SET NX`，只有 key 不存在时才写。console 在创建、修改、删除提交后无条件覆盖缓存；删除写负缓存，修改后的链接已过期也写负缓存。这样在途旧回源不会盖掉管理写的新值。
+- 回源写缓存（正、负）都用 `SET NX`，只有 key 不存在时才写。console 在创建、修改、删除、封禁、解封提交后无条件覆盖缓存；删除和封禁写负缓存，修改后的链接不可跳转也写负缓存，解封后如果仍然停用或过期同样写负缓存。这样在途旧回源不会盖掉管理写的新值。
+- 写完正缓存后 console 会按跳转查询复查一次库：读不到就补写负缓存，读库失败也补写并记日志（复查偏向不跳转），盖掉下架和管理写交错时晚到的正缓存。
 - 并发未命中用 singleflight 合并回源。普通未命中和 Redis 读失败（fallback）各有一条回源限流：许可数分别是 `CACHE_MISS_CONCURRENCY`（默认 8）和固定 8，拿不到许可立即返回 503。单次回源超时由 `CACHE_FETCH_TIMEOUT`（默认 1s）控制，独立于 `REQUEST_TIMEOUT`。启动时 Ping 失败进程会退出，属于部署配置错误。
-- 修改或删除后 Redis 写失败只影响一致性：旧值可能保留到 TTL，下一次写路径会自愈。删除不是强撤销，已经在途的跳转仍可能返回 302。
+- 修改或删除后 Redis 写失败只影响一致性：旧值可能保留到 TTL，下一次写路径会自愈。删除不是强撤销，已经在途的跳转仍可能返回 302。封禁和解封例外：缓存没写上会返回错误，命令退出码非 0，按「封禁和解封链接」一节重跑。
 - 查看某个短码的缓存：
 
 ```bash
@@ -715,12 +716,38 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 
 规则：
 
-- 配额满时 `POST /api/v1/links` 返回 403 `{"error":"link quota exceeded"}`。计的是创建动作：链接过期或删除都不返还额度，每月 1 日 00:00 UTC 起用量重新从 0 计。
+- 配额满时 `POST /api/v1/links` 返回 403 `{"error":"link quota exceeded"}`。计的是创建动作：链接过期、停用、被封禁或删除都不返还额度，每月 1 日 00:00 UTC 起用量重新从 0 计。
 - `link_quota` 调到本月 `link_usage` 以下时，本月不能再创建，下月恢复；已有链接不受影响。
 - 要临时放宽只能调高 `link_quota`；没有清零本月用量的命令。
 - 用量不能再从 `links` 重算：删除是硬删除，本月创建后又删掉的链接数不回来，绕过应用直接往 `links` 插行也不会计入。不要手工改 `link_usage` 对账。
 - 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
+
+## 封禁和解封链接
+
+平台侧下架用运维命令，没有 HTTP 接口。命令需要 `DATABASE_URL` 和 `REDIS_URL`，先写数据库，再覆盖 Redis 缓存；`key`、`tenant` 命令不受影响，仍然只连 PostgreSQL。
+
+```bash
+make console ARGS="link ban --code abc12345 --reason phishing"
+make console ARGS="link unban --code abc12345"
+```
+
+`--reason` 必填，取 `phishing`、`malware`、`adult`、`gambling`、`drugs`、`spam`、`other`。来源固定记为 `operator`；以后风控调同一个存储入口，来源是 `risk`。命令按短码操作，不需要租户 ID，输出一行短码、状态和封禁信息。
+
+- 重复封禁保留第一次的时间、原因和来源，命令可以放心重跑；要改原因先解封再封禁。
+- 封禁后跳转返回 404，和不存在、过期、停用没有区别。租户的列表、详情和统计照常返回，`status` 是 `banned`，带 `banned_at` 和 `ban_reason`；`ban_source` 不对外。`PATCH` 和 `DELETE` 返回 403 `link is banned`，链接还在，租户不能改也不能删。
+- 解封后状态可能是 `active`，也可能仍然是 `disabled` 或 `expired`：停用和过期是独立的事实，解封只清掉封禁。解封后租户恢复修改和删除。
+- 误封用 `link unban` 解除。封禁期间不能改 URL，解封放行的就是当初封禁的那个地址。
+
+缓存没更新时命令退出码是 1，stderr 会说明数据库已经写成功：
+
+```txt
+console: 封禁 abc12345 已经写入数据库，但缓存没有更新：旧的正缓存最长还能跳转 1 小时；重跑同一条命令即可，操作幂等: ban link: cache not updated after successful write: set cache: ...
+```
+
+这时数据库已经封禁成功，只是 Redis 没写进去。重跑同一条命令即可，封禁幂等，重跑只是再写一次缓存。Redis 整个不可用时封禁照样落库，redirector 读缓存失败会回源数据库，回源查询已经过滤了封禁；但 Redis 恢复后旧的正缓存可能还在，必须重跑一次命令。没人重跑的最坏情况是旧正缓存活到 TTL，最长 1 小时。解封的提示和重跑方式相同。
+
+命令本身没有 `/metrics`：成败看退出码和上面的输出，不看 console 进程的指标。缓存写入记在命令自己的 Registry 里，进程退出就没了。
 
 ## 创建一条短链
 
@@ -822,7 +849,7 @@ make selfcheck        # test-db + verify + test-integration + smoke
 `make smoke` 会启动两个真实进程：redirector 默认 `127.0.0.1:18080`，console 默认 `127.0.0.1:18081`，
 可分别用 `SMOKE_REDIRECTOR_ADDR`、`SMOKE_CONSOLE_ADDR` 覆盖。它使用测试库和测试 Redis，
 验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、列表和三种排序、
-修改后缓存写穿、删除、统计、租户隔离、路由隔离和指标，最后用 SIGTERM 检查两个进程的优雅退出。
+修改后缓存写穿、停用和启用、封禁和解封、删除、统计、租户隔离、路由隔离和指标，最后用 SIGTERM 检查两个进程的优雅退出。
 脚本会自己设置一个 `VISITOR_SALT`（如果环境里没有）；同样会重建测试库，不碰开发库。
 
 测试配置在 `.env` 里：

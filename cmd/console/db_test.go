@@ -52,7 +52,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	externalID := "seam-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	var stdout, stderr bytes.Buffer
-	err = run([]string{"key", "issue", "--name", "seam", "--external-id", externalID}, &stdout, &stderr, openStore)
+	err = run([]string{"key", "issue", "--name", "seam", "--external-id", externalID}, &stdout, &stderr, openStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("issue: %v\nstderr: %s", err, stderr.String())
 	}
@@ -76,7 +76,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	err = run([]string{"key", "list", "--tenant", strconv.FormatInt(tenantID, 10)}, &stdout, &stderr, openStore)
+	err = run([]string{"key", "list", "--tenant", strconv.FormatInt(tenantID, 10)}, &stdout, &stderr, openStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("list: %v\nstderr: %s", err, stderr.String())
 	}
@@ -86,7 +86,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	err = run([]string{"key", "revoke", "--id", strconv.FormatInt(keyID, 10)}, &stdout, &stderr, openStore)
+	err = run([]string{"key", "revoke", "--id", strconv.FormatInt(keyID, 10)}, &stdout, &stderr, openStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("revoke: %v\nstderr: %s", err, stderr.String())
 	}

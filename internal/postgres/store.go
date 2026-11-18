@@ -64,11 +64,15 @@ WHERE EXISTS (SELECT 1 FROM quota)
    OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = $4)
 RETURNING id, created_at`
 	/*
-		过期行留在表里，短码继续占着。查询把它看成找不到。
-		到期时刻本身算过期，界限是 expires_at > now()。
+		过期、停用和封禁的行都留在表里，短码继续占着。查询把它们看成找不到。
+		到期时刻本身算过期，界限是 expires_at > now()；
+		disabled_at 和 banned_at 的过滤和 link.Servable 是同一组条件。
 	*/
 	getLinkSQL = `SELECT id, code, url, expires_at, created_at, tenant_id FROM ` + linksTable + `
-WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())`
+WHERE code = $1
+  AND (expires_at IS NULL OR expires_at > now())
+  AND disabled_at IS NULL
+  AND banned_at IS NULL`
 
 	// quotaExceededSQL 只在插入没有返回行时执行，也用有效已用量区分配额不足和租户不存在。
 	quotaExceededSQL = `SELECT (` + effectiveUsageSQL + `) >= link_quota FROM tenants WHERE id = $1`
@@ -189,8 +193,8 @@ func (s *Store) quotaExceeded(ctx context.Context, tenantID int64) (bool, error)
 }
 
 /*
-GetByCode 按短码查找链接，找不到或已过期都返回 link.ErrNotFound。
-过期行仍留在表里。
+GetByCode 按短码查找可跳转的链接，找不到、已过期、已停用或已封禁都返回 link.ErrNotFound。
+这些行仍留在表里。
 */
 func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	var l link.Link

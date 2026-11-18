@@ -57,6 +57,20 @@ func (s stubStore) Stats(context.Context, int64, string, time.Time, time.Time) (
 	return s.stats, nil
 }
 
+func (s stubStore) Ban(context.Context, string, link.BanReason, link.BanSource) (*link.Link, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.link, nil
+}
+
+func (s stubStore) Unban(context.Context, string) (*link.Link, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.link, nil
+}
+
 func TestCreateRecordsResult(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -136,11 +150,12 @@ func TestGetRecordsResult(t *testing.T) {
 }
 
 /*
-TestAdminOperationsRecordResult 锁住列表、详情、修改、删除和统计的 operation 标签。
-这五个方法共用 classifyResult；以前只有 Create 和 GetByCode 被断言过。
+TestAdminOperationsRecordResult 锁住列表、详情、修改、删除、统计和平台下架的 operation 标签。
+这些方法共用 classifyResult；以前只有 Create 和 GetByCode 被断言过。
 */
 func TestAdminOperationsRecordResult(t *testing.T) {
-	admin := &link.AdminLink{Link: link.Link{ID: 7, Code: "abc", URL: "https://example.com"}}
+	tracedLink := &link.Link{ID: 7, Code: "abc", URL: "https://example.com"}
+	admin := &link.AdminLink{Link: *tracedLink}
 	stats := &link.Stats{Code: "abc", TotalClicks: 4}
 	results := []struct {
 		name string
@@ -149,6 +164,8 @@ func TestAdminOperationsRecordResult(t *testing.T) {
 	}{
 		{"success", nil, resultSuccess},
 		{"not found", link.ErrNotFound, resultNotFound},
+		{"banned", link.ErrBanned, resultBanned},
+		{"wrapped banned", fmt.Errorf("update link: %w", link.ErrBanned), resultBanned},
 		{"canceled", context.Canceled, resultCanceled},
 		{"timeout", context.DeadlineExceeded, resultTimeout},
 		{"error", errors.New("db down"), resultError},
@@ -188,12 +205,26 @@ func TestAdminOperationsRecordResult(t *testing.T) {
 			}
 			return err
 		}},
+		{operationBan, func(t *testing.T, s *Store) error {
+			got, err := s.Ban(context.Background(), "abc", link.BanReasonPhishing, link.BanSourceOperator)
+			if err == nil && (got == nil || got.Code != tracedLink.Code) {
+				t.Errorf("Ban = %+v, want %s", got, tracedLink.Code)
+			}
+			return err
+		}},
+		{operationUnban, func(t *testing.T, s *Store) error {
+			got, err := s.Unban(context.Background(), "abc")
+			if err == nil && (got == nil || got.Code != tracedLink.Code) {
+				t.Errorf("Unban = %+v, want %s", got, tracedLink.Code)
+			}
+			return err
+		}},
 	}
 	for _, op := range ops {
 		for _, tt := range results {
 			t.Run(op.operation+" "+tt.name, func(t *testing.T) {
 				reg := prometheus.NewRegistry()
-				s := New(stubStore{admin: admin, stats: stats, err: tt.err}, reg)
+				s := New(stubStore{link: tracedLink, admin: admin, stats: stats, err: tt.err}, reg)
 				if err := op.call(t, s); !errors.Is(err, tt.err) {
 					t.Fatalf("%s error = %v, want %v", op.operation, err, tt.err)
 				}

@@ -228,7 +228,7 @@ func TestWriteNXCanceledDuringSetDoesNotCount(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.writeCache(ctx, keyPrefix+"x", &link.Link{Code: "x", URL: "https://example.com"}, writeNX)
+		_ = s.writeCache(ctx, keyPrefix+"x", &link.Link{Code: "x", URL: "https://example.com"}, writeNX)
 		close(done)
 	}()
 

@@ -12,17 +12,19 @@ import (
 
 /*
 updateLinkRequest 用 RawMessage 保留「字段没传」和「传了 null」的区别。
-*time.Time 区分不了这两种情况；语义由 ADR 0011 定，解析放在 decodeUpdateRequest。
+*time.Time、*bool 区分不了这两种情况；语义由 ADR 0011、ADR 0016 定，
+解析放在 decodeUpdateRequest。
 */
 type updateLinkRequest struct {
 	URL       json.RawMessage `json:"url"`
 	ExpiresAt json.RawMessage `json:"expires_at"`
+	Disabled  json.RawMessage `json:"disabled"`
 }
 
 /*
-handleUpdate 修改 url 和/或 expires_at，成功返回 200 和修改后的链接。
+handleUpdate 修改 url、expires_at 和/或停用状态，成功返回 200 和修改后的链接。
 不能改 code、tenant_id、created_at、clicks、clicks_today；
-未知字段、空对象和非法值返回 400。
+未知字段、空对象和非法值返回 400。被封禁的链接返回 403，对租户只读。
 */
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
@@ -60,7 +62,8 @@ decodeUpdateRequest 解析 PATCH 语义：
   - url 出现时必须按创建规则校验；
   - expires_at 出现且为字符串时必须是将来时间；
   - expires_at 出现且为 null 时清除过期时间；
-  - 两个字段都没出现、空对象和未知字段都返回 400。
+  - disabled 出现时必须是布尔值：true 停用，false 启用；
+  - 三个字段都没出现、空对象和未知字段都返回 400。
 */
 func decodeUpdateRequest(body []byte) (link.Update, error) {
 	var req updateLinkRequest
@@ -101,8 +104,20 @@ func decodeUpdateRequest(body []byte) (link.Update, error) {
 		}
 	}
 
+	if req.Disabled != nil {
+		// encoding/json 把 null 解进 bool 时返回 nil 并保持零值，必须显式区分。
+		if string(bytes.TrimSpace(req.Disabled)) == "null" {
+			return link.Update{}, badRequestError("invalid disabled")
+		}
+		var raw bool
+		if err := json.Unmarshal(req.Disabled, &raw); err != nil {
+			return link.Update{}, badRequestError("invalid disabled")
+		}
+		update.Disabled = &raw
+	}
+
 	if update.Empty() {
-		return link.Update{}, badRequestError("at least one of url or expires_at is required")
+		return link.Update{}, badRequestError("at least one of url, expires_at or disabled is required")
 	}
 	return update, nil
 }

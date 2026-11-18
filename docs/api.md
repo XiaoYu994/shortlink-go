@@ -13,14 +13,14 @@
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
 | console | `POST` | `/api/v1/links` | 创建短链 |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页 |
-| console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期链接 |
-| console | `PATCH` | `/api/v1/links/{code}` | 修改 `url` 和/或 `expires_at` |
+| console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接 |
+| console | `PATCH` | `/api/v1/links/{code}` | 修改 `url`、`expires_at` 和/或 `disabled` |
 | console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204 |
 | console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客 |
 
 本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。宿主机进程的入口是 `deploy/nginx.conf`，容器栈的入口是 `deploy/nginx.stack.conf`。两份都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 和 `/readyz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放，由这层反向代理不转发。
 
-管理 API 的租户只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不返回 403，也不透露链接是否存在。每个管理请求先鉴权、再按租户限流；超限返回 429 和 `Retry-After`。每个租户还有每月创建数配额，满了返回 403。两者都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
+管理 API 的租户只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不透露链接是否存在；自己的被封禁链接是例外，修改和删除返回 403。每个管理请求先鉴权、再按租户限流；超限返回 429 和 `Retry-After`。每个租户还有每月创建数配额，满了返回 403。两者都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
 
 ## 创建短链
 
@@ -41,7 +41,7 @@ Content-Type: application/json; charset=utf-8
 Location: /r/AbC123xy
 X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 
-{"code":"AbC123xy","url":"https://example.com/path?q=1","created_at":"2026-11-15T10:00:00Z","clicks":0,"clicks_today":0}
+{"code":"AbC123xy","url":"https://example.com/path?q=1","status":"active","created_at":"2026-11-15T10:00:00Z","clicks":0,"clicks_today":0}
 ```
 
 规则：
@@ -53,11 +53,11 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 - 请求体必须恰好是一个 JSON 值，尾部多余内容返回 400。
 - `expires_at` 可选，用 RFC3339 时间，例如 `"2026-12-01T00:00:00Z"`。省略或 `null` 表示永不过期。必须是将来的时间，到期时刻本身算过期。格式不对时错误信息是 `invalid expires_at`。过期后短码仍被占着，跳转返回 404。响应里带上同一个时刻；没有设置时响应不包含这个字段。
 - 未知字段返回 400。`expires_at` 拼错时如果被静默忽略，会创建一条永不过期的链接。
-- 响应新增 `created_at`、`clicks` 和 `clicks_today`；新链接的计数都是 0。这是兼容扩展，老客户端可以忽略。
+- 响应新增 `status`、`created_at`、`clicks` 和 `clicks_today`；新链接的 `status` 是 `active`，计数都是 0。这是兼容扩展，老客户端可以忽略。
 
 配额和限流：
 
-- 租户每个 UTC 自然月最多创建 `link_quota` 条链接（默认 1000），计的是创建动作：链接之后过期或删除都不返还额度。每月 1 日 00:00 UTC 起用量重新从 0 计，没用完的额度不结转。用完返回 403：
+- 租户每个 UTC 自然月最多创建 `link_quota` 条链接（默认 1000），计的是创建动作：链接之后过期、停用、被封禁或删除都不返还额度。每月 1 日 00:00 UTC 起用量重新从 0 计，没用完的额度不结转。用完返回 403：
 
   ```http
   HTTP/1.1 403 Forbidden
@@ -81,12 +81,13 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 
 ## 管理接口的链接表示
 
-详情、修改和列表项使用同一个对象：
+创建、详情、修改和列表项使用同一个对象：
 
 ```json
 {
   "code": "AbC123xy",
   "url": "https://example.com/path?q=1",
+  "status": "active",
   "expires_at": "2026-12-01T00:00:00Z",
   "created_at": "2026-11-15T10:00:00Z",
   "clicks": 42,
@@ -94,7 +95,18 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 }
 ```
 
-`expires_at` 为空时省略。`clicks` 是终身累计，`clicks_today` 是 UTC 今天的点击数。
+`expires_at`、`disabled_at`、`banned_at` 和 `ban_reason` 为空时省略。`clicks` 是终身累计，`clicks_today` 是 UTC 今天的点击数。
+
+`status` 总是有，按优先级取第一个成立的值：
+
+| `status` | 含义 | 谁可以撤销 |
+| --- | --- | --- |
+| `banned` | 平台封禁，附 `banned_at` 和 `ban_reason` | 只有平台 |
+| `disabled` | 租户停用，附 `disabled_at` | 租户 |
+| `expired` | 已过 `expires_at` | 租户改 `expires_at` |
+| `active` | 可以跳转 | — |
+
+几种状态可以同时成立，`status` 只是选择一个对外展示；比如已停用的链接再被封禁，解封后仍然是 `disabled`。`ban_reason` 取值为 `phishing`、`malware`、`adult`、`gambling`、`drugs`、`spam`、`other`。封禁来源 `ban_source` 不对外。客户端不要再根据 `expires_at` 自己推状态，直接读 `status`。
 
 ## 列表
 
@@ -111,12 +123,12 @@ curl -s localhost:8081/api/v1/links?limit=20 \
 | `sort` | `id`（默认）、`clicks`（历史累计）、`clicks_today`（今日） |
 | `cursor` | 上一页响应里的 `next_cursor`，原样传回；不透明 |
 
-列表固定降序，包含已过期链接，不提供状态过滤；客户端根据 `expires_at` 判断。列表只有当前租户的行。
+列表固定降序，包含已过期、已停用和已封禁的链接，不提供状态过滤；客户端根据 `status` 判断。列表只有当前租户的行。
 
 ```json
 {
   "items": [
-    {"code":"AbC123xy","url":"https://example.com/path","created_at":"2026-11-15T10:00:00Z","clicks":42,"clicks_today":3}
+    {"code":"AbC123xy","url":"https://example.com/path","status":"active","created_at":"2026-11-15T10:00:00Z","clicks":42,"clicks_today":3}
   ],
   "next_cursor": "42:7"
 }
@@ -131,7 +143,7 @@ curl -s localhost:8081/api/v1/links/AbC123xy \
   -H 'Authorization: Bearer slk_...'
 ```
 
-返回 200 和链接对象。过期链接在管理视角仍然可见；不存在、已删除或其他租户的链接返回 404。
+返回 200 和链接对象。过期、停用和封禁的链接在管理视角仍然可见，`status` 标出它们的派生状态；被封禁的链接只读。不存在、已删除或其他租户的链接返回 404。
 
 ## 修改
 
@@ -142,18 +154,21 @@ curl -i -X PATCH localhost:8081/api/v1/links/AbC123xy \
   -d '{"url":"https://example.com/new","expires_at":null}'
 ```
 
-只处理 `url` 和 `expires_at`：
+只处理 `url`、`expires_at` 和 `disabled`：
 
 - `url` 出现时按创建规则校验。
 - `expires_at` 出现且为字符串时必须是将来时间。
 - `expires_at` 出现且为 `null` 时清除过期时间，改为永不过期。
-- 字段没出现时保持原值。
-- 空对象、两个字段都没出现、未知字段、尾部多余内容都返回 400。
+- `disabled` 出现且为 `true` 时停用，为 `false` 时启用；重复停用保留第一次的 `disabled_at`。`null` 和非布尔值返回 400。
+- 字段没出现时保持原值；三个字段都可以在一次请求里一起改。
+- 空对象、三个字段都没出现、未知字段、尾部多余内容都返回 400。
 - 不能改 `code`、`tenant_id`、`created_at`、`clicks`、`clicks_today`。
 
-成功返回 200 和修改后的链接对象。修改 URL 不改变过期状态；把 `expires_at` 改到将来可以让过期链接重新生效。修改采用最后提交者生效，不做 `If-Match` 或版本号。
+成功返回 200 和修改后的链接对象。修改 URL 不改变过期状态；把 `expires_at` 改到将来可以让过期链接重新生效。停用的链接仍然可以改 URL、改过期时间和删除。修改采用最后提交者生效，不做 `If-Match` 或版本号。
 
-修改提交后 console 会覆盖 Redis 缓存，之后开始的跳转看到新 URL。已经发出、正在处理的跳转仍可能按旧 URL 返回一次 302。
+被封禁的链接对租户只读：`PATCH` 返回 403 和 `{"error":"link is banned"}`，任何字段都不改。其他租户的链接不管封没封都是 404。封禁由平台运维命令执行，没有 HTTP 接口；命令和原因取值见 [runbook](runbook.md) 的「封禁和解封链接」。
+
+修改提交后 console 会覆盖 Redis 缓存，之后开始的跳转看到新值；链接不可跳转（过期、停用或封禁）时写负缓存，跳转直接 404。写完正缓存后还会按跳转查询复查一次库：如果链接已经被并发删除、停用或封禁，补写负缓存，盖掉这次晚到的正缓存（ADR 0016）。已经发出、正在处理的跳转仍可能按旧 URL 返回一次 302。
 
 ## 删除
 
@@ -163,6 +178,8 @@ curl -i -X DELETE localhost:8081/api/v1/links/AbC123xy \
 ```
 
 成功返回 204，无响应体。硬删除会同时删除链接和它的统计行，删除后不能恢复。不存在或其他租户的链接返回 404。
+
+被封禁的链接不能删除，返回 403 和 `{"error":"link is banned"}`：链接这一行就是封禁记录，删掉之后违规 URL、原因和归属租户都没有依据。需要删除时先由平台解封。
 
 删除不是强撤销：已经在途的跳转仍可能返回 302；删除提交后 console 写负缓存，之后的新请求返回 404。Redis 写失败时旧值可能保留到缓存 TTL，下一次写路径会自愈。
 
@@ -207,7 +224,7 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 curl -i localhost:8080/r/AbC123xy
 ```
 
-成功返回 302，`Location` 是原始 URL。只有 GET 记一次点击。`GET /r/{code}` 也匹配 HEAD（探针、预览、扫描器），HEAD 同样返回 302，但不记点击。查出链接时客户端已经断开的，不记点击。短码不存在或已过期返回 404，存储错误返回 500，处理超时返回 504；回源并发已满返回 503（临时过载，可重试），包括普通缓存未命中超过 `CACHE_MISS_CONCURRENCY` 和 Redis 不可用时的回源。错误体都是 JSON。
+成功返回 302，`Location` 是原始 URL。只有 GET 记一次点击。`GET /r/{code}` 也匹配 HEAD（探针、预览、扫描器），HEAD 同样返回 302，但不记点击。查出链接时客户端已经断开的，不记点击。短码不存在、已过期、已停用或已封禁返回 404，响应不区分这几种状态；存储错误返回 500，处理超时返回 504；回源并发已满返回 503（临时过载，可重试），包括普通缓存未命中超过 `CACHE_MISS_CONCURRENCY` 和 Redis 不可用时的回源。错误体都是 JSON。
 
 点击记录带这些元数据：
 
@@ -250,9 +267,9 @@ curl -i localhost:8081/metrics   # console
 - `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`）
 - `shortlink_rate_limited_total`（被按租户限流拒绝的管理请求数；没有 label。两个进程都暴露，只有 console 会累加，redirector 恒为 0）
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
-- `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建、修改、删除和回源写缓存都会计数；`skipped` 表示回源的 `SET NX` 发现 key 已有更新的值，可能是并发的创建或管理写）
+- `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建、修改、删除和回源写缓存都会计数；`skipped` 表示回源的 `SET NX` 发现 key 已有更新的值，可能是并发的创建或管理写。封禁和解封的缓存写入发生在 `console link` 命令里，不进这个进程的 `/metrics`）
 - `shortlink_cache_operation_duration_seconds`（缓存操作耗时，`operation` 为 `get`、`set`，`result` 取值同上面两个计数器）
-- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`；`result` 为 `success`、`not_found`、`quota_exceeded`、`canceled`、`timeout`、`error`）
+- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`；`result` 为 `success`、`not_found`、`quota_exceeded`、`banned`、`canceled`、`timeout`、`error`。租户修改或删除被封禁的链接是策略生效，记成 `banned`，不算存储失败。管理写在写完正缓存后会按跳转查询复查一次，所以 console 的存储指标里还会多出 `operation="get"`。`console link` 不经过这个装饰器，`ban`、`unban` 不会出现在进程的 `/metrics` 里）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 - `process_*`（进程 CPU、内存、文件描述符）
 - `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）

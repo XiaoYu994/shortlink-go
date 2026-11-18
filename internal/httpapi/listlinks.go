@@ -23,7 +23,7 @@ type listLinksResponse struct {
 }
 
 /*
-handleList 返回当前租户的链接，包含已过期链接，固定降序。
+handleList 返回当前租户的链接，包含已过期、已停用和已封禁的链接，固定降序。
 
 limit 默认 20、最大 100；非法 limit、sort 或游标返回 400。
 不返回总数：COUNT(*) 每次都要扫租户的行，当前没有需求。

@@ -132,6 +132,108 @@ func TestLinkExpired(t *testing.T) {
 	}
 }
 
+func TestLinkStatus(t *testing.T) {
+	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Second)
+	ban := &Ban{At: now, Reason: BanReasonPhishing, Source: BanSourceOperator}
+	tests := []struct {
+		name string
+		link Link
+		want Status
+	}{
+		{"active", Link{}, StatusActive},
+		{"future expiry is active", Link{ExpiresAt: ptrTime(now.Add(time.Second))}, StatusActive},
+		{"expiry at now is expired", Link{ExpiresAt: &now}, StatusExpired},
+		{"past expiry is expired", Link{ExpiresAt: &past}, StatusExpired},
+		{"disabled", Link{DisabledAt: &past}, StatusDisabled},
+		{"disabled and expired", Link{ExpiresAt: &past, DisabledAt: &past}, StatusDisabled},
+		{"banned", Link{Ban: ban}, StatusBanned},
+		{"banned and expired", Link{ExpiresAt: &past, Ban: ban}, StatusBanned},
+		{"banned and disabled", Link{DisabledAt: &past, Ban: ban}, StatusBanned},
+		{"banned, disabled and expired", Link{ExpiresAt: &past, DisabledAt: &past, Ban: ban}, StatusBanned},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.link.Status(now); got != tt.want {
+				t.Errorf("Status = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLinkServable(t *testing.T) {
+	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Second)
+	ban := &Ban{At: now, Reason: BanReasonSpam, Source: BanSourceRisk}
+	tests := []struct {
+		name string
+		link Link
+		want bool
+	}{
+		{"active", Link{}, true},
+		{"expired", Link{ExpiresAt: &past}, false},
+		{"disabled", Link{DisabledAt: &past}, false},
+		{"banned", Link{Ban: ban}, false},
+		{"expired, disabled and banned", Link{ExpiresAt: &past, DisabledAt: &past, Ban: ban}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.link.Servable(now); got != tt.want {
+				t.Errorf("Servable = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateEmpty(t *testing.T) {
+	disabled := true
+	url := "https://example.com"
+	tests := []struct {
+		name string
+		u    Update
+		want bool
+	}{
+		{"zero", Update{}, true},
+		{"url", Update{URL: &url}, false},
+		{"disabled", Update{Disabled: &disabled}, false},
+		{"clear expires", Update{ClearExpiresAt: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.u.Empty(); got != tt.want {
+				t.Errorf("Empty = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBanValidation(t *testing.T) {
+	reasons := []BanReason{
+		BanReasonPhishing, BanReasonMalware, BanReasonAdult, BanReasonGambling,
+		BanReasonDrugs, BanReasonSpam, BanReasonOther,
+	}
+	for _, reason := range reasons {
+		if !reason.Valid() {
+			t.Errorf("BanReason(%q).Valid() = false, want true", reason)
+		}
+	}
+	for _, reason := range []BanReason{"", "phising", "PHISHING"} {
+		if reason.Valid() {
+			t.Errorf("BanReason(%q).Valid() = true, want false", reason)
+		}
+	}
+	if !BanSourceOperator.Valid() || !BanSourceRisk.Valid() {
+		t.Error("operator and risk must be valid ban sources")
+	}
+	for _, source := range []BanSource{"", "admin", "OPERATOR"} {
+		if source.Valid() {
+			t.Errorf("BanSource(%q).Valid() = true, want false", source)
+		}
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
 func TestDayStartAndKey(t *testing.T) {
 	// 本地已经是 11 月 16 日，UTC 还是 11 月 15 日；日聚合按 UTC 算。
 	at := time.Date(2026, 11, 16, 3, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))

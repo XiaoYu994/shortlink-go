@@ -1,8 +1,11 @@
 /*
-Package link 是短链的核心业务：Link 结构体、业务错误、校验和管理侧类型（第 3、4、6、11 课）。
+Package link 是短链的核心业务：Link 结构体、业务错误、校验、状态派生和管理侧类型（第 3、4、6、11 课）。
 
 Link 只表达业务数据，不关心短码怎么生成、存在哪里。创建流程是：
 NewLink 校验并构造 Link，Store 负责分配 ID 和短码并持久化。
+
+过期、停用和封禁是三个独立的事实，可以同时成立；Status 按固定优先级派生
+对外展示的状态，Servable 是「能不能跳转」的唯一判断。
 
 只允许 http 和 https 的绝对 URL；其他 scheme（javascript:、file: 等）
 既不是短链的使用场景，也会带来安全风险。
@@ -37,6 +40,82 @@ HTTP 层用 errors.Is 映射成 403。删除链接不返还配额，
 var ErrQuotaExceeded = errors.New("link quota exceeded")
 
 /*
+ErrBanned 表示链接被平台封禁。租户不能修改或删除被封禁的链接，
+HTTP 层用 errors.Is 映射成 403；跳转视角把它和过期、停用一样看成找不到。
+*/
+var ErrBanned = errors.New("link is banned")
+
+/*
+BanReason 是封禁原因的封闭类别集合，不是自由文本。
+它会原样出现在租户的 API 响应里，前端按类别给文案；加类别要同时改这里、
+数据库 CHECK 和迁移。
+*/
+type BanReason string
+
+const (
+	BanReasonPhishing BanReason = "phishing"
+	BanReasonMalware  BanReason = "malware"
+	BanReasonAdult    BanReason = "adult"
+	BanReasonGambling BanReason = "gambling"
+	BanReasonDrugs    BanReason = "drugs"
+	BanReasonSpam     BanReason = "spam"
+	BanReasonOther    BanReason = "other"
+)
+
+// Valid 报告 r 是不是允许的封禁原因。
+func (r BanReason) Valid() bool {
+	switch r {
+	case BanReasonPhishing, BanReasonMalware, BanReasonAdult, BanReasonGambling,
+		BanReasonDrugs, BanReasonSpam, BanReasonOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// BanSource 记录封禁是谁做出的：平台人工还是风控。只在平台侧使用，不对外。
+type BanSource string
+
+const (
+	BanSourceOperator BanSource = "operator"
+	BanSourceRisk     BanSource = "risk"
+)
+
+// Valid 报告 s 是不是允许的封禁来源。
+func (s BanSource) Valid() bool {
+	switch s {
+	case BanSourceOperator, BanSourceRisk:
+		return true
+	default:
+		return false
+	}
+}
+
+/*
+Ban 是一条链接的封禁信息。数据库里 banned_at、ban_reason、ban_source
+三个字段同有同无，所以 Link 里用一个指针表达「有没有封禁」。
+*/
+type Ban struct {
+	At     time.Time
+	Reason BanReason
+	Source BanSource
+}
+
+/*
+Status 是对外可见的链接状态。三种事实可以同时成立，状态按优先级派生：
+banned、disabled、expired、active。顺序按租户能不能自己解决来排：
+封禁要找平台，停用和过期自己可以改。
+*/
+type Status string
+
+const (
+	StatusActive   Status = "active"
+	StatusExpired  Status = "expired"
+	StatusDisabled Status = "disabled"
+	StatusBanned   Status = "banned"
+)
+
+/*
 ValidationError 表示调用方传入的链接数据不合法。
 HTTP 层用 errors.As 取出它，映射成 400。
 */
@@ -65,6 +144,10 @@ type Link struct {
 	CreatedAt time.Time
 	// TenantID 是这条链接所属的租户。
 	TenantID int64
+	// DisabledAt 是租户停用的时间，nil 表示没有停用。
+	DisabledAt *time.Time
+	// Ban 为 nil 表示没有封禁。数据库里三个封禁字段同有同无。
+	Ban *Ban
 }
 
 /*
@@ -118,16 +201,18 @@ URL 为 nil 表示不修改。
 ExpiresAt 为 nil 且 ClearExpiresAt 为 false 表示不修改；
 ClearExpiresAt 为 true 表示把 expires_at 清成 NULL（永不过期），
 它和 ExpiresAt 不能同时设置。
+Disabled 为 nil 表示不改；true 停用，false 启用。重复停用保留第一次的时间。
 */
 type Update struct {
 	URL            *string
 	ExpiresAt      *time.Time
 	ClearExpiresAt bool
+	Disabled       *bool
 }
 
 // Empty 报告 Update 有没有任何要修改的字段。
 func (u Update) Empty() bool {
-	return u.URL == nil && u.ExpiresAt == nil && !u.ClearExpiresAt
+	return u.URL == nil && u.ExpiresAt == nil && !u.ClearExpiresAt && u.Disabled == nil
 }
 
 // DayClicks 是某一天（UTC）的点击总数。
@@ -172,6 +257,29 @@ Expired 报告链接在 now 是否已经过期。
 */
 func (l *Link) Expired(now time.Time) bool {
 	return l.ExpiresAt != nil && !l.ExpiresAt.After(now)
+}
+
+/*
+Status 返回链接在 now 的派生状态，按 banned、disabled、expired、active
+的顺序取第一个成立的。三种事实可以同时成立，优先级只是选择对外的展示。
+*/
+func (l *Link) Status(now time.Time) Status {
+	switch {
+	case l.Ban != nil:
+		return StatusBanned
+	case l.DisabledAt != nil:
+		return StatusDisabled
+	case l.Expired(now):
+		return StatusExpired
+	default:
+		return StatusActive
+	}
+}
+
+// Servable 报告链接在 now 是否可以跳转。只有 active 可以。
+// SQL 跳转查询的过滤条件是它的等价写法，两者要对同一组用例保持一致。
+func (l *Link) Servable(now time.Time) bool {
+	return l.Status(now) == StatusActive
 }
 
 /*

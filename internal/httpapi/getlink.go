@@ -7,7 +7,7 @@ import (
 )
 
 /*
-handleGet 返回单条详情，包含已过期链接。
+handleGet 返回单条详情，包含已过期、已停用和已封禁的链接；被封禁的链接只读。
 不存在和其他租户的链接都返回 404，不透露链接是否存在。
 */
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {

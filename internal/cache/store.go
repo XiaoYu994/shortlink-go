@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -95,17 +96,48 @@ const (
 var durationBuckets = prometheus.ExponentialBuckets(0.0001, 2, 18)
 
 /*
-LinkStore 是装饰器需要的完整能力。接口放在使用方，cache 就不依赖 httpapi 和 postgres。
-List、GetForTenant 和 Stats 直接透传；Update、Delete 除了写库还要维护缓存。
+ErrNotUpdated 表示数据库已经提交，但缓存没有落到正确的值上。
+Ban、Unban 返回这个哨兵时，*link.Link 是数据库里的结果；
+调用方用 errors.Is 区分「库都没写成」（直接返回下游错误）和
+「库写了、缓存没更新」（可以重跑同一条命令补写缓存）。
+*/
+var ErrNotUpdated = errors.New("cache not updated after successful write")
+
+/*
+LinkStore 是装饰器需要的完整能力，按基础、管理、统计和平台下架分组。
+接口放在使用方，cache 就不依赖 httpapi 和 postgres。
+Create、Update、Delete、Ban、Unban 除了写库还要维护缓存，其余方法直接透传。
 */
 type LinkStore interface {
+	LinkBasics
+	LinkAdmin
+	LinkStats
+	LinkTakedown
+}
+
+// LinkBasics 是创建和跳转查询。
+type LinkBasics interface {
 	Create(ctx context.Context, l *link.Link) error
 	GetByCode(ctx context.Context, code string) (*link.Link, error)
+}
+
+// LinkAdmin 是管理接口的列表、详情、修改和删除。
+type LinkAdmin interface {
 	List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error)
 	GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error)
 	Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
 	Delete(ctx context.Context, tenantID int64, code string) error
+}
+
+// LinkStats 是点击统计查询。
+type LinkStats interface {
 	Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error)
+}
+
+// LinkTakedown 是平台封禁和解封，按短码操作，不需要租户 ID。
+type LinkTakedown interface {
+	Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error)
+	Unban(ctx context.Context, code string) (*link.Link, error)
 }
 
 /*
@@ -218,10 +250,11 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 	cached, result := s.readCache(ctx, key, code)
 	if result == resultHit {
 		/*
-			TTL 到点后 GET 读不到这个 key。这里再看一次 ExpiresAt：
-			时钟前跳，或 key 的 TTL 比链接寿命更长时，仍然不跳过期链接。
+			TTL 到点后 GET 读不到这个 key。这里再按 Servable 判断一次：
+			时钟前跳，或 key 的 TTL 比链接寿命更长时，仍然不跳过期链接；
+			带着停用或封禁信息的正缓存也按找不到处理，防写缓存的地方漏判。
 		*/
-		if cached == nil || cached.Expired(time.Now()) {
+		if cached == nil || !cached.Servable(time.Now()) {
 			if cached != nil {
 				_ = s.rdb.Del(ctx, key).Err()
 			}
@@ -243,7 +276,7 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 			回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
 			这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
 		*/
-		s.writeCache(fetchCtx, key, found, writeNX)
+		s.writeCacheBestEffort(fetchCtx, key, found, writeNX)
 		return found, err
 	})
 	if ctx.Err() == nil {
@@ -270,10 +303,14 @@ func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (
 /*
 Update 先提交数据库，再无条件覆盖缓存。
 
-修改后的链接如果已经过期（只改 URL、原 expires_at 已过），写负缓存，
-让 redirector 直接 404；否则写新的正缓存。无条件 SET 会覆盖在途回源；
-同时回源改用 SET NX，旧快照不会反过来盖掉这里的新值。
+修改后的链接如果不可跳转（已过期、已停用或已封禁），写负缓存，
+让 redirector 直接 404；否则写新的正缓存。停用因而写负缓存，启用写正缓存。
+无条件 SET 会覆盖在途回源；同时回源改用 SET NX，旧快照不会反过来盖掉这里的新值。
 Redis 写失败只影响一致性，旧值最多保留到 TTL，见 ADR 0011。
+
+写了正缓存之后还要复查一次数据库：删除、停用、封禁可能和这次修改并发，
+晚到的正缓存会盖掉它们的负缓存。复查偏向不跳转，见 ADR 0016。
+Create 不做复查：创建响应返回之前没有人知道这个短码；风控上线后要加上。
 */
 func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
 	updated, err := s.next.Update(ctx, tenantID, code, u)
@@ -281,10 +318,13 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 		return nil, err
 	}
 	key := keyPrefix + code
-	if updated.Expired(time.Now()) {
+	if !updated.Servable(time.Now()) {
 		s.writeCommitted(ctx, key, nil)
-	} else {
-		s.writeCommitted(ctx, key, &updated.Link)
+		return updated, nil
+	}
+	s.writeCommitted(ctx, key, &updated.Link)
+	if _, err := s.recheckAfterPositiveWrite(ctx, key, code); err != nil {
+		s.logger.WarnContext(ctx, "write negative cache after recheck", "code", code, "err", err)
 	}
 	return updated, nil
 }
@@ -299,6 +339,60 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	}
 	s.writeCommitted(ctx, keyPrefix+code, nil)
 	return nil
+}
+
+/*
+Ban 先封禁数据库，再无条件写负缓存，盖掉旧的正缓存。
+
+下游错误原样返回（link.ErrNotFound 可以被 errors.Is 认出），这时缓存不动。
+数据库写成功、负缓存没写上时，返回数据库里的 Link 和一个包装 ErrNotUpdated 的错误；
+调用方重跑同一条命令即可，封禁幂等。缓存包不在这里记日志：错误交给调用方处理。
+*/
+func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	banned, err := s.next.Ban(ctx, code, reason, source)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.writeCommittedResult(ctx, keyPrefix+code, nil); err != nil {
+		return banned, notUpdated("ban link", err)
+	}
+	return banned, nil
+}
+
+/*
+Unban 先解封数据库，再按返回链接的 Servable 决定写正缓存还是负缓存：
+解封了但仍然停用或已过期时写负缓存。
+
+写正缓存的分支和 Update 一样要复查：解封可能和停用、删除、封禁交错。
+下游错误原样返回，缓存不动；数据库写成功但缓存没有落到正确的值上时，
+返回数据库里的 Link 和一个包装 ErrNotUpdated 的错误。
+如果复查确认链接已经找不到，补写的负缓存就是当时正确的值，不算失败。
+*/
+func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
+	unbanned, err := s.next.Unban(ctx, code)
+	if err != nil {
+		return nil, err
+	}
+	key := keyPrefix + code
+	if !unbanned.Servable(time.Now()) {
+		if err := s.writeCommittedResult(ctx, key, nil); err != nil {
+			return unbanned, notUpdated("unban link", err)
+		}
+		return unbanned, nil
+	}
+
+	writeErr := s.writeCommittedResult(ctx, key, unbanned)
+	wroteNegative, recheckErr := s.recheckAfterPositiveWrite(ctx, key, code)
+	switch {
+	case recheckErr != nil:
+		return unbanned, notUpdated("unban link", errors.Join(writeErr, recheckErr))
+	case !wroteNegative && writeErr != nil:
+		// 复查读到了链接，正缓存那次写失败就没被负缓存盖掉，缓存状态不确定。
+		return unbanned, notUpdated("unban link", writeErr)
+	default:
+		// 复查补写了负缓存：它排在正缓存之后，最终值符合复查结论。
+		return unbanned, nil
+	}
 }
 
 // Stats 直接查 PostgreSQL，不经过缓存；管理接口流量低，先不做结果缓存。
@@ -371,7 +465,8 @@ func usableCachedLink(cached *link.Link, code string) bool {
 }
 
 /*
-writeCommitted 在数据库提交之后更新缓存。
+writeCommitted 在数据库提交之后尽力更新缓存，失败只记日志和指标。
+用于创建、修改、删除和回源：ADR 0011 接受的最长到 TTL 的最终一致。
 请求 ctx 可能已经取消：客户端断开，或者请求超时发生在提交之后。
 WithoutCancel 丢掉取消和 deadline，只留日志要用的 value；
 再套一段独立超时，避免 Redis 卡住时这个 handler 一直不返回。
@@ -379,14 +474,34 @@ WithoutCancel 丢掉取消和 deadline，只留日志要用的 value；
 func (s *Store) writeCommitted(ctx context.Context, key string, l *link.Link) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
 	defer cancel()
-	s.writeCache(writeCtx, key, l, writeOverwrite)
+	s.writeCacheBestEffort(writeCtx, key, l, writeOverwrite)
 }
 
 /*
-writeCache 失败只影响下次命中。
-回源填充（SET NX）在 ctx 已取消时不记成写失败：那是调用方走了，不是 Redis 故障。
-管理写（无条件 SET）已经提交了数据库，取消也要记日志和 error，
-否则缓存会静默停在旧值上。
+writeCommittedResult 和 writeCommitted 一样脱离请求取消，但把失败返回给调用方。
+Ban、Unban 用它：封禁的对象往往不能再多跳一小时，缓存没写上必须让操作的人知道。
+这条路径不在这里记日志，由调用方处理一次。
+*/
+func (s *Store) writeCommittedResult(ctx context.Context, key string, l *link.Link) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
+	defer cancel()
+	return s.writeCache(writeCtx, key, l, writeOverwrite)
+}
+
+// writeCacheBestEffort 写失败只记日志和指标，调用方不受影响。
+func (s *Store) writeCacheBestEffort(ctx context.Context, key string, l *link.Link, mode writeMode) {
+	if err := s.writeCache(ctx, key, l, mode); err != nil {
+		s.logger.WarnContext(ctx, "write cache", "key", key, "err", err)
+	}
+}
+
+/*
+writeCache 写一次缓存，返回这次写入算不算失败。
+
+管理写（无条件 SET）没写上返回非 nil：ctx 已结束、序列化失败或 Redis 报错。
+回源填充（SET NX）被跳过、或调用方已取消，都不算失败，返回 nil。
+调用方决定怎么处理：Create、Update、Delete 和回源只记日志和指标（ADR 0011），
+Ban、Unban 返回给上层（ADR 0016）。
 
 mode 决定写入方式，不能只按 l 是否为 nil 判断：
 回源的正、负缓存都用 SET NX，管理写（包括删除的负缓存）都用无条件 SET。
@@ -394,13 +509,13 @@ SET NX 没写进去说明已经有更新的值，记 skipped 而不是 success�
 
 TTL 向下随机抖动，避免同一批写入的 key 集中过期。
 */
-func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode writeMode) {
+func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode writeMode) error {
 	if ctx.Err() != nil {
-		if mode == writeOverwrite {
-			s.logger.WarnContext(ctx, "write cache", "key", key, "err", ctx.Err())
-			s.writes.WithLabelValues(writeError).Inc()
+		if mode == writeNX {
+			return nil
 		}
-		return
+		s.writes.WithLabelValues(writeError).Inc()
+		return ctx.Err()
 	}
 
 	ttl := negativeTTL
@@ -408,15 +523,14 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 		ttl = cacheTTL(l)
 		// go-redis 的 Set 在 duration <= 0 时不带过期时间，key 会一直留着。
 		if ttl <= 0 {
-			return
+			return nil
 		}
 	}
 
 	data, marshalErr := json.Marshal(l)
 	if marshalErr != nil {
 		s.writes.WithLabelValues(writeError).Inc()
-		s.logger.ErrorContext(ctx, "marshal cache value", "key", key, "err", marshalErr)
-		return
+		return fmt.Errorf("marshal cache value: %w", marshalErr)
 	}
 
 	start := time.Now()
@@ -435,14 +549,7 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 		管理写的 ctx 是独立超时；这段超时也算没写上缓存，要记下来。
 	*/
 	if setErr != nil && ctx.Err() != nil && mode == writeNX {
-		return
-	}
-	if setErr != nil {
-		/*
-			数据库已经提交，只有缓存落后到 TTL。记下来便于发现 Redis 故障；
-			下一次写路径会自愈，不影响本次响应。
-		*/
-		s.logger.WarnContext(ctx, "write cache", "key", key, "err", setErr)
+		return nil
 	}
 	result := writeSuccess
 	switch {
@@ -453,6 +560,57 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 	}
 	s.writes.WithLabelValues(result).Inc()
 	s.duration.WithLabelValues(operationSet, result).Observe(time.Since(start).Seconds())
+	if setErr != nil {
+		return fmt.Errorf("set cache: %w", setErr)
+	}
+	return nil
+}
+
+/*
+recheckAfterPositiveWrite 在写完正缓存之后，按跳转查询复查一次数据库。
+
+原因见 ADR 0016「下架和管理写交错」：删除、停用、封禁可能和这次管理写并发，
+它们的负缓存先写，晚到的正缓存又盖回去，不可跳转的链接会继续跳最长 1 小时。
+读完再补写负缓存，负缓存就排在自己的正缓存之后；如果复查时已经读不到封禁，
+说明封禁在复查之后才提交，封禁自己的负缓存写入更晚，同样排在正缓存之后。
+
+读到链接就结束；读到 link.ErrNotFound 就补写负缓存。
+读库失败（超时、库故障）同样补写负缓存并记日志：ADR 0016 的复查偏向不跳转，
+宁可让这条链接最多多 404 一分钟（负缓存过期后回源自愈），
+也不让可能已经被下架或删除的链接继续跳。这是有意的取舍。
+
+直接调 s.next.GetByCode，不走 readStore 的 missSlots/fallbackSlots：
+那是跳转路径的回源保护，管理写频率低，用不上也不该占它的配额。
+读库、正缓存写入和负缓存补写各自用独立的超时，不共用会被前一步耗尽的 deadline。
+
+返回 wroteNegative 表示走了补写负缓存的分支；err 只在补写失败时非 nil。
+读库失败本身只记日志，不算补写失败：负缓存已经写上就是复查选择的最终值。
+*/
+func (s *Store) recheckAfterPositiveWrite(ctx context.Context, key, code string) (wroteNegative bool, err error) {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.fetchTimeout)
+	defer cancel()
+	_, readErr := s.next.GetByCode(readCtx, code)
+	switch {
+	case readErr == nil:
+		return false, nil
+	case errors.Is(readErr, link.ErrNotFound):
+		return true, s.writeNegativeAfterRecheck(ctx, key)
+	default:
+		s.logger.WarnContext(ctx, "recheck link after cache write", "code", code, "err", readErr)
+		return true, s.writeNegativeAfterRecheck(ctx, key)
+	}
+}
+
+// writeNegativeAfterRecheck 补写负缓存，脱离请求取消，用自己的一份超时。
+func (s *Store) writeNegativeAfterRecheck(ctx context.Context, key string) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
+	defer cancel()
+	return s.writeCache(writeCtx, key, nil, writeOverwrite)
+}
+
+// notUpdated 给「库写成功、缓存没更新」的错误加上操作名和哨兵。
+func notUpdated(operation string, err error) error {
+	return fmt.Errorf("%s: %w: %w", operation, ErrNotUpdated, err)
 }
 
 /*

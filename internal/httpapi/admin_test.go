@@ -287,7 +287,7 @@ func TestUpdateLinkBadRequest(t *testing.T) {
 		errSub string
 	}{
 		{"empty body", "", "invalid JSON body"},
-		{"empty object", `{}`, "at least one"},
+		{"empty object", `{}`, "at least one of url, expires_at or disabled"},
 		{"unknown field", `{"code":"AbC123xy"}`, "unknown field"},
 		{"url not a string", `{"url":1}`, "invalid url"},
 		{"url null", `{"url":null}`, "invalid url"},
@@ -295,6 +295,9 @@ func TestUpdateLinkBadRequest(t *testing.T) {
 		{"expires_at number", `{"expires_at":1}`, "invalid expires_at"},
 		{"expires_at not a time", `{"expires_at":"tomorrow"}`, "invalid expires_at"},
 		{"expires_at in the past", `{"expires_at":"2000-01-01T00:00:00Z"}`, "must be in the future"},
+		{"disabled null", `{"disabled":null}`, "invalid disabled"},
+		{"disabled number", `{"disabled":1}`, "invalid disabled"},
+		{"disabled string", `{"disabled":"true"}`, "invalid disabled"},
 		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, "invalid JSON body"},
 		{"too large", `{"url":"https://example.com","x":"` + strings.Repeat("a", maxBodyBytes) + `"}`, "request body too large"},
 	}
@@ -319,6 +322,175 @@ func TestUpdateLinkNotFound(t *testing.T) {
 		"/api/v1/links/AbC123xy", `{"url":"https://example.com"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestUpdateLinkDisabled(t *testing.T) {
+	disabledAt := time.Now().UTC().Truncate(time.Second)
+	tests := []struct {
+		name           string
+		body           string
+		disabled       bool
+		wantStatus     link.Status
+		wantDisabledAt bool
+	}{
+		{"disable", `{"disabled":true}`, true, link.StatusDisabled, true},
+		{"enable", `{"disabled":false}`, false, link.StatusActive, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got link.Update
+			admin := &stubAdmin{updFn: func(_ context.Context, _ int64, code string, u link.Update) (*link.AdminLink, error) {
+				got = u
+				result := link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: "https://example.com"}}
+				if tt.disabled {
+					result.DisabledAt = &disabledAt
+				}
+				return &result, nil
+			}}
+			rec := doAdminRequest(t, newAdminTestServer(admin).ConsoleRoutes(), http.MethodPatch,
+				"/api/v1/links/AbC123xy", tt.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+			}
+			if got.Disabled == nil || *got.Disabled != tt.disabled {
+				t.Errorf("update Disabled = %v, want %v", got.Disabled, tt.disabled)
+			}
+
+			var resp linkResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Status != tt.wantStatus {
+				t.Errorf("status = %q, want %q", resp.Status, tt.wantStatus)
+			}
+			if (resp.DisabledAt != nil) != tt.wantDisabledAt {
+				t.Errorf("disabled_at = %v, want present=%v", resp.DisabledAt, tt.wantDisabledAt)
+			}
+		})
+	}
+}
+
+func TestUpdateLinkDisabledWithOtherFields(t *testing.T) {
+	var got link.Update
+	admin := &stubAdmin{updFn: func(_ context.Context, _ int64, code string, u link.Update) (*link.AdminLink, error) {
+		got = u
+		return &link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: *u.URL}}, nil
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).ConsoleRoutes(), http.MethodPatch,
+		"/api/v1/links/AbC123xy", `{"url":"https://example.com/new","disabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if got.URL == nil || *got.URL != "https://example.com/new" {
+		t.Errorf("update URL = %v, want new URL", got.URL)
+	}
+	if got.Disabled == nil || !*got.Disabled {
+		t.Errorf("update Disabled = %v, want true", got.Disabled)
+	}
+}
+
+func TestBannedLinkForbidden(t *testing.T) {
+	admin := &stubAdmin{
+		updFn: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+			return nil, link.ErrBanned
+		},
+		delFn: func(context.Context, int64, string) error { return link.ErrBanned },
+	}
+	handler := newAdminTestServer(admin).ConsoleRoutes()
+
+	tests := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{"PATCH", http.MethodPatch, `{"url":"https://example.com/new"}`},
+		{"DELETE", http.MethodDelete, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doAdminRequest(t, handler, tt.method, "/api/v1/links/AbC123xy", tt.body)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403, body = %s", rec.Code, rec.Body.String())
+			}
+			var resp errorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Error != "link is banned" {
+				t.Errorf("error = %q, want %q", resp.Error, "link is banned")
+			}
+		})
+	}
+}
+
+/*
+TestLinkResponseStates 验证管理响应里的 status 和三个可选字段：
+status 总是有，disabled_at、banned_at、ban_reason 为空时省略，ban_source 从不出现。
+*/
+func TestLinkResponseStates(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Minute)
+	banAt := now.Add(-time.Hour)
+	tests := []struct {
+		name           string
+		link           link.Link
+		wantStatus     link.Status
+		wantDisabledAt bool
+		wantBannedAt   bool
+		wantBanReason  bool
+	}{
+		{"active", link.Link{URL: "https://example.com"}, link.StatusActive, false, false, false},
+		{"expired", link.Link{URL: "https://example.com", ExpiresAt: &past}, link.StatusExpired, false, false, false},
+		{"disabled", link.Link{URL: "https://example.com", DisabledAt: &past}, link.StatusDisabled, true, false, false},
+		{"banned", link.Link{URL: "https://example.com", Ban: &link.Ban{
+			At: banAt, Reason: link.BanReasonPhishing, Source: link.BanSourceOperator,
+		}}, link.StatusBanned, false, true, true},
+		{"banned, disabled and expired", link.Link{
+			URL:        "https://example.com",
+			ExpiresAt:  &past,
+			DisabledAt: &past,
+			Ban:        &link.Ban{At: banAt, Reason: link.BanReasonSpam, Source: link.BanSourceRisk},
+		}, link.StatusBanned, true, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			admin := &stubAdmin{getFn: func(_ context.Context, _ int64, code string) (*link.AdminLink, error) {
+				l := tt.link
+				l.ID = 7
+				l.Code = code
+				return &link.AdminLink{Link: l}, nil
+			}}
+			rec := doAdminRequest(t, newAdminTestServer(admin).ConsoleRoutes(), http.MethodGet,
+				"/api/v1/links/AbC123xy", "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+			}
+
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			var status link.Status
+			if err := json.Unmarshal(raw["status"], &status); err != nil {
+				t.Fatalf("decode status: %v", err)
+			}
+			if status != tt.wantStatus {
+				t.Errorf("status = %q, want %q", status, tt.wantStatus)
+			}
+			if _, ok := raw["disabled_at"]; ok != tt.wantDisabledAt {
+				t.Errorf("disabled_at present = %v, want %v", ok, tt.wantDisabledAt)
+			}
+			if _, ok := raw["banned_at"]; ok != tt.wantBannedAt {
+				t.Errorf("banned_at present = %v, want %v", ok, tt.wantBannedAt)
+			}
+			if _, ok := raw["ban_reason"]; ok != tt.wantBanReason {
+				t.Errorf("ban_reason present = %v, want %v", ok, tt.wantBanReason)
+			}
+			if _, ok := raw["ban_source"]; ok {
+				t.Error("ban_source must not be exposed")
+			}
+		})
 	}
 }
 

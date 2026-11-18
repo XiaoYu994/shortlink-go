@@ -20,16 +20,29 @@ Open 建立客户端并 Ping。NewClient 不连网络；Ping 失败时关掉客�
 Redis 挂掉时一次 GET 会超过 REQUEST_TIMEOUT，请求还没回源就超时了。
 */
 func Open(ctx context.Context, redisURL string) (*redis.Client, error) {
-	opts, err := newOptions(redisURL)
+	client, err := NewClient(redisURL)
 	if err != nil {
 		return nil, err
 	}
-	client := redis.NewClient(opts)
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("ping redis: %w", err)
 	}
 	return client, nil
+}
+
+/*
+NewClient 按 URL 建立客户端，不连接网络。超时和重试参数和 Open 共用同一份。
+
+console 的 link 命令用它：Redis 不可用时封禁也要先落库，
+连接失败应该留到第一次 SET 上，而不是在打开存储时就拦住命令。
+*/
+func NewClient(redisURL string) (*redis.Client, error) {
+	opts, err := newOptions(redisURL)
+	if err != nil {
+		return nil, err
+	}
+	return redis.NewClient(opts), nil
 }
 
 /*

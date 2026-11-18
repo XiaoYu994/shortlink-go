@@ -1,7 +1,7 @@
 #!/bin/sh
 # 冒烟测试：启动 redirector 和 console 两个真实进程，按 docs/api.md 的契约走一遍
-# 健康检查、创建、跳转、HEAD、404、非法参数、过期、路由隔离、访客去重、配额、限流和指标，
-# 最后检查 SIGTERM 优雅退出。
+# 健康检查、创建、跳转、HEAD、停用和启用、封禁和解封、404、非法参数、过期、路由隔离、
+# 访客去重、配额、限流和指标，最后检查 SIGTERM 优雅退出。
 #
 # 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/redirector、bin/console
 # 已构建、测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
@@ -195,6 +195,11 @@ SMOKE_API_KEY=slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddee
 SMOKE_OTHER_KEY=slk_ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
 seed_key smoke "$SMOKE_API_KEY"
 seed_key smoke-other "$SMOKE_OTHER_KEY"
+# 主体阶段一次发出几十个管理请求，默认的 10/s 桶会在中途 429。
+# 先调高，最后的 rate limit 段再临时改成 1/s 验证限制本身，然后恢复到这个值。
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+	"UPDATE tenants SET rate_limit_per_second = 100 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	|| fail '调高冒烟租户限流失败'
 
 # 前缀赋值只影响这一条命令，盖过 .env 里的监听地址。
 ADDR=$redirector_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
@@ -255,6 +260,44 @@ assert_eq "$status" 404 'redirector 不应提供管理路由'
 echo 'smoke: head'
 status=$(curl -sS --max-time 10 -I -o /dev/null -w '%{http_code}' "$REDIRECTOR_BASE/r/$code")
 assert_eq "$status" 302 'HEAD /r/{code} 状态码'
+
+echo 'smoke: disable and enable'
+status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$code" '{"disabled":true}')
+assert_eq "$status" 200 'PATCH disabled=true 状态码'
+grep -q '"status":"disabled"' "$TMP/body" || fail '停用响应里的 status 不是 disabled'
+grep -q '"disabled_at"' "$TMP/body" || fail '停用响应里没有 disabled_at'
+status=$(request "$REDIRECTOR_BASE" GET "/r/$code")
+assert_eq "$status" 404 '停用后跳转'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 200 '停用后详情'
+grep -q '"status":"disabled"' "$TMP/body" || fail '停用后详情的 status 不是 disabled'
+status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$code" '{"disabled":false}')
+assert_eq "$status" 200 'PATCH disabled=false 状态码'
+grep -q '"status":"active"' "$TMP/body" || fail '启用后 status 不是 active'
+if grep -q '"disabled_at"' "$TMP/body"; then
+	fail '启用后响应里仍然有 disabled_at'
+fi
+# HEAD 同样走跳转路径，但不记点击，不影响后面按点击数的统计断言。
+status=$(curl -sS --max-time 10 -I -o /dev/null -w '%{http_code}' "$REDIRECTOR_BASE/r/$code")
+assert_eq "$status" 302 '启用后跳转'
+
+echo 'smoke: ban and unban'
+./bin/console link ban --code "$code" --reason phishing || fail 'console link ban 失败'
+status=$(request "$REDIRECTOR_BASE" GET "/r/$code")
+assert_eq "$status" 404 '封禁后跳转'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 200 '封禁后详情'
+grep -q '"status":"banned"' "$TMP/body" || fail '封禁后详情的 status 不是 banned'
+grep -q '"ban_reason":"phishing"' "$TMP/body" || fail '封禁后详情里没有 ban_reason'
+status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$code" '{"url":"https://example.com/banned"}')
+assert_eq "$status" 403 '被封禁链接的 PATCH'
+grep -q '"link is banned"' "$TMP/body" || fail '被封禁链接 PATCH 的响应体不是 link is banned'
+status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$code")
+assert_eq "$status" 403 '被封禁链接的 DELETE'
+./bin/console link unban --code "$code" || fail 'console link unban 失败'
+# HEAD 不记点击，后面按点击数的统计断言仍然成立。
+status=$(curl -sS --max-time 10 -I -o /dev/null -w '%{http_code}' "$REDIRECTOR_BASE/r/$code")
+assert_eq "$status" 302 '解封后跳转'
 
 echo 'smoke: not found'
 status=$(request "$REDIRECTOR_BASE" GET "/r/$(random_code)")
@@ -388,7 +431,7 @@ case "$retry_after" in
 esac
 [ "$retry_after" -ge 1 ] || fail "Retry-After 小于 1: $retry_after"
 psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
-	"UPDATE tenants SET rate_limit_per_second = 10 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
+	"UPDATE tenants SET rate_limit_per_second = 100 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
 	|| fail '恢复冒烟租户限流失败'
 status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/rate-limit-restored"}')
 assert_eq "$status" 201 '限流改回后立即生效'

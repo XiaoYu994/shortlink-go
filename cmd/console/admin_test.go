@@ -3,14 +3,36 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"shortlink/internal/cache"
+	"shortlink/internal/link"
 	"shortlink/internal/postgres"
 	"shortlink/internal/tenant"
 )
+
+// failAdminOpen 给 link 命令的测试用：走到这里就说明打开错了存储。
+func failAdminOpen(t *testing.T) func(context.Context) (adminStore, io.Closer, error) {
+	t.Helper()
+	return func(context.Context) (adminStore, io.Closer, error) {
+		t.Fatal("admin store opened")
+		return nil, nil, nil
+	}
+}
+
+// failLinkOpen 给 key/tenant 命令的测试用：走到这里就说明读 Redis 了。
+func failLinkOpen(t *testing.T) func(context.Context) (linkStore, io.Closer, error) {
+	t.Helper()
+	return func(context.Context) (linkStore, io.Closer, error) {
+		t.Fatal("link store opened")
+		return nil, nil, nil
+	}
+}
 
 func TestConsoleUsageDoesNotOpenStore(t *testing.T) {
 	tests := []struct {
@@ -31,14 +53,26 @@ func TestConsoleUsageDoesNotOpenStore(t *testing.T) {
 		{name: "tenant set missing tenant", args: []string{"tenant", "set"}, want: errUsage},
 		{name: "tenant set no options", args: []string{"tenant", "set", "--tenant", "1"}, want: errUsage},
 		{name: "tenant set negative", args: []string{"tenant", "set", "--tenant", "1", "--link-quota", "-1"}, want: errUsage},
+		{name: "link only", args: []string{"link"}, want: errUsage},
+		{name: "bad link subcommand", args: []string{"link", "delete"}, want: errUsage},
+		{name: "ban missing code", args: []string{"link", "ban", "--reason", "phishing"}, want: errUsage},
+		{name: "ban missing reason", args: []string{"link", "ban", "--code", "abc12345"}, want: errUsage},
+		{name: "ban invalid reason", args: []string{"link", "ban", "--code", "abc12345", "--reason", "copyright"}, want: errUsage},
+		{name: "ban extra arg", args: []string{"link", "ban", "--code", "abc12345", "--reason", "phishing", "extra"}, want: errUsage},
+		{name: "unban missing code", args: []string{"link", "unban"}, want: errUsage},
+		{name: "unban extra arg", args: []string{"link", "unban", "--code", "abc12345", "extra"}, want: errUsage},
 		{name: "help", args: []string{"help"}},
 		{name: "issue help", args: []string{"key", "issue", "-h"}},
+		{name: "link help", args: []string{"link", "help"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			err := run(tt.args, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 				t.Fatal("store opened")
+				return nil, nil, nil
+			}, func(context.Context) (linkStore, io.Closer, error) {
+				t.Fatal("link store opened")
 				return nil, nil, nil
 			})
 			if tt.want == nil {
@@ -63,7 +97,7 @@ func TestConsoleRejectsBadExpiryWithoutOpeningStore(t *testing.T) {
 	err := run([]string{"key", "issue", "--name", "acme", "--expires", "tomorrow"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 		t.Fatal("store opened")
 		return nil, nil, nil
-	})
+	}, failLinkOpen(t))
 	if err == nil || !strings.Contains(err.Error(), "parse expires") {
 		t.Fatalf("run error = %v, want parse expires", err)
 	}
@@ -84,7 +118,7 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	err := run([]string{"key", "issue", "--name", "acme", "--external-id", "platform-1", "--expires", "2026-12-01T00:00:00Z"},
 		&stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 			return store, io.NopCloser(nil), nil
-		})
+		}, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -109,7 +143,7 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	}}
 	if err := run([]string{"key", "list", "--tenant", "7"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
-	}); err != nil {
+	}, failLinkOpen(t)); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if store.listed != 7 {
@@ -122,7 +156,7 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	stdout.Reset()
 	if err := run([]string{"key", "revoke", "--id", "9"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
-	}); err != nil {
+	}, failLinkOpen(t)); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if store.revoked != 9 || stdout.String() != "revoked: 9\n" {
@@ -139,7 +173,7 @@ func TestConsoleIssueForExistingTenant(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run([]string{"key", "issue", "--tenant", "3"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
-	})
+	}, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -159,7 +193,8 @@ func TestConsoleTenantShowAndSet(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"tenant", "show", "--tenant", "7"}, &stdout, &stderr, open); err != nil {
+	openLink := failLinkOpen(t)
+	if err := run([]string{"tenant", "show", "--tenant", "7"}, &stdout, &stderr, open, openLink); err != nil {
 		t.Fatalf("show: %v", err)
 	}
 	if store.shown != 7 {
@@ -171,7 +206,7 @@ func TestConsoleTenantShowAndSet(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := run([]string{"tenant", "set", "--tenant", "7", "--link-quota", "5"}, &stdout, &stderr, open); err != nil {
+	if err := run([]string{"tenant", "set", "--tenant", "7", "--link-quota", "5"}, &stdout, &stderr, open, openLink); err != nil {
 		t.Fatalf("set link quota: %v", err)
 	}
 	if store.setTenant != 7 || store.setParams.LinkQuota == nil || *store.setParams.LinkQuota != 5 {
@@ -182,11 +217,151 @@ func TestConsoleTenantShowAndSet(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := run([]string{"tenant", "set", "--tenant", "7", "--rate-limit", "0"}, &stdout, &stderr, open); err != nil {
+	if err := run([]string{"tenant", "set", "--tenant", "7", "--rate-limit", "0"}, &stdout, &stderr, open, openLink); err != nil {
 		t.Fatalf("set rate limit: %v", err)
 	}
 	if store.setParams.LinkQuota != nil || store.setParams.RateLimit == nil || *store.setParams.RateLimit != 0 {
 		t.Fatalf("params = %+v, want rate limit 0 and no quota", store.setParams)
+	}
+}
+
+type fakeLink struct {
+	link *link.Link
+	err  error
+
+	banCalls   int
+	bannedCode string
+	banReason  link.BanReason
+	banSource  link.BanSource
+	unbanCalls int
+	unbanCode  string
+}
+
+func (f *fakeLink) Ban(_ context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	f.banCalls++
+	f.bannedCode, f.banReason, f.banSource = code, reason, source
+	return f.link, f.err
+}
+
+func (f *fakeLink) Unban(_ context.Context, code string) (*link.Link, error) {
+	f.unbanCalls++
+	f.unbanCode = code
+	return f.link, f.err
+}
+
+func TestConsoleLinkBanAndUnban(t *testing.T) {
+	bannedAt := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	store := &fakeLink{link: &link.Link{
+		Code: "abc12345",
+		Ban:  &link.Ban{At: bannedAt, Reason: link.BanReasonPhishing, Source: link.BanSourceOperator},
+	}}
+	openLink := func(context.Context) (linkStore, io.Closer, error) {
+		return store, io.NopCloser(nil), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"link", "ban", "--code", "abc12345", "--reason", "phishing"},
+		&stdout, &stderr, failAdminOpen(t), openLink); err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+	if store.bannedCode != "abc12345" || store.banReason != link.BanReasonPhishing || store.banSource != link.BanSourceOperator {
+		t.Fatalf("Ban(%q, %q, %q), want (abc12345, phishing, operator)",
+			store.bannedCode, store.banReason, store.banSource)
+	}
+	want := "code\tstatus\tbanned_at\tban_reason\tban_source\n" +
+		"abc12345\tbanned\t2026-11-18T10:00:00Z\tphishing\toperator\n"
+	if stdout.String() != want {
+		t.Fatalf("ban stdout = %q, want %q", stdout.String(), want)
+	}
+
+	// 解封后链接仍然停用：输出当前状态 disabled，封禁字段清空。
+	disabledAt := bannedAt.Add(-time.Hour)
+	store.link = &link.Link{Code: "abc12345", DisabledAt: &disabledAt}
+	stdout.Reset()
+	if err := run([]string{"link", "unban", "--code", "abc12345"},
+		&stdout, &stderr, failAdminOpen(t), openLink); err != nil {
+		t.Fatalf("unban: %v", err)
+	}
+	if store.unbanCode != "abc12345" {
+		t.Fatalf("Unban(%q), want abc12345", store.unbanCode)
+	}
+	want = "code\tstatus\tbanned_at\tban_reason\tban_source\n" +
+		"abc12345\tdisabled\t-\t-\t-\n"
+	if stdout.String() != want {
+		t.Fatalf("unban stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestConsoleLinkNotFound(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "ban", args: []string{"link", "ban", "--code", "missing1", "--reason", "spam"}},
+		{name: "unban", args: []string{"link", "unban", "--code", "missing1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeLink{err: link.ErrNotFound}
+			var stdout, stderr bytes.Buffer
+			err := run(tt.args, &stdout, &stderr, failAdminOpen(t), func(context.Context) (linkStore, io.Closer, error) {
+				return store, io.NopCloser(nil), nil
+			})
+			if err == nil || errors.Is(err, errUsage) || !errors.Is(err, link.ErrNotFound) {
+				t.Fatalf("run error = %v, want link.ErrNotFound and not usage", err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestConsoleLinkCacheNotUpdated(t *testing.T) {
+	store := &fakeLink{
+		link: &link.Link{
+			Code: "abc12345",
+			Ban:  &link.Ban{At: time.Now(), Reason: link.BanReasonSpam, Source: link.BanSourceOperator},
+		},
+		err: fmt.Errorf("ban link: %w", cache.ErrNotUpdated),
+	}
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"link", "ban", "--code", "abc12345", "--reason", "spam"},
+		&stdout, &stderr, failAdminOpen(t), func(context.Context) (linkStore, io.Closer, error) {
+			return store, io.NopCloser(nil), nil
+		})
+	if err == nil || errors.Is(err, errUsage) {
+		t.Fatalf("run error = %v, want non-usage error", err)
+	}
+	if !errors.Is(err, cache.ErrNotUpdated) {
+		t.Fatalf("run error = %v, want cache.ErrNotUpdated", err)
+	}
+	for _, want := range []string{"已经写入数据库", "缓存没有更新", "1 小时", "重跑"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want containing %q", err.Error(), want)
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+// TestConsoleKeyAndTenantDoNotOpenLinkStore 锁住 ADR 0009：只有 link 命令需要 Redis。
+func TestConsoleKeyAndTenantDoNotOpenLinkStore(t *testing.T) {
+	t.Setenv("REDIS_URL", "")
+	store := &fakeAdmin{limits: postgres.TenantLimits{ID: 1, Name: "acme"}}
+	open := func(context.Context) (adminStore, io.Closer, error) {
+		return store, io.NopCloser(nil), nil
+	}
+	openLink := failLinkOpen(t)
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"tenant", "show", "--tenant", "1"}, &stdout, &stderr, open, openLink); err != nil {
+		t.Fatalf("tenant show: %v", err)
+	}
+	stdout.Reset()
+	if err := run([]string{"key", "revoke", "--id", "9"}, &stdout, &stderr, open, openLink); err != nil {
+		t.Fatalf("key revoke: %v", err)
 	}
 }
 

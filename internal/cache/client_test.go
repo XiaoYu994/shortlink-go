@@ -98,3 +98,23 @@ func TestNewOptions(t *testing.T) {
 		})
 	}
 }
+
+// TestNewClientDoesNotDial Redis 不可达时也能建出客户端，失败留给第一次命令。
+func TestNewClientDoesNotDial(t *testing.T) {
+	client, err := NewClient("redis://127.0.0.1:1/0")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if client == nil {
+		t.Fatal("NewClient returned a nil client")
+	}
+}
+
+func TestNewClientRejectsBadURL(t *testing.T) {
+	for _, redisURL := range []string{"", "http://redis.example.com"} {
+		if _, err := NewClient(redisURL); err == nil {
+			t.Errorf("NewClient(%q) error = nil, want error", redisURL)
+		}
+	}
+}

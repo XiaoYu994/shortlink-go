@@ -247,12 +247,16 @@ func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op str
 
 /*
 handleAdminStoreError 统一管理接口的存储错误映射：
-找不到（包括其他租户）一律 404，其余交给 handleStoreError。
+找不到（包括其他租户）一律 404；被封禁的链接 403，链接存在这件事不需要隐藏，
+租户要能分清是自己删了还是被封了；其余交给 handleStoreError。
 */
 func (s *Server) handleAdminStoreError(w http.ResponseWriter, r *http.Request, op string, err error, code string) {
-	if errors.Is(err, link.ErrNotFound) {
+	switch {
+	case errors.Is(err, link.ErrNotFound):
 		s.writeLinkNotFound(r, w)
-		return
+	case errors.Is(err, link.ErrBanned):
+		s.writeError(r.Context(), w, http.StatusForbidden, link.ErrBanned.Error())
+	default:
+		s.handleStoreError(w, r, op, err, "code", code)
 	}
-	s.handleStoreError(w, r, op, err, "code", code)
 }

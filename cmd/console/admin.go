@@ -8,6 +8,8 @@ import (
 	"io"
 	"time"
 
+	"shortlink/internal/cache"
+	"shortlink/internal/link"
 	"shortlink/internal/postgres"
 )
 
@@ -22,10 +24,14 @@ const usageText = `用法:
   console key revoke --id ID
   console tenant show --tenant ID
   console tenant set --tenant ID [--link-quota N] [--rate-limit N]
+  console link ban --code CODE --reason REASON
+  console link unban --code CODE
 
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期。
 --name 会新建租户；已有租户用 --tenant。密钥和租户命令只读 DATABASE_URL，不连接 Redis。
+link ban/unban 封禁和解封短链，需要 DATABASE_URL 和 REDIS_URL，先写数据库再写缓存；
+--reason 取 phishing、malware、adult、gambling、drugs、spam、other。
 tenant show 看本月用量、配额和限流；set 至少给一个选项。--link-quota 是每个 UTC
 自然月最多能创建的链接数，0 表示不能创建；--rate-limit 是管理 API 每秒请求数，
 0 表示不限制。
@@ -44,7 +50,18 @@ type adminStore interface {
 	SetTenantLimits(ctx context.Context, tenantID int64, p postgres.SetTenantLimitsParams) (postgres.TenantLimits, error)
 }
 
+/*
+linkStore 是 link 命令用到的下架能力。它背后是 cache.Store：
+先写 PostgreSQL，再维护 Redis，缓存写失败会返回 cache.ErrNotUpdated。
+*/
+type linkStore interface {
+	Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error)
+	Unban(ctx context.Context, code string) (*link.Link, error)
+}
+
 type command func(ctx context.Context, store adminStore, stdout io.Writer) error
+
+type linkCommand func(ctx context.Context, links linkStore, stdout io.Writer) error
 
 func parseCommand(args []string, stderr io.Writer) (command, error) {
 	if len(args) == 0 {
@@ -86,6 +103,108 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	fs.SetOutput(stderr)
 	fs.Usage = func() { writeUsage(stderr) }
 	return fs
+}
+
+/*
+parseLinkCommand 解析 link 子命令。link 需要 PostgreSQL 和 Redis，
+和 key、tenant 的存储分开打开，见 run 里的分派。
+*/
+func parseLinkCommand(args []string, stderr io.Writer) (linkCommand, error) {
+	if len(args) == 0 {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		writeUsage(stderr)
+		return nil, nil
+	}
+	switch args[0] {
+	case "ban":
+		return parseLinkBan(args[1:], stderr)
+	case "unban":
+		return parseLinkUnban(args[1:], stderr)
+	}
+	writeUsage(stderr)
+	return nil, errUsage
+}
+
+// parseLinkBan 要求短码和合法的封禁原因；来源固定是平台运维。
+func parseLinkBan(args []string, stderr io.Writer) (linkCommand, error) {
+	fs := newFlagSet("link ban", stderr)
+	code := fs.String("code", "", "短码")
+	reason := fs.String("reason", "", "封禁原因")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, nil
+		}
+		return nil, errUsage
+	}
+	banReason := link.BanReason(*reason)
+	if fs.NArg() != 0 || *code == "" || !banReason.Valid() {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	codeValue := *code
+	return func(ctx context.Context, links linkStore, stdout io.Writer) error {
+		banned, err := links.Ban(ctx, codeValue, banReason, link.BanSourceOperator)
+		if err != nil {
+			return explainTakedownError("封禁", codeValue, err)
+		}
+		return printLinkState(stdout, banned)
+	}, nil
+}
+
+func parseLinkUnban(args []string, stderr io.Writer) (linkCommand, error) {
+	fs := newFlagSet("link unban", stderr)
+	code := fs.String("code", "", "短码")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, nil
+		}
+		return nil, errUsage
+	}
+	if fs.NArg() != 0 || *code == "" {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	codeValue := *code
+	return func(ctx context.Context, links linkStore, stdout io.Writer) error {
+		unbanned, err := links.Unban(ctx, codeValue)
+		if err != nil {
+			return explainTakedownError("解封", codeValue, err)
+		}
+		return printLinkState(stdout, unbanned)
+	}, nil
+}
+
+/*
+explainTakedownError 把「库写成功、缓存没更新」翻译成操作提示。
+其他错误原样返回：短码不存在、数据库错误由 main 打印。
+*/
+func explainTakedownError(action, code string, err error) error {
+	if !errors.Is(err, cache.ErrNotUpdated) {
+		return err
+	}
+	return fmt.Errorf("%s %s 已经写入数据库，但缓存没有更新：旧的正缓存最长还能跳转 1 小时；"+
+		"重跑同一条命令即可，操作幂等: %w", action, code, err)
+}
+
+/*
+printLinkState 输出一条链接的下架结果，风格同 tenant show：表头一行、数据一行。
+解封后状态可能是 active，也可能仍然是 disabled 或 expired；封禁字段为空时输出 -。
+*/
+func printLinkState(w io.Writer, l *link.Link) error {
+	if _, err := fmt.Fprint(w, "code\tstatus\tbanned_at\tban_reason\tban_source\n"); err != nil {
+		return err
+	}
+	bannedAt, reason, source := "-", "-", "-"
+	if l.Ban != nil {
+		bannedAt = l.Ban.At.UTC().Format(time.RFC3339)
+		reason = string(l.Ban.Reason)
+		source = string(l.Ban.Source)
+	}
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", l.Code, l.Status(time.Now()), bannedAt, reason, source)
+	return err
 }
 
 func parseIssue(args []string, stderr io.Writer) (command, error) {
