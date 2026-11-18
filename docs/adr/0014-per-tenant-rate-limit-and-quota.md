@@ -75,10 +75,26 @@ console tenant set --tenant ID [--link-quota N] [--rate-limit N]
 
 `set` 至少给一个选项，用 `flag.Visit` 区分「没传」和「显式传 0」；负数在 CLI 和存储层都拒绝。把 `link_quota` 调到当前 `link_count` 以下不会删除已有链接，只是在删除腾出配额前不能再创建。
 
+### Kubernetes 下的部署取舍
+
+限流的状态在进程里，部署形态决定它的实际含义；配额在数据库里，Pod 数和重启都影响不了它。副本数固定的部署和 Kubernetes 按同一套规则折算，不改代码：
+
+| 部署带来的变化 | 对限流的影响 | 应对 |
+| --- | --- | --- |
+| 多个 console Pod | 全局限额是单 Pod 限额乘副本数 | 单 Pod 限额按 HPA 的 `maxReplicas` 折算：目标全局每租户 30/s、最多 6 个副本就配 5/s。按上限而不是当前副本数折算，稳态总量不超过目标 |
+| HPA 扩缩、滚动更新、驱逐、缩容 | 重建的 Pod 桶清零，活跃租户各得一次满桶突发；全局限额随副本数浮动 | 接受：限流状态本来就允许丢失，配额、计数和错误映射都不受影响。Pod 重建时各桶从满桶开始，短时间内的突发会叠加，这是状态可丢的代价 |
+| Service 按连接分发 | 客户端长连接可能钉在少数 Pod 上，这些 Pod 先 429，其他 Pod 空闲 | 由 ingress 按请求分发；单个客户端内部的分布偏差接受 |
+| 指标 | `shortlink_rate_limited_total` 每个 Pod 一份 | 看板和告警用 `sum by (pod)` 或总和，单 Pod 的值只说明这个 Pod 拒了多少 |
+
+- 入口限流放 ingress，不放应用：未鉴权的 401 洪水和公开的 `/r/` 洪水在应用里没有租户键，用 ingress-nginx 的 `limit_req` 按客户端 IP 建桶。按 `$http_authorization` 建桶只能算近似——键是密钥不是租户，一个租户多把密钥就是多个桶，随机密钥的洪水也各有各的桶。
+- 连接池预算同样是每 Pod 一份：`DB_MAX_OPEN_CONNS` 乘 `maxReplicas`，再加 console 的池，不能超过 `max_connections`；Pod 多到放不下时在数据库前加 PgBouncer（runbook 按默认配置算过一次）。
+- 换全局限流的触发条件，任一满足：限额成为对外可解释的承诺（套餐、SLA、计费）；按 `maxReplicas` 折算后的单 Pod 限额小到影响正常租户；需要跨接口或跨时间窗共享额度；部署到多集群。届时换 Redis 加 Lua（GCRA）或网关的限流服务，HTTP 契约（429 加 `Retry-After`）和错误体不变，`internal/httpapi/ratelimit.go` 是唯一要换的实现。
+- k8s 的关停细节（`preStop`、`terminationGracePeriodSeconds` 和 `DRAIN_DELAY` 的关系）属于部署清单，落地时写进 runbook，不进本 ADR。
+
 ## 不做什么
 
 - 不做 Redis/Lua 分布式限流。进程内限流的上限会乘以 console 副本数：3 个副本、每租户 10/s 时，总量可能到 30/s。这个误差可以接受，因为限流保护的是单个进程的数据库连接和处理时间；要全局限额时再换 Redis。这一点必须记住，不能把 `rate_limit_per_second` 当成跨副本的精确承诺。
-- 不限流公开的 `/r/` 跳转，也不限流未鉴权的 401 流量。前者属于高 QPS 的读路径，要限也应该在 nginx 或网关按 IP 做；后者在鉴权之前，还没有租户可做键，同样交给反向代理。
+- 不限流公开的 `/r/` 跳转，也不限流未鉴权的 401 流量。前者属于高 QPS 的读路径，要限也应该在 nginx 或网关按 IP 做；后者在鉴权之前，还没有租户可做键，同样交给反向代理。Kubernetes 下这一层是 ingress-nginx 的 `limit_req`，按客户端 IP 建桶。
 - 不做套餐、计费、按接口区分的限额（创建、列表、统计共用同一个速率）。现在只有「每租户一个数」的需求。
 - 不提供修改配额的公开 HTTP 接口。运维改库，避免多一个鉴权和审计面。
 - 不做计数自动对账。`link_count` 由应用维护；绕过应用直接改 `links` 时会漂移，runbook 里给了一条重算 SQL，需要时手工执行。
@@ -98,3 +114,4 @@ console tenant set --tenant ID [--link-quota N] [--rate-limit N]
 - 多副本下实际允许的速率是配置值乘以副本数；扩容 console 会让限流变宽，需要时按副本数调整配置。
 - 改限制会重置该租户的桶，改完的瞬间多出一个突发容量。运维操作低频，可以接受。
 - 限流 map 最多每分钟被遍历一次；map 大小是活跃租户数，不是历史租户总数。
+- 2026-11-18：补充 Kubernetes 下的部署取舍（见「决策」）。按当前实现推导，尚未在集群上验证。
