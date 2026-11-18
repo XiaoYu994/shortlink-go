@@ -87,3 +87,13 @@
 
 - [x] 每租户链接配额：`tenants.link_count` 和 `link_quota`，创建时原子占配额、删除释放，超限 403
 - [x] 管理 API 按租户限流：进程内令牌桶，超限 429 带 `Retry-After`，空闲桶自动清理
+
+## 阶段 10：配额口径和下架
+
+决策见 [ADR 0015](adr/0015-monthly-link-quota.md)、[ADR 0016](adr/0016-link-states-and-takedown.md)，两篇都还是 Proposed。
+
+- [ ] 配额改为每月创建数：迁移 005，创建语句里跨月重置，删除不返还
+- [ ] 链接状态：迁移 006，`Status` 和 `Servable`，跳转过滤停用和封禁
+- [ ] 租户停用和启用：`PATCH` 的 `disabled` 字段，响应带 `status`
+- [ ] 平台封禁和解封：`console link ban/unban`，被封禁的链接对租户只读
+- [ ] 下架的缓存一致性：封禁报告缓存写失败，管理写写完正缓存后复查
