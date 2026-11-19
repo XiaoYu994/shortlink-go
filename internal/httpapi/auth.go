@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/tenant"
 )
 
@@ -14,31 +15,36 @@ type APIKeyAuthenticator interface {
 	Authenticate(ctx context.Context, token string) (tenant.Tenant, error)
 }
 
+// Authorizer 判断当前执行者是否拥有指定权限。接口放在使用方（ADR 0018）。
+type Authorizer interface {
+	Can(p identity.Principal, perm identity.Perm) bool
+}
+
 // principalContextKey 用空结构体做键，避免和 request id 或其他包的字符串键撞上。
 type principalContextKey struct{}
 
-func withPrincipal(ctx context.Context, tn tenant.Tenant) context.Context {
-	return context.WithValue(ctx, principalContextKey{}, tn)
+func withPrincipal(ctx context.Context, p identity.Principal) context.Context {
+	return context.WithValue(ctx, principalContextKey{}, p)
 }
 
-func principalFrom(ctx context.Context) (tenant.Tenant, bool) {
-	tn, ok := ctx.Value(principalContextKey{}).(tenant.Tenant)
-	return tn, ok
+func principalFrom(ctx context.Context) (identity.Principal, bool) {
+	p, ok := ctx.Value(principalContextKey{}).(identity.Principal)
+	return p, ok
 }
 
 /*
-principal 取出鉴权中间件写进 context 的租户。
+principal 取出鉴权中间件写进 context 的执行主体。
 管理 handler 在 authenticate 里面，理论上不会缺失；缺失说明路由组装错了，
 返回 500，而不是把请求当成没有租户或放开访问。
 */
-func (s *Server) principal(w http.ResponseWriter, r *http.Request) (tenant.Tenant, bool) {
-	tn, ok := principalFrom(r.Context())
+func (s *Server) principal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
+	p, ok := principalFrom(r.Context())
 	if !ok {
-		s.logger.ErrorContext(r.Context(), "missing tenant in request context")
+		s.logger.ErrorContext(r.Context(), "missing principal in request context")
 		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
-		return tenant.Tenant{}, false
+		return identity.Principal{}, false
 	}
-	return tn, true
+	return p, true
 }
 
 /*
@@ -71,7 +77,40 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			s.handleStoreError(w, r, "authenticate api key", err)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), tn)))
+		// 当前阶段 API Key 还没有独立 scope 列，先给全量权限保持存量行为不变。
+		p := identity.Principal{
+			Tenant:    tn,
+			ActorKind: identity.ActorAPIKey,
+			Scopes:    identity.AllAPIKeyScopes(),
+		}
+		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
+	})
+}
+
+/*
+requirePerm 在请求进入业务 handler 前校验当前主体是否具备 perm。
+采用默认拒绝：未配置 Authorizer 返回 500；缺少执行主体同样返回 500；
+权限不足返回 403，不透出权限名称。
+*/
+func (s *Server) requirePerm(perm identity.Perm, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.clientGone(r) {
+			return
+		}
+		if s.authz == nil {
+			s.logger.ErrorContext(r.Context(), "authorize request", "err", errors.New("authorizer is nil"))
+			s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		p, ok := s.principal(w, r)
+		if !ok {
+			return
+		}
+		if !s.authz.Can(p, perm) {
+			s.writeError(r.Context(), w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

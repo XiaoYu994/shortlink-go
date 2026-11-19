@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"shortlink/internal/identity"
 )
 
 const (
@@ -40,22 +42,25 @@ ConsoleRoutes 返回管理进程的路由：短链增删改查、统计、存活
 func (s *Server) ConsoleRoutes() http.Handler {
 	mux := http.NewServeMux()
 	s.registerOperational(mux)
-	mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(s.handleCreate))
-	mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(s.handleList))
-	mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(s.handleGet))
-	mux.Handle("PATCH "+apiV1Prefix+"/links/{code}", s.consoleRoute(s.handleUpdate))
-	mux.Handle("DELETE "+apiV1Prefix+"/links/{code}", s.consoleRoute(s.handleDelete))
-	mux.Handle("GET "+apiV1Prefix+"/links/{code}/stats", s.consoleRoute(s.handleStats))
+	mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
+	mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))
+	mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksRead, s.handleGet))
+	mux.Handle("PATCH "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksWrite, s.handleUpdate))
+	mux.Handle("DELETE "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksWrite, s.handleDelete))
+	mux.Handle("GET "+apiV1Prefix+"/links/{code}/stats", s.consoleRoute(identity.PermStatsRead, s.handleStats))
 	return s.withMiddleware(mux)
 }
 
 /*
-consoleRoute 给管理 handler 套上鉴权和按租户限流。
-顺序不能反：限流要读 authenticate 写进 context 的租户和速率。
-超限的请求不会进入 handler，也不会查库或更新缓存。
+consoleRoute 给管理 handler 套上鉴权、按租户限流和权限校验。
+顺序不能反：
+1. authenticate 先确定租户和执行者身份；
+2. rateLimit 放在 requirePerm 外面，避免低权限密钥疯狂刷写接口时绕过限流（也保护以后更重的 Authorizer 实现）；
+3. requirePerm 最后按动作校验权限。
+超限或无权限的请求都不会进入 handler，也不会查库或更新缓存。
 */
-func (s *Server) consoleRoute(h http.HandlerFunc) http.Handler {
-	return s.authenticate(s.rateLimit(h))
+func (s *Server) consoleRoute(perm identity.Perm, h http.HandlerFunc) http.Handler {
+	return s.authenticate(s.rateLimit(s.requirePerm(perm, h)))
 }
 
 // registerOperational 注册两个进程都有的运维端点。

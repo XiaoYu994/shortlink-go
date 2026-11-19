@@ -14,7 +14,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
 		return
 	}
-	tn, ok := s.principal(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
@@ -23,7 +23,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	got, err := s.admin.GetForTenant(r.Context(), tn.ID, code)
+	got, err := s.admin.GetForTenant(r.Context(), p.Tenant.ID, code)
 	if err != nil {
 		s.handleAdminStoreError(w, r, "get link", err, code)
 		return

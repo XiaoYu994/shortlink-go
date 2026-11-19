@@ -32,12 +32,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
 		return
 	}
-	tn, ok := s.principal(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
 
-	opts, err := parseListOptions(r, tn.ID)
+	opts, err := parseListOptions(r, p.Tenant.ID)
 	if err != nil {
 		s.writeError(r.Context(), w, http.StatusBadRequest, err.Error())
 		return

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/link"
 	"shortlink/internal/memorystore"
 )
@@ -74,6 +75,7 @@ func newAdminTestServer(admin *stubAdmin) *Server {
 		requestTimeout: 5 * time.Second,
 		registry:       newTestRegistry(),
 		keys:           allowKey{},
+		authorizer:     identity.NewMapAuthorizer(),
 	})
 }
 

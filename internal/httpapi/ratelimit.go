@@ -131,11 +131,11 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		if s.clientGone(r) {
 			return
 		}
-		tn, ok := s.principal(w, r)
+		p, ok := s.principal(w, r)
 		if !ok {
 			return
 		}
-		retryAfter, allowed := s.limiter.allow(tn)
+		retryAfter, allowed := s.limiter.allow(p.Tenant)
 		if !allowed {
 			s.metrics.rateLimited.Inc()
 			seconds := max(int(math.Ceil(retryAfter.Seconds())), 1)

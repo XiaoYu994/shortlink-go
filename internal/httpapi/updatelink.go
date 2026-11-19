@@ -30,7 +30,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
 		return
 	}
-	tn, ok := s.principal(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
@@ -49,7 +49,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := s.admin.Update(r.Context(), tn.ID, code, update)
+	updated, err := s.admin.Update(r.Context(), p.Tenant.ID, code, update)
 	if err != nil {
 		s.handleAdminStoreError(w, r, "update link", err, code)
 		return

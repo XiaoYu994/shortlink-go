@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"shortlink/internal/click"
+	"shortlink/internal/identity"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 	"shortlink/internal/memorystore"
@@ -50,6 +51,7 @@ func testServer(logger *slog.Logger, store LinkStore, requestTimeout time.Durati
 		registry:       registry,
 		clicks:         clicks,
 		keys:           allowKey{},
+		authorizer:     identity.NewMapAuthorizer(),
 	})
 }
 
@@ -96,7 +98,10 @@ func TestProcessRoutes(t *testing.T) {
 		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/old"},
 	}}
 	redirector := NewRedirector(logger, store, 5*time.Second, newTestRegistry(), RedirectOptions{})
-	console := NewConsole(logger, store, 5*time.Second, newTestRegistry(), allowKey{})
+	console := NewConsole(logger, store, 5*time.Second, newTestRegistry(), ConsoleOptions{
+		Keys:       allowKey{},
+		Authorizer: identity.NewMapAuthorizer(),
+	})
 
 	t.Run("redirector redirects", func(t *testing.T) {
 		rec := httptest.NewRecorder()

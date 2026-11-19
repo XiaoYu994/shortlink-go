@@ -197,6 +197,16 @@ handler 不改。这次替换可以作为单独的练习，用来检验接口抽
 注意“策略引擎”（Policy Engine，按规则判断能不能做）和“策略模式”（Strategy Pattern，同一个接口换不同实现）
 是两个概念，名字里的“策略”对应的英文不同。
 
+固定角色权限表如下：
+
+| 角色 | 拥有权限 |
+| --- | --- |
+| `viewer` | `links:read`、`stats:read`、`members:read` |
+| `member` | `links:read`、`links:write`、`stats:read`、`members:read` |
+| `admin` / `owner` | 以上全部 + `members:write`（`owner` 与 `admin` 的资源级区别，例如 `admin` 不能修改或移出 `owner`，留到成员管理 handler 中按目标成员角色检查） |
+
+路由级权限校验收口在 `consoleRoute` 的 `requirePerm` 中间件里调用 `Authorizer.Can`，防止新增路由漏写检查；涉及具体资源的规则仍可在 handler 内继续调用 `Authorizer.Can`。
+
 ### 5b. API Key 的权限
 
 | 选项 | 好处 | 代价 |

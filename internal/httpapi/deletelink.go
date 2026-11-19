@@ -13,7 +13,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
 		return
 	}
-	tn, ok := s.principal(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
@@ -22,7 +22,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.admin.Delete(r.Context(), tn.ID, code); err != nil {
+	if err := s.admin.Delete(r.Context(), p.Tenant.ID, code); err != nil {
 		s.handleAdminStoreError(w, r, "delete link", err, code)
 		return
 	}

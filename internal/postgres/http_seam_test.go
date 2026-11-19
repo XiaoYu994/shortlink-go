@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"shortlink/internal/httpapi"
+	"shortlink/internal/identity"
 )
 
 /*
@@ -110,7 +111,10 @@ func TestHTTPRejectsExpiredAndRevokedAPIKeys(t *testing.T) {
 
 func newConsoleHandler(store *Store) http.Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), store)
+	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+		Keys:       store,
+		Authorizer: identity.NewMapAuthorizer(),
+	})
 	return srv.ConsoleRoutes()
 }
 

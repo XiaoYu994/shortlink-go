@@ -69,7 +69,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if s.clientGone(r) {
 		return
 	}
-	tn, ok := s.principal(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
@@ -84,7 +84,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats, err := s.stats.Stats(r.Context(), tn.ID, code, from, to)
+	stats, err := s.stats.Stats(r.Context(), p.Tenant.ID, code, from, to)
 	if err != nil {
 		s.handleAdminStoreError(w, r, "link stats", err, code)
 		return

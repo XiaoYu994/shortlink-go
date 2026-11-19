@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/memorystore"
 	"shortlink/internal/tenant"
 )
@@ -39,6 +40,7 @@ func newLimitTestServer(keys APIKeyAuthenticator) *Server {
 		requestTimeout: 5 * time.Second,
 		registry:       newTestRegistry(),
 		keys:           keys,
+		authorizer:     identity.NewMapAuthorizer(),
 	})
 }
 

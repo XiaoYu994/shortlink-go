@@ -22,6 +22,7 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/config"
 	"shortlink/internal/httpapi"
+	"shortlink/internal/identity"
 	"shortlink/internal/postgres"
 	"shortlink/internal/storemetrics"
 )
@@ -72,7 +73,10 @@ func runServe() error {
 		Logger:          logger,
 	})
 	// 鉴权直接用 pgStore，缓存不参与 API Key 校验。
-	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, pgStore)
+	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, httpapi.ConsoleOptions{
+		Keys:       pgStore,
+		Authorizer: identity.NewMapAuthorizer(),
+	})
 	/*
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。
 		Redis 不探：写缓存失败只记日志，管理请求照常成功（ADR 0006 的 fail-open）。

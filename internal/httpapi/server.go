@@ -72,6 +72,12 @@ type RedirectOptions struct {
 	TrustProxyHeaders bool
 }
 
+// ConsoleOptions 是管理进程的鉴权与授权依赖。
+type ConsoleOptions struct {
+	Keys       APIKeyAuthenticator
+	Authorizer Authorizer
+}
+
 // Server 持有 handler 需要的依赖。用 NewRedirector 或 NewConsole 构造。
 type Server struct {
 	logger         *slog.Logger
@@ -79,6 +85,7 @@ type Server struct {
 	admin          LinkAdminStore
 	stats          LinkStatsStore
 	keys           APIKeyAuthenticator
+	authz          Authorizer
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
@@ -107,6 +114,7 @@ type serverDeps struct {
 	admin             LinkAdminStore
 	stats             LinkStatsStore
 	keys              APIKeyAuthenticator
+	authorizer        Authorizer
 	requestTimeout    time.Duration
 	registry          *prometheus.Registry
 	clicks            ClickRecorder
@@ -129,16 +137,17 @@ func NewRedirector(logger *slog.Logger, store LinkStore, requestTimeout time.Dur
 
 /*
 NewConsole 组装管理进程。
-keys 为 nil 时创建接口返回 500，而不是把鉴权放开。
+Keys 或 Authorizer 为 nil 时采用默认拒绝策略，管理接口返回 500，而不是把鉴权或权限放开。
 ConsoleStore 同时提供跳转读取、管理 CRUD 和统计查询。
 */
-func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Duration, registry *prometheus.Registry, keys APIKeyAuthenticator) *Server {
+func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Duration, registry *prometheus.Registry, opts ConsoleOptions) *Server {
 	return newServer(serverDeps{
 		logger:         logger,
 		store:          store,
 		admin:          store,
 		stats:          store,
-		keys:           keys,
+		keys:           opts.Keys,
+		authorizer:     opts.Authorizer,
 		requestTimeout: requestTimeout,
 		registry:       registry,
 	})
@@ -161,6 +170,7 @@ func newServer(d serverDeps) *Server {
 		admin:          d.admin,
 		stats:          d.stats,
 		keys:           d.keys,
+		authz:          d.authorizer,
 		requestTimeout: d.requestTimeout,
 		registry:       d.registry,
 		metrics:        newHTTPMetrics(d.registry),

@@ -28,7 +28,8 @@ shortlink/
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
-│   ├── httpapi/         # handler、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore
+│   ├── httpapi/         # handler、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer
+│   ├── identity/        # 认证主体（Principal）、权限常量与固定角色权限表（MapAuthorizer）
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
 │   ├── tenant/          # 租户和 API Key 的明文格式、哈希
 │   ├── idgen/           # 随机短码生成
@@ -50,10 +51,11 @@ shortlink/
 
 ```txt
 cmd/redirector -> httpapi, postgres, storemetrics, cache, click, config
-cmd/console    -> httpapi, postgres, storemetrics, cache, config；key/tenant 命令只用 postgres，link 命令还要 cache
+cmd/console    -> httpapi, identity, postgres, storemetrics, cache, config；key/tenant 命令只用 postgres，link 命令还要 cache
 cmd/migrate    -> golang-migrate
 config         -> postgres
-httpapi        -> link, click, idgen, tenant, golang.org/x/time/rate
+httpapi        -> link, click, idgen, identity, tenant, golang.org/x/time/rate
+identity       -> tenant
 postgres       -> link, click, idgen, tenant
 memorystore    -> link, idgen
 storemetrics   -> link
@@ -63,7 +65,7 @@ link           -> 标准库
 idgen          -> 标准库
 ```
 
-`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator` 也定义在 `httpapi`，由同一个 `postgres.Store` 实现；缓存不参与鉴权。
+`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator` 和 `Authorizer` 也定义在 `httpapi`，分别由 `postgres.Store` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
 
 ## 请求流程
 
@@ -76,8 +78,9 @@ POST /api/v1/links
   -> metrics
   -> recoverer
   -> timeout
-  -> authenticate：Bearer API Key，哈希换租户，放进 context
+  -> authenticate：Bearer API Key，哈希换租户，构造 identity.Principal 放进 context
   -> rateLimit：按租户的进程内令牌桶，超限 429 + Retry-After
+  -> requirePerm：通过 Authorizer 检查 Principal 权限，不足返回 403
   -> handleCreate
   -> 读取并限制请求体
   -> json.Unmarshal
@@ -111,13 +114,13 @@ GET 模式同时匹配 HEAD。HEAD 记不记点击见 [ADR 0007](adr/0007-async-
 
 ```txt
 GET /api/v1/links
-  -> authenticate -> rateLimit -> principalFrom(context)
+  -> authenticate -> rateLimit -> requirePerm -> principalFrom(context)
   -> 解析 limit、sort、cursor（非法值 400）
   -> admin.List（cache 透传 -> storemetrics -> postgres，多要一条判断下一页）
   -> 200 {"items":[...],"next_cursor":"..."}
 
 GET/PATCH/DELETE /api/v1/links/{code}
-  -> authenticate -> rateLimit -> 校验短码格式
+  -> authenticate -> rateLimit -> requirePerm -> 校验短码格式
   -> GetForTenant / Update / Delete，全部带 tenant_id，找不到一律 404
   -> PATCH：RawMessage 区分「没传」和「传了 null」，校验 URL、将来时间和 disabled 布尔值
   -> 被封禁的链接 Update/Delete 返回 403 link is banned，其他租户仍然是 404
@@ -125,7 +128,7 @@ GET/PATCH/DELETE /api/v1/links/{code}
   -> Delete 在同一事务里删除链接和统计行，不返还本月配额
 
 GET /api/v1/links/{code}/stats
-  -> authenticate -> rateLimit -> 解析 from/to（默认 8 天，跨度不超过 90 天）
+  -> authenticate -> rateLimit -> requirePerm -> 解析 from/to（默认 8 天，跨度不超过 90 天）
   -> 只读 REPEATABLE READ 事务：links.clicks + 三张日表
   -> 200：日趋势和访客补零，设备和客户端固定类别
 ```

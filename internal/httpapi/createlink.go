@@ -72,11 +72,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 租户来自鉴权中间件。请求 JSON 里没有这个字段，客户端传了会被当成未知字段拒绝。
-	tn, ok := s.principal(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
-	l.TenantID = tn.ID
+	l.TenantID = p.Tenant.ID
 
 	if err := s.store.Create(r.Context(), l); err != nil {
 		// 配额是租户策略，不是存储故障：403 告诉调用方链接本身没问题，本月额度用完了，删除链接也换不回来。
