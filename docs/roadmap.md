@@ -58,7 +58,7 @@
 - [x] console 的管理员命令：创建租户，签发、查看和吊销 API Key（runbook“签发 API Key”）
 - [ ] （可选）缓存击穿的多副本方案：有了多个 redirector 副本、回源次数真的成为压力之后，比较 Redis 分布式锁（`SET NX PX` 加 Lua 释放）和逻辑过期加后台刷新，按回源次数和可接受的一致性取舍
 - [ ] （可选）OpenTelemetry 追踪：拆分后两个进程互不调用，追踪看的是单个请求内部各环节的耗时，等指标解释不了慢请求时再加
-- 用户操作短链的平台不在本阶段。人的登录和 API Key 以后都写成 context 里的同一个租户，见 ADR 0009
+- 用户操作短链的平台不在本阶段。人的登录和 API Key 以后都写成 context 里的同一个租户，见 ADR 0009（已在阶段 11 落地规划）
 
 ## 阶段 7：短链管理和点击统计（第 11 课）
 
@@ -97,3 +97,54 @@
 - [x] 租户停用和启用：`PATCH` 的 `disabled` 字段，响应带 `status`
 - [x] 平台封禁和解封：`console link ban/unban`，被封禁的链接对租户只读
 - [x] 下架的缓存一致性：封禁报告缓存写失败，管理写写完正缓存后复查
+
+## 阶段 11：用户、组织和权限
+
+决策见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)。
+
+- [ ] `Principal` 替换 context 里的 `tenant.Tenant`，`Authorizer` 接口加 map 实现，handler 改成 `Can` 检查；行为不变
+- [ ] 迁移 007：`users`、`user_identities`、`memberships`、`sessions`、`invitations`；`api_keys` 加 `scopes`、`created_by`
+- [ ] API Key scope：存量 Key 全部 scope，`console key issue --scope`
+- [ ] compose 加 Dex 和测试用户；`internal/identity` 的假 OIDC 服务（httptest）
+- [ ] 登录流程：login 跳转（state、PKCE、nonce）、callback 校验 ID Token、建会话
+- [ ] 会话鉴权中间件、`X-Org-ID` 成员校验、`CrossOriginProtection`；logout 和 `GET /api/v1/me`
+- [ ] 邀请：`console member invite`，首次登录按已验证邮箱兑现
+- [ ] 成员管理 API：列表、改角色、移出组织；立刻生效的集成测试
+- [ ] `make smoke` 走一次 Dex 登录；配置和文档同步
+- [ ] （可选）把 `Authorizer` 换成 Casbin 实现，验证策略模式接口边界
+- [ ] （可选）接入 GitHub 作为第二个身份提供方，对比纯 OAuth 2.0 和 OIDC
+- [ ] （可选）用 `testing/synctest` 重写限流器和 `ClickRecorder` 依赖时间的测试
+
+## 阶段 12：审计日志（待立 ADR）
+
+开工前先立 ADR，定事件口径、写入事务边界和查询接口。
+
+- [ ] 审计表和查询接口：记录操作人、动作、目标、时间和请求编号；与业务写在同一事务里提交
+
+## 阶段 13：Webhook 与可靠后台任务（待立 ADR）
+
+开工前先立 ADR，定 Outbox 表结构、投递重试与退避、签名和关停语义。
+
+- [ ] 租户 Webhook 订阅配置与 HMAC 签名校验
+- [ ] Outbox 模式 + worker pool：可靠投递事件、指数退避重试、优雅退出；顺带承载过期会话清理等后台任务
+
+## 阶段 14：自定义域名（待立 ADR）
+
+开工前先立 ADR，定域名校验、路由兼容（ADR 0001）、短码唯一约束和缓存 key 演进。
+
+- [ ] 租户绑定自定义域名（DNS TXT 所有权校验）
+- [ ] redirector 按 Host 路由，缓存 key 纳入域名，支持按域名隔离短码
+
+## 阶段 15：套餐与用量计费（待立 ADR）
+
+开工前先立 ADR，定套餐模型、用量计量（metering）和配额/限流的统一方式。
+
+- [ ] 套餐（Free / Pro 等）关联月度配额、速率限制和功能开关（如自定义域名、Webhook）
+- [ ] 用量计量和账单周期统计
+
+## 阶段 16：租户隔离兜底与可观测性（待立 ADR）
+
+开工前先立 ADR，定 RLS 连接上下文约定和追踪采样策略。
+
+- [ ] PostgreSQL 行级安全（RLS）作为租户隔离的第二道防线（`SET LOCAL` 绑定当前租户）
+- [ ] OpenTelemetry 追踪：串联跳转和管理请求里的缓存、singleflight 和数据库 span，日志带 `trace_id`
