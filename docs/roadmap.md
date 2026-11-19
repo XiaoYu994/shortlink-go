@@ -103,7 +103,7 @@
 决策见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)；`httpapi` 的结构体与分包演进见 [ADR 0019](adr/0019-httpapi-package-evolution.md)（本阶段登录和成员 API 先在包内拆小结构体，不往 `Server` 堆字段）。
 
 - [x] `Principal` 替换 context 里的 `tenant.Tenant`，`Authorizer` 接口加 map 实现，handler 改成 `Can` 检查；行为不变
-- [ ] 迁移 007：`users`、`user_identities`、`memberships`、`sessions`、`invitations`；`api_keys` 加 `scopes`、`created_by`
+- [x] 迁移 007：`users`、`user_identities`、`memberships`、`sessions`、`invitations`；`api_keys` 加 `scopes`、`created_by`
 - [ ] API Key scope：存量 Key 全部 scope，`console key issue --scope`
 - [ ] compose 加 Dex 和测试用户；`internal/identity` 的假 OIDC 服务（httptest）
 - [ ] 登录流程：login 跳转（state、PKCE、nonce）、callback 校验 ID Token、建会话

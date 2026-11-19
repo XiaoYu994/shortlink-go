@@ -54,11 +54,12 @@ func newTestStore(t testing.TB) (*Store, int64) {
 	t.Cleanup(release)
 
 	/*
-		没有外键之后，TRUNCATE tenants CASCADE 不会再带上 links、api_keys 和统计表。
+		没有外键之后，TRUNCATE tenants CASCADE 不会再带上子表和关联表。
 		所有表写在同一条语句里，有没有外键都能清空。
 	*/
 	if _, err := db.ExecContext(ctx, `TRUNCATE links, api_keys, tenants,
-    link_clicks_daily, link_dimension_daily, link_visitors_daily RESTART IDENTITY`); err != nil {
+    link_clicks_daily, link_dimension_daily, link_visitors_daily,
+    users, user_identities, memberships, sessions, invitations RESTART IDENTITY`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	var tenantID int64
