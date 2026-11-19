@@ -79,7 +79,7 @@
 
 - [x] redirector 的 pprof 端点：单独的回环监听，默认不开（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)）
 - [x] 点击写入的 benchmark 和剖析，定位单写入者上限的来源（runbook“点击写入剖析”）
-- [ ] 按剖析结论决定是否改点击写入：合并语句、调大批次或多个写入者，先写 ADR
+- [x] 按剖析结论决定是否改点击写入：暂不改，写明重新评估的条件和到时的顺序（[ADR 0017](adr/0017-defer-click-write-optimization.md)）
 
 ## 阶段 9：限流和链接配额
 

@@ -33,6 +33,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0014](0014-per-tenant-rate-limit-and-quota.md) | 按租户限流和链接配额 | Accepted |
 | [0015](0015-monthly-link-quota.md) | 链接配额按月计创建数，删除不返还 | Accepted |
 | [0016](0016-link-states-and-takedown.md) | 链接状态和下架：过期、停用、封禁 | Accepted |
+| [0017](0017-defer-click-write-optimization.md) | 点击写入暂不改，保留单写入者 | Accepted |
 
 ## 模板
 
