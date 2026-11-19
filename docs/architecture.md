@@ -1,5 +1,7 @@
 # 架构
 
+当前结构写在这里：进程、目录、请求怎么走、有哪些配置。为什么这样定写在 [ADR](adr/README.md)，操作和压测写在 [runbook](runbook.md)；决策正文不在这里重复。
+
 ## 目标
 
 短链接服务：创建短链、按短码 302 跳转。当前是学习项目，优先把 HTTP、存储和错误处理写清楚。
@@ -13,9 +15,9 @@
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
 | `console` | `POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）；`key`、`tenant` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
 
-`redirector` 只挂公开跳转，不注册管理路由；API Key 鉴权只存在于 `console`。创建成功后 `console` 写穿正缓存；修改和删除提交后无条件覆盖缓存，修改后按 `Servable` 决定写正缓存还是负缓存（删除写负缓存，停用也写负缓存），`redirector` 读同一份缓存，所以新短码不会在负缓存里继续 404，改过的链接也不会继续跳旧地址。这次缓存写入不跟随请求取消：数据库已经提交后，客户端断开也不能跳过它。回源写缓存一律用 `SET NX`，在途旧快照盖不掉管理写的新值。两个进程各自监听、各自扩容、各自暴露 `/metrics`，连接池也是各一份，总连接数是两边之和。部署时由反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console；短链公开地址不变。宿主机进程用 `deploy/nginx.conf`，容器栈用 `deploy/nginx.stack.conf`。两份都不转发 `/metrics`、`/healthz` 和 `/readyz`。`/healthz` 只表示进程活着；`/readyz` 失败返回 503，让编排器摘流量而不是重启进程。console 的 `/readyz` 在 1 秒内 Ping PostgreSQL；redirector 的不探依赖，启动完成就算就绪，Redis 或数据库故障时它仍要留在流量里降级服务。
+`redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
 
-这是按流量和故障域把一个服务部署两次，不是微服务：数据所有权没有拆开，进程之间也没有 HTTP/RPC 调用。决策见 [ADR 0009](adr/0009-process-split-and-credentials.md)。
+进程怎么拆、凭证怎么发，见 [ADR 0009](adr/0009-process-split-and-credentials.md)。Redis 故障时的降级和就绪检查见 [ADR 0006](adr/0006-redis-cache-design.md)。
 
 ## 目录结构
 
@@ -103,7 +105,7 @@ GET /r/{code}
   -> 302 Location: 原始 URL
 ```
 
-GET 模式同时匹配 HEAD。HEAD 返回同样的 302，但不记点击。`Record` 在进入队列时取 `At`，批量写出的延迟不会把点击挪到第二天。
+GET 模式同时匹配 HEAD。HEAD 记不记点击见 [ADR 0007](adr/0007-async-click-recording.md)；点击落在哪一天见 [ADR 0012](adr/0012-click-analytics.md)。
 
 ### 管理 API（console）
 
@@ -134,17 +136,15 @@ GET /api/v1/links/{code}/stats
 
 ## 存储
 
-- `internal/memorystore`：map + `sync.RWMutex`，只用于测试和本地开发。
-- `internal/postgres`：`database/sql` + pgx，生产使用。
-- `internal/storemetrics`：实现 `LinkStore` 的装饰器，按操作记录耗时和结果，操作有 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`。`not_found`、`quota_exceeded`、`banned`、`canceled`、`timeout` 都不算失败，只有其余错误记成 `error`。耗时直方图带同样的结果标签。组装顺序是 `HTTP -> cache -> storemetrics -> postgres.Store`，缓存命中不会计入存储耗时。管理写写完正缓存后的复查也会产生 `operation="get"`。
-- `internal/cache`：`GetByCode` 的 Redis 读缓存装饰器。key 是 `shortlink:link:<code>`，value 是完整 `link.Link` 的 JSON；正缓存 TTL 取剩余寿命和 1 小时里更短的那个，没有到期时间时是 1 小时，负缓存（JSON `null`）TTL 1 分钟。命中到不可跳转的正缓存（已过期、已停用或已封禁）时删掉 key 并返回找不到。URL 为空或 Code 对不上的 JSON 也删掉，按未命中回源。并发未命中用 singleflight 合并回源；普通未命中和 Redis 读失败各有一条回源限流，超过许可立即返回 503，不排队。普通未命中的许可数由 `CACHE_MISS_CONCURRENCY` 控制（默认 8），Redis 读失败固定为 8，两条路径分开计数。回源使用独立的 `CACHE_FETCH_TIMEOUT`（默认 1s），不再借用 `REQUEST_TIMEOUT`；`singleflight` 的共享回源不跟随领头请求取消。被限流的请求记在 `shortlink_cache_shed_total{path="miss|fallback"}`，按请求计数，等待者也算。
-  写入分两种模式：回源（正、负缓存）用 `SET NX`，只有 key 不存在时才写；创建、修改、删除、封禁、解封用无条件 `SET`，在数据库提交之后覆盖缓存。修改后的链接按 `Servable` 判断：过期、停用或封禁时写负缓存，其他情况写新的正缓存；解封同理，仍然停用或已过期时写负缓存。这样在途回源读到的旧快照不会盖掉管理写的新值，删除也不需要额外的 `DEL`。写完正缓存后还会按跳转查询复查一次库：读不到就补写负缓存；读库失败也补写并记日志（复查偏向不跳转），用来盖掉下架和管理写交错时晚到的正缓存（ADR 0016）。`Update`、`Delete` 和回源写失败照旧只记日志和指标；`Ban`、`Unban` 把缓存写失败包装成 `cache.ErrNotUpdated` 返回给运维命令，调用方据此提示重跑。Redis 写失败只影响一致性，旧值最多保留到 TTL。查找结果记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存结果记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示 `SET NX` 没写进去，说明已有更新的值），缓存操作耗时记在 `shortlink_cache_operation_duration_seconds`（`operation` 为 `get`、`set`）。正、负缓存 TTL 向下随机抖动最多 10%。缓存设计见 [ADR 0006](adr/0006-redis-cache-design.md)，回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写一致性见 [ADR 0011](adr/0011-link-crud-api.md)。
-- `internal/click`：负责点击元数据分类和异步批量记录。GET 跳转成功后构造 `Click`（来源 host、设备、客户端、按天访客哈希），放进缓冲 channel；一条 goroutine 按 100 条或 1 秒把点击交给 `postgres.Store.RecordClicks`。缓冲满时 `shortlink_clicks_dropped_total` 加一；写出结果记在 `shortlink_clicks_written_total{result="success|error"}`。分类是启发式，不是安全边界；User-Agent 截到 512 字节，Referer 超长归 `other`。访客哈希是 HMAC-SHA256 的前 16 字节，盐按天参与哈希，不存原始 IP 和 UA。设计见 [ADR 0007](adr/0007-async-click-recording.md)、[ADR 0012](adr/0012-click-analytics.md)。
-- 进程指标由 `collectors.NewProcessCollector` 暴露为 `process_*`，连接池指标由 `collectors.NewDBStatsCollector` 暴露为 `go_sql_*`，重点看 `go_sql_in_use_connections` 和 `go_sql_wait_duration_seconds_total`。
-- 表 `links`：`id` 自增主键（内部），`code` 唯一约束（对外），`url`、`clicks`、`expires_at`、`created_at`、`tenant_id`，以及 `disabled_at`（租户停用）、`banned_at`、`ban_reason`、`ban_source`（平台封禁，三列同有同无，由 CHECK 保证）；`code` 格式和 `url` 长度由 CHECK 约束兜底。`expires_at` 为 NULL 表示永不过期；`disabled_at` 为 NULL 表示没有停用；`banned_at` 为 NULL 表示没有封禁。跳转查询只返回 `expires_at IS NULL OR expires_at > now()` 并且 `disabled_at IS NULL AND banned_at IS NULL` 的行，三种不可跳转的状态都返回 404；管理查询不按这些状态过滤，`status` 按 `banned`、`disabled`、`expired`、`active` 的优先级派生，封禁来源不对外。`tenant_id` 指向 `tenants.id`，`NOT NULL`，没有数据库外键；`links` 和 `api_keys` 各有 `(tenant_id, id)` 索引，`links` 另有 `(tenant_id, clicks DESC, id DESC)` 服务历史排序。引用完整性由应用层保证，见 [ADR 0010](adr/0010-app-level-referential-integrity.md)。API Key 的 SHA-256 存在 `api_keys.key_hash`，明文不入库。`api_keys.expires_at` 为空表示不过期，到期时刻本身算过期；`api_keys.revoked_at` 非空表示已吊销。鉴权把过期和吊销看成密钥无效。`tenants.external_id` 可空，留给以后的平台租户编号。运维命令在 `cmd/console`：`key issue`、`key list`、`key revoke`、`tenant show`、`tenant set`、`link ban`、`link unban`。`key` 和 `tenant` 只连 PostgreSQL；`link ban/unban` 还要连 Redis，先写数据库再覆盖缓存，缓存没写上时命令以非 0 退出并提示重跑。表结构由 `cmd/migrate` 管理，当前版本记在 `schema_migrations`；HTTP 进程启动时不迁移。
-- 租户配额和限流：`tenants.link_usage` 是本月（UTC 自然月）已创建的链接数，`link_usage_month` 记录这个数所属月份，`link_quota` 是每月创建上限（默认 1000），`rate_limit_per_second` 是管理 API 每秒请求数（默认 10，0 表示不限制）。创建链接用一条 `WITH quota AS (UPDATE tenants ... WHERE 有效已用量 < link_quota RETURNING 1) INSERT INTO links ... SELECT ...` 原子占当月配额；记录的月份早于当前月时，同一条 `UPDATE` 先把用量按 0 算再加一，月份用 `GREATEST` 只前进不后退，跨月不依赖定时任务。短码冲突时整条语句连同用量一起回滚；配额满返回 `link.ErrQuotaExceeded`，HTTP 层映射成 403。计的是创建动作：链接过期、停用、被封禁或删除都不返还额度，删除事务也不再更新 `tenants` 行。所有读用量的地方（`tenant show/set` 的回显、配额满的补查）用同一个 `CASE` 表达式，避免跨月后看到上个月的数。鉴权把速率随租户一起读出，`httpapi.rateLimit` 按租户维护进程内 `x/time/rate` 令牌桶，超限 429 和 `Retry-After`；空闲超过 10 分钟的桶在请求路径里顺带清理，没有后台 goroutine。多副本时每个 console 各限各的。见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0015](adr/0015-monthly-link-quota.md)。
-- 点击日聚合：`link_clicks_daily` 主键 `(link_id, day)`，冗余 `tenant_id` 由写库时的 `JOIN links` 填充，索引 `(tenant_id, day, clicks DESC, link_id DESC)` 服务今日排序；`link_dimension_daily` 主键 `(link_id, day, dimension, value)`，`dimension` 是 `referrer`、`device`、`client`；`link_visitors_daily` 主键 `(link_id, day, visitor_hash)`，哈希 16 字节。三张表都不建外键。`links.clicks` 是终身累计的读模型，和日表在同一个事务里更新，一个批次要么全写要么全不写。删除链接时在同一事务里删三张统计表和 `links` 行。统计接口在只读的 `REPEATABLE READ` 事务里查询，同一批点击的各维度是同一个快照。见 [ADR 0012](adr/0012-click-analytics.md)。
-- 短码是 8 位 Base62 随机码，`crypto/rand` 生成；碰撞由唯一索引和最多 5 次重试处理。
+- `internal/memorystore`：map + `sync.RWMutex`，只用于测试和本地开发（[ADR 0004](adr/0004-storage-package-layout.md)）。
+- `internal/postgres`：`database/sql` + pgx，生产使用。连接池和迁移见 [ADR 0003](adr/0003-postgres-and-pool-config.md)。
+- `internal/storemetrics`：存储耗时装饰器。组装顺序和结果分类见 [ADR 0005](adr/0005-prometheus-before-tracing.md)、[ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0016](adr/0016-link-states-and-takedown.md)。操作有 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`。管理写复查也会记一次 `get`。
+- `internal/cache`：`GetByCode` 的 Redis 读缓存。值、TTL、singleflight、故障降级和指标见 [ADR 0006](adr/0006-redis-cache-design.md)，冷缓存回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写和回源的两种 `SET` 见 [ADR 0011](adr/0011-link-crud-api.md)，下架后的缓存和复查见 [ADR 0016](adr/0016-link-states-and-takedown.md)。
+- `internal/click`：点击分类和异步批量写出。投递和关停见 [ADR 0007](adr/0007-async-click-recording.md)，日聚合、维度和访客哈希见 [ADR 0012](adr/0012-click-analytics.md)。
+- 进程指标和连接池指标见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。
+- 表 `links`、`tenants`、`api_keys` 的列以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)。
+- 租户配额和限流见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0015](adr/0015-monthly-link-quota.md)。
+- 点击日聚合和统计查询见 [ADR 0012](adr/0012-click-analytics.md)。
 
 ## 配置
 
@@ -165,17 +165,19 @@ GET /api/v1/links/{code}/stats
 - `TRUST_PROXY_HEADERS`：默认 `false`；为 `true` 时从 `X-Forwarded-For` 最右一段取客户端 IP。只能开在可信反向代理后面。`deploy/nginx.conf` 把这个头覆盖成 `$remote_addr`
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
-- `PPROF_ADDR`：默认为空，不开剖析端点。设置后 redirector 另起一个只有 `/debug/pprof/` 的监听；只接受回环地址，否则启动失败。console 不读它（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)）
+- `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
 
 ## 退出
 
-两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后先把 `/readyz` 打成 503，等 `DRAIN_DELAY`（默认 5s，`0s` 表示跳过），再关闭 HTTP 监听。等待期间监听还开着，这段时间进来的请求照常处理；`/healthz` 仍返回 200，避免编排器把正在退出的进程重启。然后 `Shutdown` 等待这些请求结束，上限是 `SHUTDOWN_TIMEOUT`。`run` 返回后 `defer` 先让 `ClickRecorder` 把缓冲里的点击写完（只有 redirector 有这一步；同样受一份新的 `SHUTDOWN_TIMEOUT` 限制，已经开始的那一批还会用完自己的写入超时，默认 2s），再关闭 Redis 客户端和数据库连接池。`Shutdown` 不会取消这些请求的 context；它们有自己的 `REQUEST_TIMEOUT` 兜底，慢查询不会把退出拖满。再次收到信号时恢复默认行为，摘流等待和 `Shutdown` 都会被立刻打断。进程崩溃或收到 SIGKILL 时，缓冲区里还没写完的点击会丢掉。容器的停止宽限要盖住 `DRAIN_DELAY`、两份 `SHUTDOWN_TIMEOUT` 和在途批次的写入超时，否则进程会在写完之前被杀掉；compose 里两个进程都是 `stop_grace_period: 30s`。这一步只对主动探测 `/readyz` 的编排器生效。`deploy/nginx.conf` 和 `deploy/nginx.stack.conf` 不探这个路径，开源 nginx 也没有主动健康检查，关停时它们仍会把请求打到已经关掉的监听上。
+两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后 `/readyz` 先返回 503，等 `DRAIN_DELAY`，再 `Shutdown`；这段时间监听还开着，`/healthz` 仍返回 200，避免编排器把正在退出的进程重启。`Shutdown` 不取消请求的 context，处理时限仍是 `REQUEST_TIMEOUT`。再次收到信号会打断摘流等待和 `Shutdown`。
+
+redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007](adr/0007-async-click-recording.md)。compose 里两个进程的 `stop_grace_period` 是 30s。这一步只对主动探测 `/readyz` 的编排器生效；`deploy/nginx.conf` 和 `deploy/nginx.stack.conf` 不探这个路径，开源 nginx 也没有主动健康检查，关停时仍会把请求打到已经关掉的监听上。
 
 ## 监控
 
-两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。Prometheus 每 5 秒一次的抓取不计入访问日志和 HTTP 指标，避免抓取噪声混进业务数据。本地 `make prometheus` 启动 Prometheus，按 `ADDR` 和 `CONSOLE_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080` 和 `8081`），生成的配置在 `deploy/prometheus.local.yml`；两个 job 的指标名相同，查询时用 `job` 区分。`/metrics` 与业务共用端口。公网入口是 `deploy/nginx.conf`（宿主机进程）和 `deploy/nginx.stack.conf`（容器栈），都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。Prometheus 和探活直接打进程端口。宿主机入口：`docker compose --profile edge up -d nginx`，地址 `127.0.0.1:8088`。容器栈：`make stack`，入口 `127.0.0.1:28088`，进程端口 `127.0.0.1:28080` 和 `127.0.0.1:28081`。`make up` 不启动这套栈。
+两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。抓取不进访问日志、公网不转发运维路径，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。本地 `make prometheus` 按 `ADDR` 和 `CONSOLE_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080` 和 `8081`），生成的配置在 `deploy/prometheus.local.yml`；两个 job 的指标名相同，查询时用 `job` 区分。Prometheus 和探活直接打进程端口。宿主机入口：`docker compose --profile edge up -d nginx`，地址 `127.0.0.1:8088`。容器栈：`make stack`，入口 `127.0.0.1:28088`，进程端口 `127.0.0.1:28080` 和 `127.0.0.1:28081`。`make up` 不启动这套栈。
 
 ## 尚未实现
 
-- OpenTelemetry 追踪（可选，ADR 0005）：等指标解释不了慢请求再加
-- 用户、登录和短链管理页面（ADR 0009 把边界留出来，留到后续阶段）
+- OpenTelemetry 追踪，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)
+- 用户、登录和短链管理页面，见 [ADR 0009](adr/0009-process-split-and-credentials.md)
