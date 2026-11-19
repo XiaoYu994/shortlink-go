@@ -84,6 +84,12 @@ func (l *tenantRateLimiter) allow(tn tenant.Tenant) (retryAfter time.Duration, a
 		entry.limiter = rate.NewLimiter(rate.Limit(tn.RateLimit), tn.RateLimit)
 	}
 	entry.lastSeen = now
+	/*
+		桶指针在锁里取出。解锁后别的请求可能因为速率变了给 entry.limiter 换新桶，
+		锁外再读这个字段就是数据竞争。*rate.Limiter 自己是并发安全的，锁外用它没问题；
+		赶上换桶时这次请求按旧桶算，只差一次。
+	*/
+	limiter := entry.limiter
 	l.sweepLocked(now)
 	l.mu.Unlock()
 
@@ -91,7 +97,7 @@ func (l *tenantRateLimiter) allow(tn tenant.Tenant) (retryAfter time.Duration, a
 		Reserve 在没有令牌时也会答应一个将来的时刻，Delay 就是需要等的时间。
 		超限时取消这次预约，把令牌还回去，否则每次被拒的请求都会往后推。
 	*/
-	reservation := entry.limiter.Reserve()
+	reservation := limiter.Reserve()
 	if !reservation.OK() {
 		return time.Second, false
 	}

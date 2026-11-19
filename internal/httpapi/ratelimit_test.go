@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +130,25 @@ func TestRateLimitChangeTakesEffect(t *testing.T) {
 	if rec := doRateLimitedRequest(t, handler, testAPIKey); rec.Code != http.StatusCreated {
 		t.Fatalf("request after limit increase = %d, want %d", rec.Code, http.StatusCreated)
 	}
+}
+
+/*
+TestRateLimiterConcurrentLimitChange 让同一个租户的并发请求交替带两种速率，
+每次都会换桶。换桶在锁里写 entry.limiter，取令牌必须用锁里拿到的那个桶，
+否则 -race 会报出锁外读和锁内写的竞争。这里不断言放行结果，只靠 -race 发现问题。
+*/
+func TestRateLimiterConcurrentLimitChange(t *testing.T) {
+	l := newTenantRateLimiter()
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			tn := tenant.Tenant{ID: 1, RateLimit: 10 + i%2}
+			for range 200 {
+				l.allow(tn)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // TestRateLimitDisabled 验证 rate_limit_per_second 为 0 时不限流，也不占限流 map。
