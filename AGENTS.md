@@ -34,6 +34,7 @@
 - 文件名要能说明内容：放 Base62 的文件叫 `base62.go`，放存储实现的叫 `store.go`。
 - 包名短小全小写，按业务领域分包（`link`、`tenant`、`analytics`），
   不用 `util`、`common`、`base` 这类万能包，也避开和标准库重名（`http`、`context`）。
+- 不按 Java 习惯做技术分层拆包（如 `handler/`、`middleware/`、`dto/`）；先在包内拆小结构体解耦依赖，出现明确依赖分叉时再按底座/业务边界拆包（见 `docs/adr/0019-httpapi-package-evolution.md`）。
 
 ### 路由
 

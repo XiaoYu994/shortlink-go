@@ -100,7 +100,7 @@
 
 ## 阶段 11：用户、组织和权限
 
-决策见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)。
+决策见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)；`httpapi` 的结构体与分包演进见 [ADR 0019](adr/0019-httpapi-package-evolution.md)（本阶段登录和成员 API 先在包内拆小结构体，不往 `Server` 堆字段）。
 
 - [x] `Principal` 替换 context 里的 `tenant.Tenant`，`Authorizer` 接口加 map 实现，handler 改成 `Can` 检查；行为不变
 - [ ] 迁移 007：`users`、`user_identities`、`memberships`、`sessions`、`invitations`；`api_keys` 加 `scopes`、`created_by`
@@ -117,7 +117,7 @@
 
 ## 阶段 12：审计日志（待立 ADR）
 
-开工前先立 ADR，定事件口径、写入事务边界和查询接口。
+开工前先立 ADR，定事件口径、写入事务边界和查询接口；同步评估是否按 [ADR 0019](adr/0019-httpapi-package-evolution.md) 拆出 `internal/httpx` 并分离 redirector/console HTTP 包。
 
 - [ ] 审计表和查询接口：记录操作人、动作、目标、时间和请求编号；与业务写在同一事务里提交
 
