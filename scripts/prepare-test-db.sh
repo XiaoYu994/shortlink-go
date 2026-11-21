@@ -68,7 +68,19 @@ case "$TEST_DATABASE_URL" in
 esac
 admin_url=${url_base%/*}/postgres$url_query
 
+# 只有从标准输入喂 SQL 的调用才给 docker 加 -i（psql_stdin）。
+# 其余调用不带 -i：调用方的 stdin 没关闭时（agent、部分 CI），-i 会让它一直等输入。
 psql_cmd() { # url [psql args...]
+	url=$1
+	shift
+	if command -v psql >/dev/null 2>&1; then
+		psql "$url" "$@"
+	else
+		docker run --rm --network host postgres:17-alpine psql "$url" "$@"
+	fi
+}
+
+psql_stdin() { # url [psql args...]，SQL 从标准输入读
 	url=$1
 	shift
 	if command -v psql >/dev/null 2>&1; then
@@ -91,7 +103,7 @@ if [ "$exists" != 1 ]; then
 fi
 
 # heredoc 必须紧跟命令。失败处理写在后面，避免 } 被吃进 SQL。
-if ! psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -1 <<'SQL'
+if ! psql_stdin "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -1 <<'SQL'
 DROP SCHEMA IF EXISTS public CASCADE;
 CREATE SCHEMA public;
 SQL
