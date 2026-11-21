@@ -54,8 +54,10 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	}
 	l.CreatedAt = time.Now().UTC()
 
-	// map 的值是 Link 而不是指针。ExpiresAt 还要再复制一份时间，
-	// 否则调用方改指针会改到存储里的到期时间。
+	/*
+		map 的值是 Link 而不是指针。ExpiresAt 还要再复制一份时间，
+		否则调用方改指针会改到存储里的到期时间。
+	*/
 	s.links[l.Code] = copyLink(*l)
 	return nil
 }

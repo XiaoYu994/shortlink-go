@@ -44,7 +44,7 @@ func (s *Server) validLinkCode(w http.ResponseWriter, r *http.Request) (string, 
 	return code, true
 }
 
-// writeLinkNotFound 统一管理接口的 404 正文，不区分不存在和其他租户。
+// writeLinkNotFound 统一跳转和管理接口的 404 正文，不区分不存在、已下线和其他租户。
 func (s *Server) writeLinkNotFound(r *http.Request, w http.ResponseWriter) {
 	s.writeError(r.Context(), w, http.StatusNotFound, "link not found")
 }

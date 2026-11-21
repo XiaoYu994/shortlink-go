@@ -27,8 +27,10 @@ MaxURLLength 限制原始 URL 的字节数，避免把超大输入存进数据�
 */
 const MaxURLLength = 2048
 
-// ErrNotFound 表示按短码查不到链接；HTTP 层用 errors.Is 映射成 404。
-// 管理接口把它同时用于「不存在」和「属于其他租户」，不透露链接是否存在。
+/*
+ErrNotFound 表示按短码查不到链接；HTTP 层用 errors.Is 映射成 404。
+管理接口把它同时用于「不存在」和「属于其他租户」，不透露链接是否存在。
+*/
 var ErrNotFound = errors.New("link not found")
 
 /*
@@ -276,8 +278,10 @@ func (l *Link) Status(now time.Time) Status {
 	}
 }
 
-// Servable 报告链接在 now 是否可以跳转。只有 active 可以。
-// SQL 跳转查询的过滤条件是它的等价写法，两者要对同一组用例保持一致。
+/*
+Servable 报告链接在 now 是否可以跳转。只有 active 可以。
+SQL 跳转查询的过滤条件是它的等价写法，两者要对同一组用例保持一致。
+*/
 func (l *Link) Servable(now time.Time) bool {
 	return l.Status(now) == StatusActive
 }
@@ -308,8 +312,10 @@ func ValidateURL(rawURL string) (string, error) {
 	if len(rawURL) > MaxURLLength {
 		return "", &ValidationError{Field: "url", Reason: fmt.Sprintf("longer than %d bytes", MaxURLLength)}
 	}
-	// TrimSpace 只去掉首尾空白；url.Parse 对 path 和 query 里的空格很宽容，
-	// 会悄悄接受，这里显式拒绝，保证存进库的都是写明白的 URL。
+	/*
+		TrimSpace 只去掉首尾空白；url.Parse 对 path 和 query 里的空格很宽容，
+		会悄悄接受，这里显式拒绝，保证存进库的都是写明白的 URL。
+	*/
 	if strings.ContainsFunc(rawURL, unicode.IsSpace) {
 		return "", &ValidationError{Field: "url", Reason: "must not contain whitespace"}
 	}

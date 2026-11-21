@@ -8,8 +8,10 @@ import (
 	"time"
 )
 
-// readyTimeout 是单次就绪探测的上限。
-// 探针要尽快失败，不能把 REQUEST_TIMEOUT 占满；编排器看到非 2xx 就摘流量。
+/*
+readyTimeout 是单次就绪探测的上限。
+探针要尽快失败，不能把 REQUEST_TIMEOUT 占满；编排器看到非 2xx 就摘流量。
+*/
 const readyTimeout = time.Second
 
 // errReadyPingMissing 表示就绪项没有接上探测函数。漏接线时按未就绪处理。

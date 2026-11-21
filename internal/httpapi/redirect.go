@@ -24,14 +24,14 @@ func (s *Server) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
 	// 非法短码不可能存在。先 404，避免超长 code 变成超长缓存 key。
 	if !idgen.ValidCode(code) {
-		s.writeError(r.Context(), w, http.StatusNotFound, "link not found")
+		s.writeLinkNotFound(r, w)
 		return
 	}
 
 	l, err := s.store.GetByCode(r.Context(), code)
 	if err != nil {
 		if errors.Is(err, link.ErrNotFound) {
-			s.writeError(r.Context(), w, http.StatusNotFound, "link not found")
+			s.writeLinkNotFound(r, w)
 			return
 		}
 		s.handleStoreError(w, r, "get link", err, "code", code)

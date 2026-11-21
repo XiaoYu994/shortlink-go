@@ -79,8 +79,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	l.TenantID = p.Tenant.ID
 
 	if err := s.store.Create(r.Context(), l); err != nil {
-		// 配额是租户策略，不是存储故障：403 告诉调用方链接本身没问题，本月额度用完了，删除链接也换不回来。
-		// 用哨兵错误的文本，不把存储层包了一层的内部前缀暴露给客户端。
+		/*
+			配额是租户策略，不是存储故障：403 告诉调用方链接本身没问题，本月额度用完了，删除链接也换不回来。
+			用哨兵错误的文本，不把存储层包了一层的内部前缀暴露给客户端。
+		*/
 		if errors.Is(err, link.ErrQuotaExceeded) {
 			s.writeError(r.Context(), w, http.StatusForbidden, link.ErrQuotaExceeded.Error())
 			return
@@ -166,8 +168,10 @@ func requestMessage(err error) string {
 	if errors.As(err, &parseErr) {
 		return "invalid expires_at"
 	}
-	// 数字、布尔、数组、对象不会进 time.Time 的解析，而是 UnmarshalTypeError。
-	// Field 用的是 json 名，例如 expires_at。
+	/*
+		数字、布尔、数组、对象不会进 time.Time 的解析，而是 UnmarshalTypeError。
+		Field 用的是 json 名，例如 expires_at。
+	*/
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) && strings.Contains(typeErr.Field, "expires_at") {
 		return "invalid expires_at"
