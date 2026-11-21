@@ -258,7 +258,7 @@ C 适合 GitHub 那样以个人为中心的产品；短链的 Key 多半给服�
   `SameSite` 用 `Lax` 不用 `Strict`：从身份提供方跳回回调地址是一次跨站的顶层 GET，`Strict` 下浏览器不带 Cookie，登录会失败。
 - **路由**：`GET /api/v1/auth/login`（跳去身份提供方）、`GET /api/v1/auth/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`。
   回调地址要登记在身份提供方那里，改它要同时改两边，按对外 URL 对待（ADR 0001）。nginx 已经把 `/api/` 转给 console，不用改。
-- **授权码流程的三个随机值**，每次登录新生成，放在一个 10 分钟的 HttpOnly Cookie 里，回调时比对后立刻删除：
+- **授权码流程的三个随机值**，每次登录新生成，放在一个 10 分钟的 HttpOnly Cookie 里，并用客户端密钥派生的 HMAC 防篡改。回调里 `state` 相符后立刻删除；不符或 Cookie 无效的请求不删除，避免无关访问清掉正在进行的登录：
   - `state`：防 CSRF 登录，回调里的 state 必须和 Cookie 里的一致；
   - PKCE 的 `code_verifier`：授权码被截获也换不到令牌；
   - `nonce`：写进 ID Token，防止旧令牌被重放。

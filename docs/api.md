@@ -11,6 +11,8 @@
 | console | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
 | console | `GET` | `/readyz` | 就绪检查，PostgreSQL 能 Ping 通才返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
+| console | `GET` | `/api/v1/auth/login` | 发起 OIDC 授权码登录（仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（仅配置完整 `OIDC_*` 时注册） |
 | console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
 | console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接（需要 `links:read`） |
@@ -217,6 +219,51 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 - `referrers` 取范围内点击数最多的 10 个 host，按点击数降序、host 升序；不返回合并的 long tail 行。
 - `unique_visitors` 是 `daily_visitors` 之和，按天去重后相加，不是跨天唯一人数。同一访客换 IP、换 User-Agent 或跨天都会算成多个。
 - 统计来自写入时的日聚合，只能看聚合结果，不能回查单次点击。来源、设备、客户端和访客从这一版上线后开始记录；迁移前的历史只有 `total_clicks`。
+
+## OIDC 登录
+
+只有在 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_REDIRECT_URL` 四个环境变量全部配置时，console 才注册登录和回调路由；全部为空时这两个路径返回 404，不影响纯 API Key 部署；只配一部分时启动失败。两个端点都不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store`，并且只接受 `GET`（`HEAD` 返回 405，避免探针消费授权码）。
+
+发起登录：
+
+```bash
+curl -i -c cookies.txt localhost:8081/api/v1/auth/login
+```
+
+返回 `302 Found`，`Location` 指向身份提供方的授权端点（带 `response_type=code`、`scope=openid email profile`、随机 `state`、PKCE `S256` 的 `code_challenge` 和随机 `nonce`），同时写入短期流程 Cookie `sl_oidc_flow`：
+
+- `HttpOnly`、`SameSite=Lax`、`Path=/api/v1/auth/callback`、`Max-Age=600`（10 分钟）。
+- `OIDC_REDIRECT_URL` 为 `https://` 时带 `Secure`；本地 HTTP 开发和冒烟（`http://127.0.0.1:...`）不带 `Secure`。
+- 值是 HMAC 签过的，客户端不能改 `state`、PKCE verifier、nonce 或过期时间。
+
+回调建会话：
+
+```http
+GET /api/v1/auth/callback?code=...&state=...
+Cookie: sl_oidc_flow=...
+```
+
+服务端行为：
+
+1. 读取流程 Cookie。缺失、HMAC 不符、损坏或超过 10 分钟返回 400 `{"error":"invalid login state"}`，并且不写 `Set-Cookie`，避免清掉浏览器里仍有效的登录。
+2. 常量时间比对回调 `state` 与流程 Cookie 中的 `state`。不符同样返回 400，不删除 Cookie，也不联系身份提供方。
+3. `state` 相符后立即删除一次性流程 Cookie。上游返回 `error` 参数（如 `access_denied`）返回 401 `{"error":"authentication failed"}`；缺少 `code` 返回 400 `{"error":"missing authorization code"}`。
+4. 用 `code` 和 PKCE `code_verifier` 向令牌端点换令牌，用 `go-oidc` 校验 ID Token 的签名（JWKS）、`iss`、`aud`、`exp`，再与流程 Cookie 中的 `nonce` 做常量时间比对。ID Token 只在回调里消费一次，不持久化。
+5. 按 `(issuer, subject)` 在 PostgreSQL 里查找或创建用户（不按邮箱自动关联不同提供方）。再次登录只在新声明非空时覆盖邮箱和昵称；邮箱缺失时保留原来的 `email_verified`，同一邮箱已经验证过的不会被后来的 `false` 降回去。每次登录都用 `crypto/rand` 签发全新的服务端会话令牌（`sls_` 加 64 位小写十六进制，库里只存 SHA-256，默认有效期 7 天）。
+6. 写入会话 Cookie `sl_session`（`HttpOnly`、`SameSite=Lax`、`Path=/api/`、`Max-Age` 取数据库时钟下 `expires_at - now()`，`OIDC_REDIRECT_URL` 为 `https://` 时带 `Secure`），返回 `200 OK` 和用户摘要：
+
+```json
+{
+  "user": {
+    "id": 1,
+    "email": "alice@example.com",
+    "name": "Alice"
+  },
+  "expires_at": "2026-11-28T14:15:00Z"
+}
+```
+
+响应体不包含会话明文令牌。授权码过期/重放或 ID Token 校验失败返回 401 `{"error":"authentication failed"}`；身份提供方不可达、JWKS 拉取失败、令牌端点返回 `server_error` / `temporarily_unavailable`、5xx 或客户端密钥配置错误返回 502 `{"error":"identity provider unavailable"}`；超时返回 504。
 
 ## 跳转
 

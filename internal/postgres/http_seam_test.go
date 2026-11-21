@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"shortlink/internal/httpapi"
 	"shortlink/internal/identity"
+	"shortlink/internal/identity/fakeoidc"
 )
 
 /*
@@ -195,6 +197,140 @@ func TestHTTPAPIKeyScopesEnforced(t *testing.T) {
 
 	if n := countLinks(t, store); n != 2 {
 		t.Fatalf("links = %d, want 2 (existing + writeOnly create)", n)
+	}
+}
+
+/*
+TestHTTPOIDCLoginPersistsSession 端到端串联 fakeoidc、identity.OIDCProvider、
+httpapi 登录/回调路由和真实 PostgreSQL 存储，验证首次与重复登录落库和会话 Cookie 哈希一致。
+*/
+func TestHTTPOIDCLoginPersistsSession(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	const (
+		clientID     = "shortlink-console"
+		clientSecret = "shortlink-console-secret"
+		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
+	)
+	fake := fakeoidc.Start(t, clientID, clientSecret)
+	provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+		Issuer:       fake.URL(),
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		HTTPClient:   fake.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+		Keys:       store,
+		Authorizer: identity.NewMapAuthorizer(),
+		OIDC:       provider,
+		Sessions:   store,
+	})
+	handler := srv.ConsoleRoutes()
+
+	completeLogin := func() (token string, userID int64) {
+		t.Helper()
+		loginRec := httptest.NewRecorder()
+		handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil))
+		if loginRec.Code != http.StatusFound {
+			t.Fatalf("login status = %d, want 302", loginRec.Code)
+		}
+		var flowCookie *http.Cookie
+		for _, c := range loginRec.Result().Cookies() {
+			if c.Name == httpapi.OIDCFlowCookieName {
+				flowCookie = c
+			}
+		}
+		if flowCookie == nil {
+			t.Fatal("missing flow cookie")
+		}
+
+		noRedirect := &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		authResp, err := noRedirect.Get(loginRec.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("GET fake authorize: %v", err)
+		}
+		defer func() { _ = authResp.Body.Close() }()
+		if authResp.StatusCode != http.StatusFound {
+			t.Fatalf("fake authorize status = %d, want 302", authResp.StatusCode)
+		}
+		cbURL, err := url.Parse(authResp.Header.Get("Location"))
+		if err != nil {
+			t.Fatalf("parse callback url: %v", err)
+		}
+
+		cbReq := httptest.NewRequest(http.MethodGet, cbURL.RequestURI(), nil)
+		cbReq.AddCookie(flowCookie)
+		cbRec := httptest.NewRecorder()
+		handler.ServeHTTP(cbRec, cbReq)
+		if cbRec.Code != http.StatusOK {
+			t.Fatalf("callback status = %d, want 200, body = %s", cbRec.Code, cbRec.Body.String())
+		}
+
+		var sessCookie *http.Cookie
+		for _, c := range cbRec.Result().Cookies() {
+			if c.Name == httpapi.SessionCookieName {
+				sessCookie = c
+			}
+		}
+		if sessCookie == nil {
+			t.Fatal("missing session cookie")
+		}
+		var resp struct {
+			User struct {
+				ID    int64  `json:"id"`
+				Email string `json:"email"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(cbRec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode callback response: %v", err)
+		}
+		if resp.User.Email != "alice@example.com" {
+			t.Errorf("email = %q, want alice@example.com", resp.User.Email)
+		}
+		return sessCookie.Value, resp.User.ID
+	}
+
+	firstToken, firstUserID := completeLogin()
+	secondToken, secondUserID := completeLogin()
+	if firstUserID != secondUserID {
+		t.Fatalf("second login user id = %d, want %d", secondUserID, firstUserID)
+	}
+	if firstToken == secondToken {
+		t.Fatal("second login reused the same session token")
+	}
+
+	var storedHash []byte
+	var storedUserID int64
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT user_id, token_hash FROM sessions WHERE token_hash = $1`,
+		identity.HashSessionToken(firstToken),
+	).Scan(&storedUserID, &storedHash); err != nil {
+		t.Fatalf("lookup first session by hash: %v", err)
+	}
+	if storedUserID != firstUserID || !bytes.Equal(storedHash, identity.HashSessionToken(firstToken)) {
+		t.Fatalf("stored session mismatch: user=%d", storedUserID)
+	}
+
+	var usersCount, sessionsCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&usersCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM sessions`).Scan(&sessionsCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if usersCount != 1 || sessionsCount != 2 {
+		t.Fatalf("counts (users=%d, sessions=%d), want (1, 2)", usersCount, sessionsCount)
 	}
 }
 

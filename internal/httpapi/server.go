@@ -72,10 +72,18 @@ type RedirectOptions struct {
 	TrustProxyHeaders bool
 }
 
-// ConsoleOptions 是管理进程的鉴权与授权依赖。
+// ConsoleOptions 是管理进程的鉴权、授权与可选 OIDC 登录依赖。
 type ConsoleOptions struct {
 	Keys       APIKeyAuthenticator
 	Authorizer Authorizer
+	/*
+		OIDC 非空时，ConsoleRoutes 会注册 /api/v1/auth/login 和 /api/v1/auth/callback。
+		为空时不挂登录路由，只支持 API Key（ADR 0018）。
+	*/
+	OIDC     OIDCClient
+	Sessions SessionCreator
+	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
+	SessionTTL time.Duration
 }
 
 // Server 持有 handler 需要的依赖。用 NewRedirector 或 NewConsole 构造。
@@ -86,6 +94,7 @@ type Server struct {
 	stats          LinkStatsStore
 	keys           APIKeyAuthenticator
 	authz          Authorizer
+	auth           *authHandler
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
@@ -115,6 +124,9 @@ type serverDeps struct {
 	stats             LinkStatsStore
 	keys              APIKeyAuthenticator
 	authorizer        Authorizer
+	oidc              OIDCClient
+	sessions          SessionCreator
+	sessionTTL        time.Duration
 	requestTimeout    time.Duration
 	registry          *prometheus.Registry
 	clicks            ClickRecorder
@@ -148,6 +160,9 @@ func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Dur
 		stats:          store,
 		keys:           opts.Keys,
 		authorizer:     opts.Authorizer,
+		oidc:           opts.OIDC,
+		sessions:       opts.Sessions,
+		sessionTTL:     opts.SessionTTL,
 		requestTimeout: requestTimeout,
 		registry:       registry,
 	})
@@ -164,13 +179,19 @@ registry 由 main 创建并注入，/metrics 从这里收集；测试每次传�
 避免同名指标重复注册。HTTP 指标在这个构造函数里注册一次，两个路由方法只组装中间件。
 */
 func newServer(d serverDeps) *Server {
+	logger := slog.New(requestIDHandler{Handler: d.logger.Handler()})
+	var auth *authHandler
+	if d.oidc != nil {
+		auth = newAuthHandler(logger, d.oidc, d.sessions, d.sessionTTL)
+	}
 	return &Server{
-		logger:         slog.New(requestIDHandler{Handler: d.logger.Handler()}),
+		logger:         logger,
 		store:          d.store,
 		admin:          d.admin,
 		stats:          d.stats,
 		keys:           d.keys,
 		authz:          d.authorizer,
+		auth:           auth,
 		requestTimeout: d.requestTimeout,
 		registry:       d.registry,
 		metrics:        newHTTPMetrics(d.registry),
@@ -187,21 +208,29 @@ type errorResponse struct {
 
 // clientGone 报告请求是否因客户端断开而被取消，这时响应已经没人接收，handler 直接返回，不要记成服务端错误。
 func (s *Server) clientGone(r *http.Request) bool {
+	return isClientGone(s.logger, r)
+}
+
+func isClientGone(logger *slog.Logger, r *http.Request) bool {
 	if r.Context().Err() == context.Canceled {
-		s.logger.DebugContext(r.Context(), "request canceled by client", "path", r.URL.Path)
+		logger.DebugContext(r.Context(), "request canceled by client", "path", r.URL.Path)
 		return true
 	}
 	return false
 }
 
 func (s *Server) writeJSON(ctx context.Context, w http.ResponseWriter, status int, v any) {
+	writeJSONResponse(s.logger, ctx, w, status, v)
+}
+
+func writeJSONResponse(logger *slog.Logger, ctx context.Context, w http.ResponseWriter, status int, v any) {
 	/*
 		先编码到内存，成功后再写响应。直接 Encoder.Encode 会在状态码已经发出后才可能失败，客户端只能收到半截 body。
 		ctx 只负责把 request_id 带进日志，不用它取消已经开始的写出。
 	*/
 	data, err := json.Marshal(v)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "marshal JSON response", "err", err)
+		logger.ErrorContext(ctx, "marshal JSON response", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -209,12 +238,16 @@ func (s *Server) writeJSON(ctx context.Context, w http.ResponseWriter, status in
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := w.Write(data); err != nil {
-		s.logger.ErrorContext(ctx, "write JSON response", "err", err)
+		logger.ErrorContext(ctx, "write JSON response", "err", err)
 	}
 }
 
 func (s *Server) writeError(ctx context.Context, w http.ResponseWriter, status int, msg string) {
-	s.writeJSON(ctx, w, status, errorResponse{Error: msg})
+	writeErrorResponse(s.logger, ctx, w, status, msg)
+}
+
+func writeErrorResponse(logger *slog.Logger, ctx context.Context, w http.ResponseWriter, status int, msg string) {
+	writeJSONResponse(logger, ctx, w, status, errorResponse{Error: msg})
 }
 
 /*
@@ -234,25 +267,29 @@ attrs 是额外的日志字段。跳转失败时带上短码；创建失败时�
 数据库慢或负载高时这类日志会成片出现，不该和真正的 bug 混在一个级别。
 */
 func (s *Server) handleStoreError(w http.ResponseWriter, r *http.Request, op string, err error, attrs ...any) {
-	if s.clientGone(r) {
+	handleStoreErr(s.logger, w, r, op, err, attrs...)
+}
+
+func handleStoreErr(logger *slog.Logger, w http.ResponseWriter, r *http.Request, op string, err error, attrs ...any) {
+	if isClientGone(logger, r) {
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		args := append([]any{"op", op, "err", err}, attrs...)
-		s.logger.WarnContext(r.Context(), "request timed out", args...)
-		s.writeError(r.Context(), w, http.StatusGatewayTimeout, "request timed out")
+		logger.WarnContext(r.Context(), "request timed out", args...)
+		writeErrorResponse(logger, r.Context(), w, http.StatusGatewayTimeout, "request timed out")
 		return
 	}
 	var temp temporaryError
 	if errors.As(err, &temp) && temp.Temporary() {
 		args := append([]any{"op", op, "err", err}, attrs...)
-		s.logger.WarnContext(r.Context(), "store overloaded", args...)
-		s.writeError(r.Context(), w, http.StatusServiceUnavailable, "service temporarily overloaded")
+		logger.WarnContext(r.Context(), "store overloaded", args...)
+		writeErrorResponse(logger, r.Context(), w, http.StatusServiceUnavailable, "service temporarily overloaded")
 		return
 	}
 	args := append([]any{"err", err}, attrs...)
-	s.logger.ErrorContext(r.Context(), op, args...)
-	s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+	logger.ErrorContext(r.Context(), op, args...)
+	writeErrorResponse(logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 }
 
 /*

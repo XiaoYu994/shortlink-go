@@ -1,8 +1,9 @@
 /*
-Package identity 定义管理请求的认证主体（Principal）和权限授权实现（阶段 11、ADR 0018）。
+Package identity 定义管理请求的认证主体（Principal）、会话令牌、OIDC 客户端与权限授权实现（阶段 11、ADR 0018）。
 
 人与 API Key 是两种凭证，鉴权后统一写成 context 里的 Principal，
 handler 只读 Principal 并通过 Authorizer 检查权限。
+OIDC 发现、授权码兑换和 ID Token 验签也收口在本包，httpapi 只编排 HTTP 跳转、Cookie 和错误响应。
 */
 package identity
 

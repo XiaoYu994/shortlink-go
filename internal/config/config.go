@@ -2,7 +2,7 @@
 Package config 从环境变量加载进程配置，并在启动时校验。
 
 未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、摘流等待、日志格式、回源保护参数或剖析地址不合法时，LoadConfig 返回错误，
+连接池参数、请求超时、关机超时、摘流等待、日志格式、回源保护参数、剖析地址或 OIDC 配置不合法时，LoadConfig 返回错误，
 由 main 终止启动。
 */
 package config
@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -83,12 +84,32 @@ type Config struct {
 		只接受回环地址：剖析数据里有堆内容，端点也没有鉴权。见 ADR 0013。
 	*/
 	PprofAddr string
+
+	/*
+		OIDC 是管理进程的 OIDC 登录配置（阶段 11、ADR 0018）。
+		四个字段要么全配，要么全空；全空时 console 不挂登录路由，只支持 API Key。
+		redirector 忽略这组配置。
+	*/
+	OIDC OIDCConfig
+}
+
+// OIDCConfig 存放标准 OIDC 身份提供方的接入参数。
+type OIDCConfig struct {
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+}
+
+// Enabled 报告是否配置了 OIDC 登录。validate 已保证四个字段同空或同非空。
+func (c OIDCConfig) Enabled() bool {
+	return c.Issuer != ""
 }
 
 /*
 LoadConfig 从环境变量读取进程配置。
 未设置的可选项使用默认值；DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、摘流等待、日志格式或回源保护参数不合法时返回错误。
+连接池参数、请求超时、关机超时、摘流等待、日志格式、回源保护参数、剖析地址或 OIDC 配置不合法时返回错误。
 
 REDIS_URL 是完整的连接串：redis://localhost:6379/0，没有密码也可以；
 需要 TLS 用 rediss://，需要密码和 DB 编号就写进 URL。
@@ -127,6 +148,12 @@ func LoadConfig() (Config, error) {
 		cfg.TrustProxyHeaders = trust
 	}
 	cfg.PprofAddr = os.Getenv("PPROF_ADDR")
+	cfg.OIDC = OIDCConfig{
+		Issuer:       os.Getenv("OIDC_ISSUER"),
+		ClientID:     os.Getenv("OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("OIDC_REDIRECT_URL"),
+	}
 	if level := os.Getenv("LOG_LEVEL"); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
 			return Config{}, fmt.Errorf("LOG_LEVEL: %w", err)
@@ -245,6 +272,33 @@ func validate(cfg Config) error {
 	}
 	if cfg.PprofAddr != "" && !isLoopbackAddr(cfg.PprofAddr) {
 		return errors.New("PPROF_ADDR must be a loopback address such as 127.0.0.1:6060")
+	}
+	if err := validateOIDC(cfg.OIDC); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateOIDC(c OIDCConfig) error {
+	set := 0
+	for _, v := range []string{c.Issuer, c.ClientID, c.ClientSecret, c.RedirectURL} {
+		if v != "" {
+			set++
+		}
+	}
+	if set == 0 {
+		return nil
+	}
+	if set != 4 {
+		return errors.New("OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty")
+	}
+	issuer, err := url.Parse(c.Issuer)
+	if err != nil || (issuer.Scheme != "http" && issuer.Scheme != "https") || issuer.Host == "" || issuer.RawQuery != "" || issuer.Fragment != "" {
+		return fmt.Errorf("OIDC_ISSUER must be a valid http or https URL without query or fragment, got %q", c.Issuer)
+	}
+	redirect, err := url.Parse(c.RedirectURL)
+	if err != nil || (redirect.Scheme != "http" && redirect.Scheme != "https") || redirect.Host == "" || redirect.Fragment != "" {
+		return fmt.Errorf("OIDC_REDIRECT_URL must be a valid http or https URL, got %q", c.RedirectURL)
 	}
 	return nil
 }

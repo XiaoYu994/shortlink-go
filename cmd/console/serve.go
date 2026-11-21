@@ -1,5 +1,5 @@
 /*
-serve 是 console 的 HTTP 模式：提供短链增删改查、统计、/healthz、/readyz 和 /metrics。
+serve 是 console 的 HTTP 模式：提供可选的 OIDC 登录、短链增删改查、统计、/healthz、/readyz 和 /metrics。
 创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
 密钥命令仍然走 admin.go 的路径，不加载 Redis。
 */
@@ -72,10 +72,38 @@ func runServe() error {
 		FetchTimeout:    cfg.CacheFetchTimeout,
 		Logger:          logger,
 	})
-	// 鉴权直接用 pgStore，缓存不参与 API Key 校验。
+
+	/*
+		四个 OIDC_* 环境变量全空时不挂载登录路由，只支持 API Key（ADR 0018）。
+		变量类型保持为接口，只在启用时赋值，避免把带类型的 nil 指针放进 ConsoleOptions.OIDC。
+	*/
+	var (
+		oidcClient httpapi.OIDCClient
+		sessions   httpapi.SessionCreator
+	)
+	if cfg.OIDC.Enabled() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+		})
+		cancel()
+		if err != nil {
+			return fmt.Errorf("init oidc provider: %w", err)
+		}
+		oidcClient = provider
+		sessions = pgStore
+		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
+	}
+
+	// 鉴权和会话都直接用 pgStore，缓存不参与身份校验。
 	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, httpapi.ConsoleOptions{
 		Keys:       pgStore,
 		Authorizer: identity.NewMapAuthorizer(),
+		OIDC:       oidcClient,
+		Sessions:   sessions,
 	})
 	/*
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。

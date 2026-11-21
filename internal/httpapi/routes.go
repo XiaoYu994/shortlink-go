@@ -34,14 +34,17 @@ func (s *Server) RedirectRoutes() http.Handler {
 }
 
 /*
-ConsoleRoutes 返回管理进程的路由：短链增删改查、统计、存活检查、就绪检查和指标。
-鉴权和限流只包管理 API。公开跳转、存活检查、就绪检查和指标不认密钥，也不限流。
+ConsoleRoutes 返回管理进程的路由：可选 OIDC 登录、短链增删改查、统计、存活检查、就绪检查和指标。
+鉴权和限流只包管理 API。登录回调、公开跳转、存活检查、就绪检查和指标不认密钥，也不限流。
 每个管理路由单独包：ServeMux 没有路由组，
 套在 /api/v1/ 前缀上的中间件不会被更具体的路由继承。
 */
 func (s *Server) ConsoleRoutes() http.Handler {
 	mux := http.NewServeMux()
 	s.registerOperational(mux)
+	if s.auth != nil {
+		s.auth.registerRoutes(mux)
+	}
 	mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
 	mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))
 	mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksRead, s.handleGet))

@@ -13,7 +13,7 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
-| `console` | `POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）；`key`、`tenant` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
+| `console` | `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`（配置 OIDC 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC 身份提供方；`key`、`tenant` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
 
@@ -28,8 +28,8 @@ shortlink/
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
-│   ├── httpapi/         # handler、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer
-│   ├── identity/        # 认证主体（Principal）、权限常量与固定角色权限表（MapAuthorizer）
+│   ├── httpapi/         # handler、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、SessionCreator
+│   ├── identity/        # 认证主体（Principal）、会话令牌、OIDC 客户端与固定角色权限表（MapAuthorizer）
 │   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
 │   ├── tenant/          # 租户和 API Key 的明文格式、哈希
@@ -56,7 +56,7 @@ cmd/console    -> httpapi, identity, postgres, storemetrics, cache, config；key
 cmd/migrate    -> golang-migrate
 config         -> postgres
 httpapi        -> link, click, idgen, identity, tenant, golang.org/x/time/rate
-identity       -> tenant
+identity       -> tenant, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
 postgres       -> link, click, idgen, identity, tenant
 memorystore    -> link, idgen
 storemetrics   -> link
@@ -170,6 +170,7 @@ GET /api/v1/links/{code}/stats
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
+- `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由，只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
 
 ## 退出
 

@@ -81,6 +81,10 @@ type Tamper struct {
 	Nonce string
 	// ExpiredIDToken 为 true 时，ID Token 的 exp 设为过去时刻。
 	ExpiredIDToken bool
+	// TokenError 非空时，客户端凭据校验通过后 /token 直接返回该 OAuth error，HTTP 状态 400。
+	TokenError string
+	// JWKSFailure 为 true 时，/jwks 返回 500，用来模拟签名密钥拉不下来。
+	JWKSFailure bool
 }
 
 // AuthorizeRequest 记录最近一次打到 /authorize 的查询参数，用于断言登录跳转参数。
@@ -207,6 +211,13 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleJWKS(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	fail := s.tamper.JWKSFailure
+	s.mu.Unlock()
+	if fail {
+		http.Error(w, "jwks unavailable", http.StatusInternalServerError)
+		return
+	}
 	pub := &s.keys.primary.PublicKey
 	eBytes := big.NewInt(int64(pub.E)).Bytes()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -306,6 +317,13 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if !ok || clientID != s.clientID || clientSecret != s.clientSecret {
 		w.Header().Set("WWW-Authenticate", `Basic realm="fake-oidc"`)
 		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
+		return
+	}
+	s.mu.Lock()
+	tokenErr := s.tamper.TokenError
+	s.mu.Unlock()
+	if tokenErr != "" {
+		writeOAuthError(w, http.StatusBadRequest, tokenErr, "injected token error")
 		return
 	}
 
