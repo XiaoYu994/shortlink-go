@@ -262,7 +262,7 @@ C 适合 GitHub 那样以个人为中心的产品；短链的 Key 多半给服�
   - `state`：防 CSRF 登录，回调里的 state 必须和 Cookie 里的一致；
   - PKCE 的 `code_verifier`：授权码被截获也换不到令牌；
   - `nonce`：写进 ID Token，防止旧令牌被重放。
-- **ID Token 校验**：签名（JWKS）、`iss`、`aud`、`exp`、`nonce` 都由 go-oidc 校验，handler 不手写 JWT 解析。
+- **ID Token 校验**：签名（JWKS）、`iss`、`aud`、`exp` 由 go-oidc 校验，`nonce` 由 go-oidc 解析到 `IDToken.Nonce` 后由 callback handler 与流程 Cookie 比对，handler 不手写 JWT 解析。
   ID Token 只在回调里用一次，用来建会话，之后不保存；会话仍然是决策点 3 的服务端会话。
 - **会话 token**：和 API Key 一样，`crypto/rand` 生成，库里只存 SHA-256。每次登录都发新 token（防会话固定攻击）。
 - **配置**：`OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_REDIRECT_URL`。四个都为空时 console 不挂登录路由，只支持 API Key，现有部署不受影响；只配了一部分时启动失败。

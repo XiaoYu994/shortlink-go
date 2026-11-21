@@ -30,6 +30,7 @@ shortlink/
 ├── internal/
 │   ├── httpapi/         # handler、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer
 │   ├── identity/        # 认证主体（Principal）、权限常量与固定角色权限表（MapAuthorizer）
+│   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
 │   ├── tenant/          # 租户和 API Key 的明文格式、哈希
 │   ├── idgen/           # 随机短码生成
@@ -56,7 +57,7 @@ cmd/migrate    -> golang-migrate
 config         -> postgres
 httpapi        -> link, click, idgen, identity, tenant, golang.org/x/time/rate
 identity       -> tenant
-postgres       -> link, click, idgen, tenant
+postgres       -> link, click, idgen, identity, tenant
 memorystore    -> link, idgen
 storemetrics   -> link
 cache          -> link
