@@ -57,6 +57,17 @@ func TestMigration007APIKeyDefaultsAndConstraints(t *testing.T) {
 	}
 }
 
+// 迁移 008 去掉 scopes 的 DEFAULT：漏写 scopes 的 INSERT 必须失败，而不是悄悄拿到全部权限。
+func TestMigration008APIKeyScopesHasNoDefault(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	hash := bytes.Repeat([]byte{0x7f}, 32)
+	_, err := store.db.ExecContext(context.Background(),
+		`INSERT INTO api_keys (tenant_id, key_hash) VALUES ($1, $2)`, tenantID, hash)
+	if err == nil {
+		t.Fatal("INSERT without scopes succeeded, want NOT NULL violation")
+	}
+}
+
 func TestMigration007UsersAndIdentitiesConstraints(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()

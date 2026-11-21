@@ -234,7 +234,8 @@ func TestAuthenticate(t *testing.T) {
 	}
 	var keyID int64
 	if err := store.db.QueryRowContext(ctx,
-		`INSERT INTO api_keys (tenant_id, key_hash) VALUES ($1, $2) RETURNING id`, tenantID, hash).Scan(&keyID); err != nil {
+		`INSERT INTO api_keys (tenant_id, key_hash, scopes) VALUES ($1, $2, $3::text[]) RETURNING id`,
+		tenantID, hash, permsToStrings(identity.AllAPIKeyScopes())).Scan(&keyID); err != nil {
 		t.Fatalf("insert api key: %v", err)
 	}
 

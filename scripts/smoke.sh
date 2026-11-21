@@ -101,8 +101,8 @@ SELECT '${name}'
 WHERE NOT EXISTS (
     SELECT 1 FROM api_keys WHERE key_hash = decode('${hash}', 'hex')
 );
-INSERT INTO api_keys (tenant_id, key_hash)
-SELECT t.id, decode('${hash}', 'hex')
+INSERT INTO api_keys (tenant_id, key_hash, scopes)
+SELECT t.id, decode('${hash}', 'hex'), ARRAY['links:read', 'links:write', 'stats:read']
 FROM tenants t
 WHERE t.name = '${name}'
   AND NOT EXISTS (SELECT 1 FROM api_keys WHERE key_hash = decode('${hash}', 'hex'))

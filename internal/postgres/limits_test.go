@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/link"
 	"shortlink/internal/tenant"
 )
@@ -266,7 +267,8 @@ func TestAuthenticateReturnsRateLimit(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
-		`INSERT INTO api_keys (tenant_id, key_hash) VALUES ($1, $2)`, tenantID, hash); err != nil {
+		`INSERT INTO api_keys (tenant_id, key_hash, scopes) VALUES ($1, $2, $3::text[])`,
+		tenantID, hash, permsToStrings(identity.AllAPIKeyScopes())); err != nil {
 		t.Fatalf("insert api key: %v", err)
 	}
 

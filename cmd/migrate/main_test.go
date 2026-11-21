@@ -199,10 +199,10 @@ func TestMigrationFilesPaired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	if len(entries) != 7 {
-		t.Fatalf("versions = %d, want 7: %v", len(entries), entries)
+	if len(entries) != 8 {
+		t.Fatalf("versions = %d, want 8: %v", len(entries), entries)
 	}
-	for version := 1; version <= 7; version++ {
+	for version := 1; version <= 8; version++ {
 		pair, ok := entries[version]
 		if !ok || !pair.up || !pair.down {
 			t.Fatalf("version %d = %+v, want up and down", version, pair)
