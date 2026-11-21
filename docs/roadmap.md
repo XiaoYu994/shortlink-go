@@ -104,7 +104,7 @@
 
 - [x] `Principal` 替换 context 里的 `tenant.Tenant`，`Authorizer` 接口加 map 实现，handler 改成 `Can` 检查；行为不变
 - [x] 迁移 007：`users`、`user_identities`、`memberships`、`sessions`、`invitations`；`api_keys` 加 `scopes`、`created_by`
-- [ ] API Key scope：存量 Key 全部 scope，`console key issue --scope`
+- [x] API Key scope：存量 Key 全部 scope，`console key issue --scope`
 - [ ] compose 加 Dex 和测试用户；`internal/identity` 的假 OIDC 服务（httptest）
 - [ ] 登录流程：login 跳转（state、PKCE、nonce）、callback 校验 ID Token、建会话
 - [ ] 会话鉴权中间件、`X-Org-ID` 成员校验、`CrossOriginProtection`；logout 和 `GET /api/v1/me`

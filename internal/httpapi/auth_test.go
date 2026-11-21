@@ -21,22 +21,76 @@ import (
 
 func TestAuthenticate(t *testing.T) {
 	const otherKey = "slk_ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+	scopedPrincipal := identity.Principal{
+		Tenant:    tenant.Tenant{ID: 7},
+		ActorKind: identity.ActorAPIKey,
+		ActorID:   42,
+		Scopes:    []identity.Perm{identity.PermLinksRead, identity.PermStatsRead},
+	}
 	tests := []struct {
-		name       string
-		header     string
-		keys       APIKeyAuthenticator
-		wantStatus int
+		name          string
+		header        string
+		keys          APIKeyAuthenticator
+		wantStatus    int
+		wantPrincipal identity.Principal
 	}{
 		{name: "missing", wantStatus: http.StatusUnauthorized},
 		{name: "basic", header: "Basic " + testAPIKey, wantStatus: http.StatusUnauthorized},
 		{name: "malformed", header: "Bearer nope", wantStatus: http.StatusUnauthorized},
 		{name: "unknown", header: "Bearer " + otherKey, wantStatus: http.StatusUnauthorized},
-		{name: "ok", header: "Bearer " + testAPIKey, wantStatus: http.StatusNoContent},
-		{name: "lowercase scheme", header: "bearer " + testAPIKey, wantStatus: http.StatusNoContent},
+		{
+			name:       "ok",
+			header:     "Bearer " + testAPIKey,
+			wantStatus: http.StatusNoContent,
+			wantPrincipal: identity.Principal{
+				Tenant:    tenant.Tenant{ID: 1},
+				ActorKind: identity.ActorAPIKey,
+				ActorID:   1,
+				Scopes:    identity.AllAPIKeyScopes(),
+			},
+		},
+		{
+			name:       "lowercase scheme",
+			header:     "bearer " + testAPIKey,
+			wantStatus: http.StatusNoContent,
+			wantPrincipal: identity.Principal{
+				Tenant:    tenant.Tenant{ID: 1},
+				ActorKind: identity.ActorAPIKey,
+				ActorID:   1,
+				Scopes:    identity.AllAPIKeyScopes(),
+			},
+		},
+		{
+			name:          "preserves actor id and subset scopes",
+			header:        "Bearer " + testAPIKey,
+			keys:          principalKey{testAPIKey: scopedPrincipal},
+			wantStatus:    http.StatusNoContent,
+			wantPrincipal: scopedPrincipal,
+		},
 		{
 			name:       "db error",
 			header:     "Bearer " + testAPIKey,
 			keys:       failingKey{err: errors.New("db down")},
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:   "user principal rejected",
+			header: "Bearer " + testAPIKey,
+			keys: principalKey{testAPIKey: {
+				Tenant:    tenant.Tenant{ID: 1},
+				ActorKind: identity.ActorUser,
+				Role:      identity.RoleOwner,
+			}},
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:   "member scope rejected",
+			header: "Bearer " + testAPIKey,
+			keys: principalKey{testAPIKey: {
+				Tenant:    tenant.Tenant{ID: 1},
+				ActorKind: identity.ActorAPIKey,
+				Scopes:    []identity.Perm{identity.PermLinksRead, identity.PermMembersWrite},
+			}},
 			wantStatus: http.StatusInternalServerError,
 		},
 	}
@@ -73,8 +127,11 @@ func TestAuthenticate(t *testing.T) {
 				}
 			}
 			if tt.wantStatus == http.StatusNoContent {
-				if !saw || got.Tenant.ID != 1 || got.ActorKind != identity.ActorAPIKey || !slices.Equal(got.Scopes, identity.AllAPIKeyScopes()) {
-					t.Errorf("principal = %+v, saw = %v, want tenant 1 api_key with all scopes", got, saw)
+				if !saw || got.Tenant != tt.wantPrincipal.Tenant ||
+					got.ActorKind != tt.wantPrincipal.ActorKind ||
+					got.ActorID != tt.wantPrincipal.ActorID ||
+					!slices.Equal(got.Scopes, tt.wantPrincipal.Scopes) {
+					t.Errorf("principal = %+v, saw = %v, want %+v", got, saw, tt.wantPrincipal)
 				}
 			}
 		})
@@ -132,8 +189,18 @@ func (s *countingStore) GetByCode(context.Context, string) (*link.Link, error) {
 
 type failingKey struct{ err error }
 
-func (f failingKey) Authenticate(context.Context, string) (tenant.Tenant, error) {
-	return tenant.Tenant{}, f.err
+func (f failingKey) Authenticate(context.Context, string) (identity.Principal, error) {
+	return identity.Principal{}, f.err
+}
+
+type principalKey map[string]identity.Principal
+
+func (k principalKey) Authenticate(_ context.Context, token string) (identity.Principal, error) {
+	p, ok := k[token]
+	if !ok {
+		return identity.Principal{}, tenant.ErrUnauthenticated
+	}
+	return p, nil
 }
 
 type stubAuthorizer struct {
@@ -281,11 +348,12 @@ func TestRequirePerm(t *testing.T) {
 
 func TestConsoleRoutePermissions(t *testing.T) {
 	tests := []struct {
-		method   string
-		path     string
-		body     string
-		wantPerm identity.Perm
-		wantOK   int
+		method    string
+		path      string
+		body      string
+		wantPerm  identity.Perm
+		wantAllow []identity.Perm
+		wantOK    int
 	}{
 		{
 			method:   http.MethodPost,
@@ -307,11 +375,12 @@ func TestConsoleRoutePermissions(t *testing.T) {
 			wantOK:   http.StatusOK,
 		},
 		{
-			method:   http.MethodPatch,
-			path:     "/api/v1/links/AbC123xy",
-			body:     `{"disabled":true}`,
-			wantPerm: identity.PermLinksWrite,
-			wantOK:   http.StatusOK,
+			method:    http.MethodPatch,
+			path:      "/api/v1/links/AbC123xy",
+			body:      `{"disabled":true}`,
+			wantPerm:  identity.PermLinksWrite,
+			wantAllow: []identity.Perm{identity.PermLinksWrite, identity.PermLinksRead},
+			wantOK:    http.StatusOK,
 		},
 		{
 			method:   http.MethodDelete,
@@ -400,8 +469,12 @@ func TestConsoleRoutePermissions(t *testing.T) {
 			if rec.Code != tt.wantOK {
 				t.Fatalf("allow status = %d, want %d, body = %s", rec.Code, tt.wantOK, rec.Body.String())
 			}
-			if !slices.Equal(allow.perms, []identity.Perm{tt.wantPerm}) {
-				t.Errorf("allow asked perms = %v, want [%s]", allow.perms, tt.wantPerm)
+			wantAllow := tt.wantAllow
+			if wantAllow == nil {
+				wantAllow = []identity.Perm{tt.wantPerm}
+			}
+			if !slices.Equal(allow.perms, wantAllow) {
+				t.Errorf("allow asked perms = %v, want %v", allow.perms, wantAllow)
 			}
 		})
 	}
@@ -446,5 +519,100 @@ func TestRateLimitRunsBeforeRequirePerm(t *testing.T) {
 	}
 	if len(authz.perms) != 1 {
 		t.Errorf("authz calls after rate limited request = %d, want 1", len(authz.perms))
+	}
+}
+
+/*
+TestConsoleRouteAPIKeyScopes 用真实的 MapAuthorizer 走完管理路由，
+按 API Key 的 scope 矩阵验证所有端点的放行和 403 拒绝。
+*/
+func TestConsoleRouteAPIKeyScopes(t *testing.T) {
+	routes := []struct {
+		name     string
+		method   string
+		path     string
+		body     string
+		needPerm identity.Perm
+		wantOK   int
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/v1/links", body: `{"url":"https://example.com/s"}`, needPerm: identity.PermLinksWrite, wantOK: http.StatusCreated},
+		{name: "list", method: http.MethodGet, path: "/api/v1/links", needPerm: identity.PermLinksRead, wantOK: http.StatusOK},
+		{name: "detail", method: http.MethodGet, path: "/api/v1/links/AbC123xy", needPerm: identity.PermLinksRead, wantOK: http.StatusOK},
+		{name: "update", method: http.MethodPatch, path: "/api/v1/links/AbC123xy", body: `{"disabled":true}`, needPerm: identity.PermLinksWrite, wantOK: http.StatusOK},
+		{name: "delete", method: http.MethodDelete, path: "/api/v1/links/AbC123xy", needPerm: identity.PermLinksWrite, wantOK: http.StatusNoContent},
+		{name: "stats", method: http.MethodGet, path: "/api/v1/links/AbC123xy/stats", needPerm: identity.PermStatsRead, wantOK: http.StatusOK},
+	}
+
+	keySets := []struct {
+		name   string
+		scopes []identity.Perm
+	}{
+		{name: "all", scopes: identity.AllAPIKeyScopes()},
+		{name: "links_read", scopes: []identity.Perm{identity.PermLinksRead}},
+		{name: "links_write", scopes: []identity.Perm{identity.PermLinksWrite}},
+		{name: "stats_read", scopes: []identity.Perm{identity.PermStatsRead}},
+		{name: "read_and_stats", scopes: []identity.Perm{identity.PermLinksRead, identity.PermStatsRead}},
+	}
+
+	for _, ks := range keySets {
+		for _, rt := range routes {
+			t.Run(ks.name+"/"+rt.name, func(t *testing.T) {
+				store := &countingStore{}
+				admin := &stubAdmin{
+					listFn: func(context.Context, link.ListOptions) ([]link.AdminLink, error) { return nil, nil },
+					getFn: func(context.Context, int64, string) (*link.AdminLink, error) {
+						return &link.AdminLink{Link: link.Link{Code: "AbC123xy", URL: "https://example.com"}}, nil
+					},
+					updFn: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+						return &link.AdminLink{Link: link.Link{Code: "AbC123xy", URL: "https://example.com"}}, nil
+					},
+					delFn: func(context.Context, int64, string) error { return nil },
+					statsFn: func(_ context.Context, _ int64, code string, from, to time.Time) (*link.Stats, error) {
+						return &link.Stats{Code: code, From: from, To: to}, nil
+					},
+				}
+				srv := newServer(serverDeps{
+					logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+					store:          store,
+					admin:          admin,
+					stats:          admin,
+					requestTimeout: 5 * time.Second,
+					registry:       newTestRegistry(),
+					keys: principalKey{testAPIKey: {
+						Tenant:    tenant.Tenant{ID: 1},
+						ActorKind: identity.ActorAPIKey,
+						ActorID:   10,
+						Scopes:    ks.scopes,
+					}},
+					authorizer: identity.NewMapAuthorizer(),
+				})
+
+				req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(rt.body))
+				authorize(req)
+				rec := httptest.NewRecorder()
+				srv.ConsoleRoutes().ServeHTTP(rec, req)
+
+				want := http.StatusForbidden
+				if slices.Contains(ks.scopes, rt.needPerm) {
+					want = rt.wantOK
+					// 只有 links:write 的 PATCH 不返回链接对象。
+					if rt.name == "update" && !slices.Contains(ks.scopes, identity.PermLinksRead) {
+						want = http.StatusNoContent
+					}
+				}
+				if rec.Code != want {
+					t.Fatalf("status = %d, want %d, body = %s", rec.Code, want, rec.Body.String())
+				}
+				if rt.name == "update" && want == http.StatusNoContent && rec.Body.Len() != 0 {
+					t.Errorf("body = %q, want empty", rec.Body.String())
+				}
+				if rt.name == "update" && want == http.StatusOK && !strings.Contains(rec.Body.String(), `"url":"https://example.com"`) {
+					t.Errorf("body = %s, want updated link", rec.Body.String())
+				}
+				if want == http.StatusForbidden && rec.Body.String() != `{"error":"forbidden"}` {
+					t.Errorf("body = %q, want forbidden", rec.Body.String())
+				}
+			})
+		}
 	}
 }

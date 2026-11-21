@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"shortlink/internal/cache"
+	"shortlink/internal/identity"
 	"shortlink/internal/link"
 	"shortlink/internal/postgres"
 	"shortlink/internal/tenant"
@@ -106,12 +108,45 @@ func TestConsoleRejectsBadExpiryWithoutOpeningStore(t *testing.T) {
 	}
 }
 
+func TestConsoleRejectsBadScopeWithoutOpeningStore(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "empty value", args: []string{"key", "issue", "--name", "acme", "--scope", ""}},
+		{name: "trailing comma", args: []string{"key", "issue", "--name", "acme", "--scope", "links:read,"}},
+		{name: "unknown scope", args: []string{"key", "issue", "--name", "acme", "--scope", "links:delete"}},
+		{name: "member scope", args: []string{"key", "issue", "--name", "acme", "--scope", "members:write"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := run(tt.args, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
+				t.Fatal("store opened")
+				return nil, nil, nil
+			}, failLinkOpen(t))
+			if err == nil || !errors.Is(err, identity.ErrInvalidAPIKeyScope) || !strings.Contains(err.Error(), "parse scope") {
+				t.Fatalf("run error = %v, want parse scope wrapping ErrInvalidAPIKeyScope", err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
 func TestConsoleIssueListRevoke(t *testing.T) {
 	expires := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 	plaintext := "slk_" + strings.Repeat("ab", 32)
 	store := &fakeAdmin{issued: postgres.IssuedAPIKey{
-		Tenant:    tenant.Tenant{ID: 7, ExternalID: "platform-1"},
-		Key:       postgres.APIKey{ID: 9, TenantID: 7, CreatedAt: expires, ExpiresAt: &expires},
+		Tenant: tenant.Tenant{ID: 7, ExternalID: "platform-1"},
+		Key: postgres.APIKey{
+			ID:        9,
+			TenantID:  7,
+			Scopes:    identity.AllAPIKeyScopes(),
+			CreatedAt: expires,
+			ExpiresAt: &expires,
+		},
 		Plaintext: plaintext,
 	}}
 	var stdout, stderr bytes.Buffer
@@ -128,8 +163,12 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	if store.params.ExpiresAt == nil || !store.params.ExpiresAt.Equal(expires) {
 		t.Fatalf("ExpiresAt = %v, want %v", store.params.ExpiresAt, expires)
 	}
+	if !slices.Equal(store.params.Scopes, identity.AllAPIKeyScopes()) {
+		t.Fatalf("Scopes = %v, want all api key scopes", store.params.Scopes)
+	}
 	if !strings.Contains(stdout.String(), "tenant_id: 7\n") ||
 		!strings.Contains(stdout.String(), "key_id: 9\n") ||
+		!strings.Contains(stdout.String(), "scopes: links:read,links:write,stats:read\n") ||
 		!strings.Contains(stdout.String(), "api_key: "+plaintext+"\n") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
@@ -139,7 +178,11 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 
 	stdout.Reset()
 	store.keys = []postgres.APIKey{{
-		ID: 9, TenantID: 7, CreatedAt: expires, ExpiresAt: &expires,
+		ID:        9,
+		TenantID:  7,
+		Scopes:    []identity.Perm{identity.PermLinksRead, identity.PermStatsRead},
+		CreatedAt: expires,
+		ExpiresAt: &expires,
 	}}
 	if err := run([]string{"key", "list", "--tenant", "7"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
@@ -149,7 +192,10 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	if store.listed != 7 {
 		t.Fatalf("listed tenant = %d, want 7", store.listed)
 	}
-	if !strings.Contains(stdout.String(), "9\t7\t") || strings.Contains(stdout.String(), plaintext) {
+	if !strings.Contains(stdout.String(), "id\ttenant_id\tcreated_at\texpires_at\trevoked_at\tscopes\n") ||
+		!strings.Contains(stdout.String(), "9\t7\t") ||
+		!strings.Contains(stdout.String(), "\tlinks:read,stats:read\n") ||
+		strings.Contains(stdout.String(), plaintext) {
 		t.Fatalf("list stdout = %q", stdout.String())
 	}
 
@@ -161,6 +207,48 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	}
 	if store.revoked != 9 || stdout.String() != "revoked: 9\n" {
 		t.Fatalf("revoked = %d, stdout = %q", store.revoked, stdout.String())
+	}
+}
+
+func TestConsoleIssueWithScopes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []identity.Perm
+	}{
+		{
+			name: "comma separated with spaces",
+			args: []string{"key", "issue", "--tenant", "3", "--scope", "stats:read, links:read"},
+			want: []identity.Perm{identity.PermLinksRead, identity.PermStatsRead},
+		},
+		{
+			name: "repeated flags and duplicates",
+			args: []string{"key", "issue", "--tenant", "3", "--scope", "links:write", "--scope", "links:read,links:write"},
+			want: []identity.Perm{identity.PermLinksRead, identity.PermLinksWrite},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeAdmin{issued: postgres.IssuedAPIKey{
+				Tenant:    tenant.Tenant{ID: 3},
+				Key:       postgres.APIKey{ID: 4, TenantID: 3, Scopes: tt.want, CreatedAt: time.Unix(0, 0).UTC()},
+				Plaintext: "slk_" + strings.Repeat("ef", 32),
+			}}
+			var stdout, stderr bytes.Buffer
+			err := run(tt.args, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
+				return store, io.NopCloser(nil), nil
+			}, failLinkOpen(t))
+			if err != nil {
+				t.Fatalf("issue: %v", err)
+			}
+			if !slices.Equal(store.params.Scopes, tt.want) {
+				t.Fatalf("params.Scopes = %v, want %v", store.params.Scopes, tt.want)
+			}
+			if !strings.Contains(stdout.String(), "scopes: "+formatScopes(tt.want)+"\n") {
+				t.Fatalf("stdout = %q, want scopes line", stdout.String())
+			}
+		})
 	}
 }
 

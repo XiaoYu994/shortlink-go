@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/postgres"
 	"shortlink/internal/tenant"
 )
@@ -61,6 +63,9 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 	}
 	tenantID := parseID(t, stdout.String(), "tenant_id")
 	keyID := parseID(t, stdout.String(), "key_id")
+	if gotScopes := parseField(t, stdout.String(), "scopes"); gotScopes != "links:read,links:write,stats:read" {
+		t.Fatalf("default scopes = %q, want links:read,links:write,stats:read", gotScopes)
+	}
 	plaintext := parseField(t, stdout.String(), "api_key")
 	if !tenant.ValidToken(plaintext) {
 		t.Fatalf("api_key is not a valid token")
@@ -76,11 +81,37 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	err = run([]string{"key", "issue", "--tenant", strconv.FormatInt(tenantID, 10), "--scope", "stats:read", "--scope", "links:read"},
+		&stdout, &stderr, openStore, failLinkOpen(t))
+	if err != nil {
+		t.Fatalf("issue scoped key: %v\nstderr: %s", err, stderr.String())
+	}
+	scopedKeyID := parseID(t, stdout.String(), "key_id")
+	if gotScopes := parseField(t, stdout.String(), "scopes"); gotScopes != "links:read,stats:read" {
+		t.Fatalf("scoped key scopes = %q, want links:read,stats:read", gotScopes)
+	}
+	scopedPlaintext := parseField(t, stdout.String(), "api_key")
+	gotPrincipal, err := postgres.NewStore(db).Authenticate(ctx, scopedPlaintext)
+	if err != nil {
+		t.Fatalf("Authenticate scoped key: %v", err)
+	}
+	wantScopes := []identity.Perm{identity.PermLinksRead, identity.PermStatsRead}
+	if gotPrincipal.Tenant.ID != tenantID || gotPrincipal.ActorID != scopedKeyID || !slices.Equal(gotPrincipal.Scopes, wantScopes) {
+		t.Fatalf("Authenticate scoped = %+v, want tenant %d key %d scopes %v", gotPrincipal, tenantID, scopedKeyID, wantScopes)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	err = run([]string{"key", "list", "--tenant", strconv.FormatInt(tenantID, 10)}, &stdout, &stderr, openStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("list: %v\nstderr: %s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), strconv.FormatInt(keyID, 10)+"\t") || strings.Contains(stdout.String(), plaintext) {
+	if !strings.Contains(stdout.String(), strconv.FormatInt(keyID, 10)+"\t") ||
+		!strings.Contains(stdout.String(), "\tlinks:read,links:write,stats:read\n") ||
+		!strings.Contains(stdout.String(), strconv.FormatInt(scopedKeyID, 10)+"\t") ||
+		!strings.Contains(stdout.String(), "\tlinks:read,stats:read\n") ||
+		strings.Contains(stdout.String(), plaintext) ||
+		strings.Contains(stdout.String(), scopedPlaintext) {
 		t.Fatalf("list stdout = %q", stdout.String())
 	}
 

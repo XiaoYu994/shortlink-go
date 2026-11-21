@@ -11,16 +11,16 @@
 | console | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
 | console | `GET` | `/readyz` | 就绪检查，PostgreSQL 能 Ping 通才返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| console | `POST` | `/api/v1/links` | 创建短链 |
-| console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页 |
-| console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接 |
-| console | `PATCH` | `/api/v1/links/{code}` | 修改 `url`、`expires_at` 和/或 `disabled` |
-| console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204 |
-| console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客 |
+| console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
+| console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
+| console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接（需要 `links:read`） |
+| console | `PATCH` | `/api/v1/links/{code}` | 修改 `url`、`expires_at` 和/或 `disabled`（需要 `links:write`；同时有 `links:read` 才返回链接，否则 204） |
+| console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204（需要 `links:write`） |
+| console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客（需要 `stats:read`） |
 
 本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。宿主机进程的入口是 `deploy/nginx.conf`，容器栈的入口是 `deploy/nginx.stack.conf`。两份都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 和 `/readyz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放，由这层反向代理不转发。
 
-管理 API 的租户只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不透露链接是否存在；自己的被封禁链接是例外，修改和删除返回 403。每个管理请求先鉴权、再按租户限流；超限返回 429 和 `Retry-After`。每个租户还有每月创建数配额，满了返回 403。两者都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
+管理 API 的租户与权限只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不透露链接是否存在；自己的被封禁链接是例外，修改和删除返回 403。每个管理请求按顺序经过鉴权、按租户限流和权限校验：密钥无效返回 401，超限返回 429 和 `Retry-After`，密钥缺少当前接口所需 scope 返回 403 和 `{"error":"forbidden"}`。每个租户还有每月创建数配额，满了返回 403。配额和限流都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
 
 ## 创建短链
 
@@ -164,7 +164,7 @@ curl -i -X PATCH localhost:8081/api/v1/links/AbC123xy \
 - 空对象、三个字段都没出现、未知字段、尾部多余内容都返回 400。
 - 不能改 `code`、`tenant_id`、`created_at`、`clicks`、`clicks_today`。
 
-成功返回 200 和修改后的链接对象。修改 URL 不改变过期状态；把 `expires_at` 改到将来可以让过期链接重新生效。停用的链接仍然可以改 URL、改过期时间和删除。修改采用最后提交者生效，不做 `If-Match` 或版本号。
+成功时，密钥同时有 `links:read` 则返回 200 和修改后的链接对象；只有 `links:write` 则返回 204，响应体为空。写权限不能借这次响应读出 `url`、过期时间、停用时间和点击数。不存在或其他租户的链接仍然是 404。修改 URL 不改变过期状态；把 `expires_at` 改到将来可以让过期链接重新生效。停用的链接仍然可以改 URL、改过期时间和删除。修改采用最后提交者生效，不做 `If-Match` 或版本号。
 
 被封禁的链接对租户只读：`PATCH` 返回 403 和 `{"error":"link is banned"}`，任何字段都不改。其他租户的链接不管封没封都是 404。封禁由平台运维命令执行，没有 HTTP 接口；命令和原因取值见 [runbook](runbook.md) 的「封禁和解封链接」。
 

@@ -220,6 +220,7 @@ C 适合 GitHub 那样以个人为中心的产品；短链的 Key 多半给服�
 可以给 Key 记一个 `created_by`，审计时仍然能追溯到签发人。
 
 **推荐 B，加 `created_by`。** 存量 Key 迁移成全部 scope，行为不变。
+`PATCH` 成功时，只有同时具备 `links:read` 才返回链接对象；只有 `links:write` 返回 204，避免写权限把 `url` 和点击数读出来。
 
 ---
 

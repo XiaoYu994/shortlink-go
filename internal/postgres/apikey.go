@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/tenant"
 )
 
@@ -33,6 +34,7 @@ APIKey 是可以给运维看的密钥状态。
 type APIKey struct {
 	ID        int64
 	TenantID  int64
+	Scopes    []identity.Perm
 	CreatedAt time.Time
 	ExpiresAt *time.Time
 	RevokedAt *time.Time
@@ -46,26 +48,34 @@ type IssuedAPIKey struct {
 }
 
 /*
-IssueAPIKeyParams 指定把密钥发给谁。
+IssueAPIKeyParams 指定把密钥发给谁以及授予哪些权限。
 TenantID 和 Name 只能填一个：前者给已有租户加一把密钥，后者新建租户再签发。
 ExternalID 只在新建时写入；空字符串存成 NULL，避免占住唯一约束。
 ExpiresAt 为 nil 表示不过期。
+Scopes 必填，nil 和空切片都拒绝：零值不能表示全权限。
+只允许 links:read、links:write、stats:read，写入前会去重并按规范顺序排列。
+要授予全部密钥权限时传入 identity.AllAPIKeyScopes()。
 */
 type IssueAPIKeyParams struct {
 	TenantID   int64
 	Name       string
 	ExternalID string
 	ExpiresAt  *time.Time
+	Scopes     []identity.Perm
 }
 
 /*
-IssueAPIKey 新建或找到租户，生成一把密钥，把哈希和可选的到期时间写入 api_keys。
+IssueAPIKey 新建或找到租户，生成一把密钥，把哈希、权限范围和可选的到期时间写入 api_keys。
 租户和密钥在同一个事务里：插入密钥失败时，新建的租户也会回滚。
 */
 func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPIKey, error) {
 	p.Name = strings.TrimSpace(p.Name)
 	p.ExternalID = strings.TrimSpace(p.ExternalID)
 	if err := validateIssue(p); err != nil {
+		return IssuedAPIKey{}, err
+	}
+	scopes, err := identity.NormalizeAPIKeyScopes(p.Scopes)
+	if err != nil {
 		return IssuedAPIKey{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -93,12 +103,12 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 		t := p.ExpiresAt.UTC()
 		expires = &t
 	}
-	key := APIKey{TenantID: tn.ID, ExpiresAt: expires}
+	key := APIKey{TenantID: tn.ID, Scopes: scopes, ExpiresAt: expires}
 	var scannedExpires sql.NullTime
 	err = tx.QueryRowContext(ctx, `
-INSERT INTO api_keys (tenant_id, key_hash, expires_at)
-VALUES ($1, $2, $3)
-RETURNING id, created_at, expires_at`, tn.ID, hash, expires).Scan(&key.ID, &key.CreatedAt, &scannedExpires)
+INSERT INTO api_keys (tenant_id, key_hash, expires_at, scopes)
+VALUES ($1, $2, $3, $4::text[])
+RETURNING id, created_at, expires_at`, tn.ID, hash, expires, permsToStrings(scopes)).Scan(&key.ID, &key.CreatedAt, &scannedExpires)
 	if err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
@@ -111,6 +121,22 @@ RETURNING id, created_at, expires_at`, tn.ID, hash, expires).Scan(&key.ID, &key.
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
 	return IssuedAPIKey{Tenant: tn, Key: key, Plaintext: plaintext}, nil
+}
+
+func permsToStrings(perms []identity.Perm) []string {
+	out := make([]string, len(perms))
+	for i, perm := range perms {
+		out[i] = string(perm)
+	}
+	return out
+}
+
+func parseAPIKeyScopes(raw []string) ([]identity.Perm, error) {
+	perms := make([]identity.Perm, len(raw))
+	for i, item := range raw {
+		perms[i] = identity.Perm(item)
+	}
+	return identity.NormalizeAPIKeyScopes(perms)
 }
 
 func validateIssue(p IssueAPIKeyParams) error {
@@ -181,7 +207,7 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID int64) ([]APIKey, erro
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, tenant_id, created_at, expires_at, revoked_at
+SELECT id, tenant_id, scopes, created_at, expires_at, revoked_at
 FROM api_keys
 WHERE tenant_id = $1
 ORDER BY id`, tenantID)
@@ -192,11 +218,20 @@ ORDER BY id`, tenantID)
 
 	var keys []APIKey
 	for rows.Next() {
-		var key APIKey
-		var expiresAt, revokedAt sql.NullTime
-		if err := rows.Scan(&key.ID, &key.TenantID, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
+		var (
+			key       APIKey
+			rawScopes []string
+			expiresAt sql.NullTime
+			revokedAt sql.NullTime
+		)
+		if err := rows.Scan(&key.ID, &key.TenantID, &rawScopes, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
 			return nil, fmt.Errorf("list api keys: %w", err)
 		}
+		scopes, err := parseAPIKeyScopes(rawScopes)
+		if err != nil {
+			return nil, fmt.Errorf("list api keys: %w", err)
+		}
+		key.Scopes = scopes
 		if expiresAt.Valid {
 			t := expiresAt.Time.UTC()
 			key.ExpiresAt = &t

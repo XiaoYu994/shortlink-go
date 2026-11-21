@@ -25,12 +25,17 @@ var testAPIKeyOther = "slk_" + strings.Repeat("cd", 32)
 // tenantKey 按密钥返回不同租户，用来验证按租户限流和改值生效。
 type tenantKey map[string]tenant.Tenant
 
-func (k tenantKey) Authenticate(_ context.Context, token string) (tenant.Tenant, error) {
+func (k tenantKey) Authenticate(_ context.Context, token string) (identity.Principal, error) {
 	tn, ok := k[token]
 	if !ok {
-		return tenant.Tenant{}, tenant.ErrUnauthenticated
+		return identity.Principal{}, tenant.ErrUnauthenticated
 	}
-	return tn, nil
+	return identity.Principal{
+		Tenant:    tn,
+		ActorKind: identity.ActorAPIKey,
+		ActorID:   tn.ID,
+		Scopes:    identity.AllAPIKeyScopes(),
+	}, nil
 }
 
 func newLimitTestServer(keys APIKeyAuthenticator) *Server {

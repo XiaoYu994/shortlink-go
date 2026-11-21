@@ -35,7 +35,7 @@ func TestHTTPListCursorRoundTrip(t *testing.T) {
 	setTodayClicks(t, store, tenantID, second.ID, 2)
 	setTodayClicks(t, store, tenantID, third.ID, 9)
 
-	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID})
+	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
 		t.Fatalf("IssueAPIKey: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestHTTPRejectsExpiredAndRevokedAPIKeys(t *testing.T) {
 	ctx := context.Background()
 	handler := newConsoleHandler(store)
 
-	expired, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID})
+	expired, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
 		t.Fatalf("IssueAPIKey: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestHTTPRejectsExpiredAndRevokedAPIKeys(t *testing.T) {
 	}
 	assertUnauthorizedCreate(t, handler, expired.Plaintext)
 
-	revoked, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID})
+	revoked, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
 		t.Fatalf("IssueAPIKey: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestHTTPRejectsExpiredAndRevokedAPIKeys(t *testing.T) {
 		t.Fatalf("links = %d, want 0 after rejected creates", n)
 	}
 
-	valid, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID})
+	valid, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
 		t.Fatalf("IssueAPIKey: %v", err)
 	}
@@ -106,6 +106,95 @@ func TestHTTPRejectsExpiredAndRevokedAPIKeys(t *testing.T) {
 	}
 	if n := countLinks(t, store); n != 1 {
 		t.Fatalf("links = %d, want 1", n)
+	}
+}
+
+/*
+TestHTTPAPIKeyScopesEnforced 端到端验证数据库里的 api_keys.scopes 经过
+Authenticate、Principal 和 MapAuthorizer 真正约束每个管理端点。
+*/
+func TestHTTPAPIKeyScopesEnforced(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+	existing := createLink(t, store, tenantID, "https://example.com/scoped")
+	handler := newConsoleHandler(store)
+	// 默认每秒 10 次。这里连续打完整张权限表，测的是 scope，不是限流。
+	if _, err := store.db.ExecContext(ctx, `UPDATE tenants SET rate_limit_per_second = 0 WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("disable rate limit: %v", err)
+	}
+
+	readOnly, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{
+		TenantID: tenantID,
+		Scopes:   []identity.Perm{identity.PermLinksRead},
+	})
+	if err != nil {
+		t.Fatalf("IssueAPIKey readOnly: %v", err)
+	}
+	statsOnly, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{
+		TenantID: tenantID,
+		Scopes:   []identity.Perm{identity.PermStatsRead},
+	})
+	if err != nil {
+		t.Fatalf("IssueAPIKey statsOnly: %v", err)
+	}
+	writeOnly, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{
+		TenantID: tenantID,
+		Scopes:   []identity.Perm{identity.PermLinksWrite},
+	})
+	if err != nil {
+		t.Fatalf("IssueAPIKey writeOnly: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		token      string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{name: "readOnly list ok", token: readOnly.Plaintext, method: http.MethodGet, path: "/api/v1/links", wantStatus: http.StatusOK},
+		{name: "readOnly detail ok", token: readOnly.Plaintext, method: http.MethodGet, path: "/api/v1/links/" + existing.Code, wantStatus: http.StatusOK},
+		{name: "readOnly create forbidden", token: readOnly.Plaintext, method: http.MethodPost, path: "/api/v1/links", body: `{"url":"https://example.com/blocked"}`, wantStatus: http.StatusForbidden},
+		{name: "readOnly update forbidden", token: readOnly.Plaintext, method: http.MethodPatch, path: "/api/v1/links/" + existing.Code, body: `{"disabled":true}`, wantStatus: http.StatusForbidden},
+		{name: "readOnly delete forbidden", token: readOnly.Plaintext, method: http.MethodDelete, path: "/api/v1/links/" + existing.Code, wantStatus: http.StatusForbidden},
+		{name: "readOnly stats forbidden", token: readOnly.Plaintext, method: http.MethodGet, path: "/api/v1/links/" + existing.Code + "/stats", wantStatus: http.StatusForbidden},
+		{name: "statsOnly stats ok", token: statsOnly.Plaintext, method: http.MethodGet, path: "/api/v1/links/" + existing.Code + "/stats", wantStatus: http.StatusOK},
+		{name: "statsOnly list forbidden", token: statsOnly.Plaintext, method: http.MethodGet, path: "/api/v1/links", wantStatus: http.StatusForbidden},
+		{name: "writeOnly create ok", token: writeOnly.Plaintext, method: http.MethodPost, path: "/api/v1/links", body: `{"url":"https://example.com/write-only"}`, wantStatus: http.StatusCreated},
+		{name: "writeOnly list forbidden", token: writeOnly.Plaintext, method: http.MethodGet, path: "/api/v1/links", wantStatus: http.StatusForbidden},
+		{name: "writeOnly update hides link", token: writeOnly.Plaintext, method: http.MethodPatch, path: "/api/v1/links/" + existing.Code, body: `{"url":"https://example.com/write-only-updated"}`, wantStatus: http.StatusNoContent},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+tt.token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if tt.wantStatus == http.StatusForbidden && rec.Body.String() != `{"error":"forbidden"}` {
+				t.Errorf("body = %q, want forbidden", rec.Body.String())
+			}
+			if tt.wantStatus == http.StatusNoContent && rec.Body.Len() != 0 {
+				t.Errorf("body = %q, want empty", rec.Body.String())
+			}
+		})
+	}
+
+	detail := httptest.NewRequest(http.MethodGet, "/api/v1/links/"+existing.Code, nil)
+	detail.Header.Set("Authorization", "Bearer "+readOnly.Plaintext)
+	detailRec := httptest.NewRecorder()
+	handler.ServeHTTP(detailRec, detail)
+	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "https://example.com/write-only-updated") {
+		t.Fatalf("read back status = %d, body = %s", detailRec.Code, detailRec.Body.String())
+	}
+
+	if n := countLinks(t, store); n != 2 {
+		t.Fatalf("links = %d, want 2 (existing + writeOnly create)", n)
 	}
 }
 

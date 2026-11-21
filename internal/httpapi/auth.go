@@ -10,9 +10,9 @@ import (
 	"shortlink/internal/tenant"
 )
 
-// APIKeyAuthenticator 按明文密钥查找租户。接口放在使用方。
+// APIKeyAuthenticator 按明文密钥查找租户与权限范围，返回对应的 Principal。接口放在使用方。
 type APIKeyAuthenticator interface {
-	Authenticate(ctx context.Context, token string) (tenant.Tenant, error)
+	Authenticate(ctx context.Context, token string) (identity.Principal, error)
 }
 
 // Authorizer 判断当前执行者是否拥有指定权限。接口放在使用方（ADR 0018）。
@@ -51,6 +51,8 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (identity.Pri
 authenticate 只包管理 API。/r/、/healthz、/readyz、/metrics 不经过它。
 密钥缺失、格式不对、未知、过期和吊销都是 401，响应不区分是哪一种。
 数据库故障沿用存储错误的映射，不伪装成密钥无效。
+查到的主体必须通过 ValidAPIKeyPrincipal：不是 API Key，或 scope 超出密钥允许的范围，
+都是鉴权实现的错误，返回 500，不把用户角色或 members:write 放进后续授权。
 */
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +70,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			s.writeUnauthorized(r, w)
 			return
 		}
-		tn, err := s.keys.Authenticate(r.Context(), token)
+		p, err := s.keys.Authenticate(r.Context(), token)
 		if errors.Is(err, tenant.ErrUnauthenticated) {
 			s.writeUnauthorized(r, w)
 			return
@@ -77,11 +79,10 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			s.handleStoreError(w, r, "authenticate api key", err)
 			return
 		}
-		// 当前阶段 API Key 还没有独立 scope 列，先给全量权限保持存量行为不变。
-		p := identity.Principal{
-			Tenant:    tn,
-			ActorKind: identity.ActorAPIKey,
-			Scopes:    identity.AllAPIKeyScopes(),
+		if !identity.ValidAPIKeyPrincipal(p) {
+			s.logger.ErrorContext(r.Context(), "authenticate api key", "err", errors.New("invalid api key principal"))
+			s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+			return
 		}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
 	})

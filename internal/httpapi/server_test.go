@@ -27,14 +27,19 @@ import (
 // testAPIKey 是测试用的固定密钥，符合 slk_ 加 64 位小写十六进制。
 const testAPIKey = "slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
-// allowKey 只接受 testAPIKey，并把它映射成租户 1。
+// allowKey 只接受 testAPIKey，并把它映射成租户 1 的全权限 API Key。
 type allowKey struct{}
 
-func (allowKey) Authenticate(_ context.Context, token string) (tenant.Tenant, error) {
+func (allowKey) Authenticate(_ context.Context, token string) (identity.Principal, error) {
 	if token == testAPIKey {
-		return tenant.Tenant{ID: 1}, nil
+		return identity.Principal{
+			Tenant:    tenant.Tenant{ID: 1},
+			ActorKind: identity.ActorAPIKey,
+			ActorID:   1,
+			Scopes:    identity.AllAPIKeyScopes(),
+		}, nil
 	}
-	return tenant.Tenant{}, tenant.ErrUnauthenticated
+	return identity.Principal{}, tenant.ErrUnauthenticated
 }
 
 func authorize(req *http.Request) {

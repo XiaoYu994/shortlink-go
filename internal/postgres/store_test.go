@@ -5,11 +5,13 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 	"shortlink/internal/tenant"
@@ -230,8 +232,9 @@ func TestAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
-	if _, err := store.db.ExecContext(ctx,
-		`INSERT INTO api_keys (tenant_id, key_hash) VALUES ($1, $2)`, tenantID, hash); err != nil {
+	var keyID int64
+	if err := store.db.QueryRowContext(ctx,
+		`INSERT INTO api_keys (tenant_id, key_hash) VALUES ($1, $2) RETURNING id`, tenantID, hash).Scan(&keyID); err != nil {
 		t.Fatalf("insert api key: %v", err)
 	}
 
@@ -239,8 +242,11 @@ func TestAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if got.ID != tenantID {
-		t.Errorf("tenant ID = %d, want %d", got.ID, tenantID)
+	if got.Tenant.ID != tenantID || got.ActorKind != identity.ActorAPIKey || got.ActorID != keyID {
+		t.Errorf("Authenticate = %+v, want tenant %d api_key id %d", got, tenantID, keyID)
+	}
+	if !slices.Equal(got.Scopes, identity.AllAPIKeyScopes()) {
+		t.Errorf("Authenticate scopes = %v, want %v", got.Scopes, identity.AllAPIKeyScopes())
 	}
 
 	other, _, err := tenant.GenerateAPIKey()

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/link"
 )
 
@@ -22,8 +23,9 @@ type updateLinkRequest struct {
 }
 
 /*
-handleUpdate 修改 url、expires_at 和/或停用状态，成功返回 200 和修改后的链接。
-不能改 code、tenant_id、created_at、clicks、clicks_today；
+handleUpdate 修改 url、expires_at 和/或停用状态。
+具备 links:read 时返回 200 和修改后的链接；只有 links:write 时返回 204，
+不把 url、点击数和停用时间带回。不能改 code、tenant_id、created_at、clicks、clicks_today；
 未知字段、空对象和非法值返回 400。被封禁的链接返回 403，对租户只读。
 */
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +56,15 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminStoreError(w, r, "update link", err, code)
 		return
 	}
-	s.writeJSON(r.Context(), w, http.StatusOK, newLinkResponse(*updated))
+	/*
+		链接对象属于 links:read。只校验写权限的 PATCH 若把整行返回，
+		没有读权限的密钥也能看到目标地址和点击数。
+	*/
+	if s.authz != nil && s.authz.Can(p, identity.PermLinksRead) {
+		s.writeJSON(r.Context(), w, http.StatusOK, newLinkResponse(*updated))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 /*

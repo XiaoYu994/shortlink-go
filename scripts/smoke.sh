@@ -328,6 +328,31 @@ assert_eq "$status" 404 '其他租户删除链接'
 status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$code")
 assert_eq "$status" 200 '其他租户的删除不应影响链接'
 
+echo 'smoke: api key scopes'
+smoke_tenant_id=$(psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc \
+	"SELECT min(id) FROM tenants WHERE name = 'smoke'") || fail '查询冒烟租户 ID 失败'
+readonly_out=$(./bin/console key issue --tenant "$smoke_tenant_id" --scope links:read) || fail '签发只读 API Key 失败'
+readonly_key=$(printf '%s\n' "$readonly_out" | awk '/^api_key: /{print $2}')
+[ -n "$readonly_key" ] || fail "无法解析只读 API Key: $readonly_out"
+printf '%s\n' "$readonly_out" | grep -q '^scopes: links:read$' || fail "只读 API Key scopes 输出不对: $readonly_out"
+status=$(request_as "$readonly_key" "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 200 'links:read 密钥查询详情'
+status=$(request_as "$readonly_key" "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/scoped-deny"}')
+assert_eq "$status" 403 'links:read 密钥创建链接应被拒绝'
+grep -q '"forbidden"' "$TMP/body" || fail "无权限响应体不对: $(cat "$TMP/body")"
+status=$(request_as "$readonly_key" "$CONSOLE_BASE" GET "/api/v1/links/$code/stats")
+assert_eq "$status" 403 'links:read 密钥查询统计应被拒绝'
+write_out=$(./bin/console key issue --tenant "$smoke_tenant_id" --scope links:write) || fail '签发只写 API Key 失败'
+write_key=$(printf '%s\n' "$write_out" | awk '/^api_key: /{print $2}')
+[ -n "$write_key" ] || fail "无法解析只写 API Key: $write_out"
+status=$(request_as "$write_key" "$CONSOLE_BASE" PATCH "/api/v1/links/$code" '{"disabled":false}')
+assert_eq "$status" 204 'links:write 密钥修改不返回链接'
+if [ -s "$TMP/body" ]; then
+	fail "links:write 的 PATCH 不应返回响应体: $(cat "$TMP/body")"
+fi
+status=$(request_as "$write_key" "$CONSOLE_BASE" GET "/api/v1/links/$code")
+assert_eq "$status" 403 'links:write 密钥查询详情应被拒绝'
+
 echo 'smoke: update and cache write-through'
 newurl="https://example.com/smoke-updated-$$-$(date +%s)"
 status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$code" "{\"url\":\"$newurl\"}")

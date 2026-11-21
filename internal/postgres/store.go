@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 	"shortlink/internal/tenant"
@@ -210,38 +211,53 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 }
 
 /*
-Authenticate 用 API Key 的哈希查找租户，同时读出限流配置。
+Authenticate 用 API Key 的哈希查找租户、密钥编号、权限范围和限流配置，返回对应的 Principal。
 格式不对、查无此密钥、已过期、已吊销都是 ErrUnauthenticated。
 这几种情况共用一个错误，调用方返回同一个 401，不透露密钥是否存在过。
 其他错误原样往上送，避免把数据库故障说成密钥无效。
 到期时刻本身算过期，界限和链接一样是 expires_at > now()。
 */
-func (s *Store) Authenticate(ctx context.Context, token string) (tenant.Tenant, error) {
+func (s *Store) Authenticate(ctx context.Context, token string) (identity.Principal, error) {
 	if err := ctx.Err(); err != nil {
-		return tenant.Tenant{}, err
+		return identity.Principal{}, err
 	}
 	if !tenant.ValidToken(token) {
-		return tenant.Tenant{}, tenant.ErrUnauthenticated
+		return identity.Principal{}, tenant.ErrUnauthenticated
 	}
-	var tn tenant.Tenant
-	var externalID sql.NullString
+	var (
+		keyID      int64
+		rawScopes  []string
+		tn         tenant.Tenant
+		externalID sql.NullString
+	)
 	err := s.db.QueryRowContext(ctx, `
-SELECT t.id, t.external_id, t.rate_limit_per_second
+SELECT k.id, k.scopes, t.id, t.external_id, t.rate_limit_per_second
 FROM api_keys k
 JOIN tenants t ON t.id = k.tenant_id
 WHERE k.key_hash = $1
   AND k.revoked_at IS NULL
-  AND (k.expires_at IS NULL OR k.expires_at > now())`, tenant.HashAPIKey(token)).Scan(&tn.ID, &externalID, &tn.RateLimit)
+  AND (k.expires_at IS NULL OR k.expires_at > now())`, tenant.HashAPIKey(token)).Scan(
+		&keyID, &rawScopes, &tn.ID, &externalID, &tn.RateLimit,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return tenant.Tenant{}, tenant.ErrUnauthenticated
+		return identity.Principal{}, tenant.ErrUnauthenticated
 	}
 	if err != nil {
-		return tenant.Tenant{}, fmt.Errorf("authenticate api key: %w", err)
+		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)
 	}
 	if externalID.Valid {
 		tn.ExternalID = externalID.String
 	}
-	return tn, nil
+	scopes, err := parseAPIKeyScopes(rawScopes)
+	if err != nil {
+		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)
+	}
+	return identity.Principal{
+		Tenant:    tn,
+		ActorKind: identity.ActorAPIKey,
+		ActorID:   keyID,
+		Scopes:    scopes,
+	}, nil
 }
 
 // isUniqueViolation 报告错误是否是 PostgreSQL 的唯一约束冲突（SQLSTATE 23505）。

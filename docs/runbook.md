@@ -688,12 +688,13 @@ PostgreSQL 一侧的语句耗时（`log_min_duration_statement=0`，300 批平�
 ```bash
 make console ARGS="key issue --name acme"
 make console ARGS="key issue --name acme --expires 2026-12-01T00:00:00Z"
-make console ARGS="key issue --tenant 1"
+make console ARGS="key issue --tenant 1 --scope links:read,stats:read"
+make console ARGS="key issue --tenant 1 --scope links:read --scope stats:read"
 make console ARGS="key list --tenant 1"
 make console ARGS="key revoke --id 1"
 ```
 
-`key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`key list` 只显示编号和时间，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
+`key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`--scope` 省略表示授予全部密钥权限（`links:read`、`links:write`、`stats:read`），可重复传入或用逗号分隔；存量密钥通过迁移 007 自动回填为全量权限。`key list` 显示编号、时间和 `scopes`，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
 
 已有租户再发一把密钥时用 `--tenant`。`--name` 每次都新建租户，名称不必唯一。`--external-id` 只在新建时写入，并且不能重复。
 

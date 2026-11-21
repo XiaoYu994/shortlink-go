@@ -274,7 +274,7 @@ func TestAuthenticateReturnsRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if got.ID != tenantID || got.RateLimit != 42 {
+	if got.Tenant.ID != tenantID || got.Tenant.RateLimit != 42 {
 		t.Fatalf("Authenticate = %+v, want tenant %d rate limit 42", got, tenantID)
 	}
 }

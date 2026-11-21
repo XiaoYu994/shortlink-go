@@ -6,13 +6,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"shortlink/internal/identity"
 )
 
 func TestMigration007APIKeyDefaultsAndConstraints(t *testing.T) {
 	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 
-	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID})
+	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
 		t.Fatalf("IssueAPIKey: %v", err)
 	}

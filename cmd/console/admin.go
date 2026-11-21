@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"shortlink/internal/cache"
+	"shortlink/internal/identity"
 	"shortlink/internal/link"
 	"shortlink/internal/postgres"
 )
@@ -18,8 +20,8 @@ var errUsage = errors.New("usage")
 
 const usageText = `用法:
   console serve
-  console key issue --name NAME [--external-id ID] [--expires RFC3339]
-  console key issue --tenant ID [--expires RFC3339]
+  console key issue --name NAME [--external-id ID] [--expires RFC3339] [--scope SCOPE]...
+  console key issue --tenant ID [--expires RFC3339] [--scope SCOPE]...
   console key list --tenant ID
   console key revoke --id ID
   console tenant show --tenant ID
@@ -28,7 +30,9 @@ const usageText = `用法:
   console link unban --code CODE
 
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
-issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期。
+issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；
+--scope 省略表示拥有全部密钥权限（links:read、links:write、stats:read），
+可重复传入或用逗号分隔。
 --name 会新建租户；已有租户用 --tenant。密钥和租户命令只读 DATABASE_URL，不连接 Redis。
 link ban/unban 封禁和解封短链，需要 DATABASE_URL 和 REDIS_URL，先写数据库再写缓存；
 --reason 取 phishing、malware、adult、gambling、drugs、spam、other。
@@ -207,12 +211,30 @@ func printLinkState(w io.Writer, l *link.Link) error {
 	return err
 }
 
+// scopeFlag 收集命令行里的 --scope 选项，支持重复传入和逗号分隔。
+type scopeFlag struct {
+	set bool
+	raw []string
+}
+
+func (f *scopeFlag) String() string {
+	return strings.Join(f.raw, ",")
+}
+
+func (f *scopeFlag) Set(v string) error {
+	f.set = true
+	f.raw = append(f.raw, v)
+	return nil
+}
+
 func parseIssue(args []string, stderr io.Writer) (command, error) {
 	fs := newFlagSet("issue", stderr)
 	name := fs.String("name", "", "新租户名称")
 	externalID := fs.String("external-id", "", "外部租户编号，只在新建租户时写入")
 	tenantID := fs.Int64("tenant", 0, "已有租户 ID")
 	expires := fs.String("expires", "", "RFC3339 到期时间，省略表示不过期")
+	var scopes scopeFlag
+	fs.Var(&scopes, "scope", "权限范围（links:read、links:write、stats:read），可重复传入或用逗号分隔")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil, nil
@@ -236,6 +258,16 @@ func parseIssue(args []string, stderr io.Writer) (command, error) {
 		}
 		params.ExpiresAt = &t
 	}
+	if scopes.set {
+		parsed, err := parseScopeFlags(scopes.raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse scope: %w", err)
+		}
+		params.Scopes = parsed
+	} else {
+		// 省略 --scope 仍是全部密钥权限，但要显式传入。存储层不把 nil 当成全权限。
+		params.Scopes = identity.AllAPIKeyScopes()
+	}
 	return func(ctx context.Context, store adminStore, stdout io.Writer) error {
 		issued, err := store.IssueAPIKey(ctx, params)
 		if err != nil {
@@ -243,6 +275,16 @@ func parseIssue(args []string, stderr io.Writer) (command, error) {
 		}
 		return printIssued(stdout, issued)
 	}, nil
+}
+
+func parseScopeFlags(values []string) ([]identity.Perm, error) {
+	var perms []identity.Perm
+	for _, value := range values {
+		for part := range strings.SplitSeq(value, ",") {
+			perms = append(perms, identity.Perm(strings.TrimSpace(part)))
+		}
+	}
+	return identity.NormalizeAPIKeyScopes(perms)
 }
 
 func parseList(args []string, stderr io.Writer) (command, error) {
@@ -373,7 +415,8 @@ func printTenantLimits(w io.Writer, limits postgres.TenantLimits) error {
 }
 
 func printIssued(w io.Writer, issued postgres.IssuedAPIKey) error {
-	if _, err := fmt.Fprintf(w, "tenant_id: %d\nkey_id: %d\n", issued.Tenant.ID, issued.Key.ID); err != nil {
+	if _, err := fmt.Fprintf(w, "tenant_id: %d\nkey_id: %d\nscopes: %s\n",
+		issued.Tenant.ID, issued.Key.ID, formatScopes(issued.Key.Scopes)); err != nil {
 		return err
 	}
 	if issued.Key.ExpiresAt != nil {
@@ -386,20 +429,32 @@ func printIssued(w io.Writer, issued postgres.IssuedAPIKey) error {
 }
 
 func printKeys(w io.Writer, keys []postgres.APIKey) error {
-	if _, err := fmt.Fprint(w, "id\ttenant_id\tcreated_at\texpires_at\trevoked_at\n"); err != nil {
+	if _, err := fmt.Fprint(w, "id\ttenant_id\tcreated_at\texpires_at\trevoked_at\tscopes\n"); err != nil {
 		return err
 	}
 	for _, key := range keys {
-		if _, err := fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\n",
 			key.ID, key.TenantID,
 			key.CreatedAt.UTC().Format(time.RFC3339),
 			formatOptional(key.ExpiresAt),
 			formatOptional(key.RevokedAt),
+			formatScopes(key.Scopes),
 		); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func formatScopes(scopes []identity.Perm) string {
+	if len(scopes) == 0 {
+		return "-"
+	}
+	parts := make([]string, len(scopes))
+	for i, scope := range scopes {
+		parts[i] = string(scope)
+	}
+	return strings.Join(parts, ",")
 }
 
 func formatOptional(t *time.Time) string {
