@@ -27,6 +27,21 @@ services:
       timeout: 3s
       retries: 10
 
+  # 本地 OIDC 身份提供方（ADR 0018）。配置文件里写死测试用户 alice@example.com 和 bob@example.com。
+  # 与 prometheus 一样挂整个 deploy 目录，避免 Docker Desktop 在 WSL 下绑定单文件失败。
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    command: ["dex", "serve", "/etc/dex/dex.yaml"]
+    ports:
+      - "127.0.0.1:5556:5556"
+    volumes:
+      - ./deploy:/etc/dex:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5556/dex/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # 可选的公网入口。默认不启动；需要时：docker compose --profile edge up -d nginx
   # 只暴露 /r/ 和 /api/。/metrics 仍由 Prometheus 直接抓宿主机上的进程端口。
   nginx:

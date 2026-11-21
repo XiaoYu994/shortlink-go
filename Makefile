@@ -64,8 +64,8 @@ check: fmt-check vet test-unit ## 快速检查：格式、vet、单测（不启�
 
 verify: check lint build ## 完整代码检查：check + golangci-lint + build
 
-deps-up: ## 只启动 compose 的 PostgreSQL 和 Redis（本机已有依赖时不要执行）
-	docker compose up -d --wait postgres redis
+deps-up: ## 只启动 compose 的 PostgreSQL、Redis 和 Dex（本机已有依赖时不要执行）
+	docker compose up -d --wait postgres redis dex
 
 test-db: ## 创建测试库（如不存在）、重建 schema 并执行迁移
 	./scripts/prepare-test-db.sh
@@ -82,8 +82,8 @@ stack: ## 构建并启动可选应用栈（profile app，不随 up 启动）
 	docker compose up -d --wait postgres redis
 	docker compose --profile app up -d --build --wait redirector console gateway
 
-up: prometheus-config ## 启动 PostgreSQL、Redis 和 Prometheus
-	docker compose up -d --wait postgres redis
+up: prometheus-config ## 启动 PostgreSQL、Redis、Dex 和 Prometheus
+	docker compose up -d --wait postgres redis dex
 	docker compose up -d --force-recreate --no-deps prometheus
 
 prometheus-config: ## 按两个监听地址生成 Prometheus 抓取配置

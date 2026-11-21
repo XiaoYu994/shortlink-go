@@ -103,7 +103,7 @@ curl -i localhost:8081/readyz    # console 就绪，Ping PostgreSQL
 
 ## 应用栈
 
-`make up` 只起 PostgreSQL、Redis 和 Prometheus。应用容器是另一套，默认不启动：
+`make up` 只起 PostgreSQL、Redis、本地 OIDC 服务 Dex（`127.0.0.1:5556`，配置在 `deploy/dex.yaml`，测试用户 `alice@example.com` 和 `bob@example.com`，密码均为 `password`）和 Prometheus。应用容器是另一套，默认不启动：
 
 ```bash
 make stack
@@ -873,7 +873,7 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 `.github/workflows/ci.yml` 在 push 到 main 和 PR 时运行：
 
 - `verify`：安装固定版本的 golangci-lint，跑 `make verify`。
-- `integration`：从 `.env.example` 生成 `.env`，启动 compose 的 PostgreSQL/Redis，
+- `integration`：从 `.env.example` 生成 `.env`，启动 compose 的 PostgreSQL、Redis 和 Dex，
   跑 `make test-integration smoke`。
 
 ## 停止

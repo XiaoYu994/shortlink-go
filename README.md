@@ -45,7 +45,7 @@ curl -i localhost:8080/r/AbC123xy
 ## 验证
 
 ```bash
-make deps-up      # 使用项目自带 compose 时：只启动 PostgreSQL 和 Redis
+make deps-up      # 使用项目自带 compose 时：只启动 PostgreSQL、Redis 和 Dex
 make selfcheck    # 格式、vet、单测、lint、build、集成测试、冒烟测试
 ```
 

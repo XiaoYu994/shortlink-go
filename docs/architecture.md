@@ -40,7 +40,7 @@ shortlink/
 │   ├── click/           # 点击元数据分类和异步批量记录（ClickRecorder）
 │   └── config/          # 配置加载
 ├── migrations/          # golang-migrate 的 up/down SQL
-├── deploy/              # 本地 Prometheus 配置和反向代理
+├── deploy/              # 本地 Prometheus、Dex OIDC 配置和反向代理
 ├── scripts/             # 测试库准备和冒烟测试脚本
 ├── .github/workflows/   # CI：静态检查、集成测试、冒烟
 ├── docs/                # 架构、API、运行手册、路线图、ADR

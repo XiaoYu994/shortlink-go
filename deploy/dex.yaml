@@ -1,0 +1,46 @@
+# 本地开发和冒烟测试用的 OIDC 服务（Dex，阶段 11、ADR 0018）。
+# 仅绑定宿主机回环地址 127.0.0.1:5556，使用内存存储，每次重启回到初始状态。
+#
+# 静态测试用户（明文密码均为 password，已通过真实 Dex 登录校验）：
+# - alice@example.com
+# - bob@example.com
+
+issuer: http://127.0.0.1:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  responseTypes: ["code"]
+  skipApprovalScreen: true
+
+enablePasswordDB: true
+
+staticPasswords:
+  - email: "alice@example.com"
+    # 明文密码：password（bcrypt cost 10）
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "alice"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+  - email: "bob@example.com"
+    # 明文密码：password（bcrypt cost 10）
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "bob"
+    userID: "2443a2f8-67c2-4651-a893-e5a2315a9c15"
+
+staticClients:
+  - id: shortlink-console
+    name: "Shortlink Console"
+    secret: shortlink-console-secret
+    redirectURIs:
+      # 本机直接跑 make run-console（默认 CONSOLE_ADDR=:8081）
+      - "http://127.0.0.1:8081/api/v1/auth/callback"
+      - "http://localhost:8081/api/v1/auth/callback"
+      # 宿主机 nginx 入口（docker compose --profile edge up -d nginx，deploy/nginx.conf）
+      - "http://127.0.0.1:8088/api/v1/auth/callback"
+      - "http://localhost:8088/api/v1/auth/callback"
+      # 冒烟测试 scripts/smoke.sh 默认管理端口（SMOKE_CONSOLE_ADDR=127.0.0.1:18081）
+      - "http://127.0.0.1:18081/api/v1/auth/callback"
