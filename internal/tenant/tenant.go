@@ -1,5 +1,7 @@
 /*
-Package tenant 表示短链的租户和 API Key（阶段 6）。
+Package tenant 表示短链的租户，以及 API Key 的令牌格式、生成和哈希（阶段 6）。
+
+密钥的权限范围（scope）和鉴权后的身份在 identity 包，签发和吊销在 postgres 包。
 
 明文密钥只在生成时交给调用方。库存 SHA-256。
 格式不对的密钥不会去查数据库。

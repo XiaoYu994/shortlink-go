@@ -694,7 +694,7 @@ make console ARGS="key list --tenant 1"
 make console ARGS="key revoke --id 1"
 ```
 
-`key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`--scope` 省略表示授予全部密钥权限（`links:read`、`links:write`、`stats:read`），可重复传入或用逗号分隔；存量密钥通过迁移 007 自动回填为全量权限。`key list` 显示编号、时间和 `scopes`，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
+`key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`--scope` 省略表示授予全部密钥权限（`links:read`、`links:write`、`stats:read`），可重复传入或用逗号分隔；存量密钥通过迁移 007 自动回填为全量权限，迁移 008 随后去掉了 `scopes` 的 DEFAULT：直接写 SQL 插入密钥必须显式给出 `scopes`。鉴权读到不认识的 scope 时直接忽略（权限只会变少，不会报 500），所以以后新增 scope 的发布顺序是：先发布认识新 scope 的代码，再放宽数据库 CHECK，最后才能签发带新 scope 的密钥。`key list` 显示编号、时间和 `scopes`，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
 
 已有租户再发一把密钥时用 `--tenant`。`--name` 每次都新建租户，名称不必唯一。`--external-id` 只在新建时写入，并且不能重复。
 
@@ -723,6 +723,7 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 - 用量不能再从 `links` 重算：删除是硬删除，本月创建后又删掉的链接数不回来，绕过应用直接往 `links` 插行也不会计入。不要手工改 `link_usage` 对账。
 - 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
+- 限流在鉴权之后，格式合法但不存在的密钥每次都会查一次 `api_keys`（走 `key_hash` 唯一索引）。256 位密钥无法被猜中，但这是一个能放大数据库查询的入口；防护放在入口层（nginx `limit_req` 或云厂商的 WAF），应用内不做按 IP 的未鉴权限流。
 
 ## 封禁和解封链接
 

@@ -29,6 +29,7 @@
 - **第 1 步（当前）**：保持 `internal/httpapi` 单包不动，避免在阶段 11 刚起步时做大规模机械搬迁。新增强相关的端点放进同一文件（如 OIDC 登录、回调、登出、`/me`），不再为几十行的小函数单独建文件。
 - **第 2 步（阶段 11 写登录和成员管理 API 时）**：**先拆结构体，暂不拆包**。
   在 `httpapi` 包内按业务模块拆出独立的小结构体（例如 `authHandler` 只持 OIDC 和会话依赖，`memberHandler` 只持成员存储依赖），继续复用包内私有的 `writeJSON`、`writeError`、`principal`，最后由 `routes.go` 挂到同一个 `ServeMux` 上。这样既避免 `Server` 膨胀成上帝对象，又零导出污染、零循环依赖（对照 Java：拆分多个 Controller，但 Go 里不必为此各建子包）。
+- **凭证代码归位（待办，随第 2 步一起评估）**：API Key 目前分散在三处：`tenant`（令牌格式和哈希）、`identity`（scope 与 Principal）、`postgres`（签发、列表、吊销）。会话鉴权落地、`Principal` 的来源有了第二种之后，再决定是否把令牌格式并入 `identity`、让 `tenant` 只保留租户本身；现在只有一种凭证，提前搬迁收益不明显。
 - **第 3 步（阶段 12–13 审计/Webhook 进入、或依赖分叉明显时）**：按"零业务依赖底座 + 进程/业务边界"顺势拆包：
   - `internal/httpx`：零业务依赖的通用 HTTP 底座（`chain`、`requestid`、`logging`、`metrics`、`recoverer`、`timeout`、`healthz`/`readyz`/`pprof`、`clientip`、JSON 响应与错误写出）。不 import `link`、`tenant`、`identity` 等任何业务包，杜绝循环依赖。
   - 按进程/领域拆分 handler（`redirector` 的跳转路径与 `console` 的管理路径分离），让 `cmd/redirector` 不再引入 `identity`、OIDC、成员管理等 console 专用代码，使代码结构与 [ADR 0009](0009-process-split-and-credentials.md) 的进程边界一致。
