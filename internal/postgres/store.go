@@ -248,15 +248,11 @@ WHERE k.key_hash = $1
 	if externalID.Valid {
 		tn.ExternalID = externalID.String
 	}
-	scopes, err := parseAPIKeyScopes(rawScopes)
-	if err != nil {
-		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)
-	}
 	return identity.Principal{
 		Tenant:    tn,
 		ActorKind: identity.ActorAPIKey,
 		ActorID:   keyID,
-		Scopes:    scopes,
+		Scopes:    authScopes(rawScopes),
 	}, nil
 }
 

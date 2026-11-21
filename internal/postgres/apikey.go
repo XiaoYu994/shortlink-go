@@ -131,6 +131,22 @@ func permsToStrings(perms []identity.Perm) []string {
 	return out
 }
 
+/*
+authScopes 把库里的 scopes 转成鉴权用的权限列表，丢掉不认识的值。
+只用在 Authenticate：滚动升级时，新版本签发的密钥可能带旧副本不认识的 scope，
+严格解析会让这把密钥的所有请求变成 500。丢掉未知值只会让权限变少，仍然是 fail-closed。
+ListAPIKeys 给运维看真实内容，继续用严格的 parseAPIKeyScopes。
+*/
+func authScopes(raw []string) []identity.Perm {
+	perms := make([]identity.Perm, 0, len(raw))
+	for _, item := range raw {
+		if perm := identity.Perm(item); identity.ValidAPIKeyScope(perm) {
+			perms = append(perms, perm)
+		}
+	}
+	return perms
+}
+
 func parseAPIKeyScopes(raw []string) ([]identity.Perm, error) {
 	perms := make([]identity.Perm, len(raw))
 	for i, item := range raw {

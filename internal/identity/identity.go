@@ -68,9 +68,11 @@ func ValidAPIKeyScope(perm Perm) bool {
 
 /*
 ValidAPIKeyPrincipal 报告 p 能不能作为 API Key 鉴权的结果放进请求。
-执行者必须是 api_key。Scopes 可以为空（没有任何权限），但不能包含
+执行者必须是 api_key。Scopes 可以为空（没有任何权限，授权时一律拒绝），但不能包含
 API Key 范围以外的权限，例如 members:write。角色不在这里检查：
 API Key 的权限只来自 scope，不能借 Role 走用户的权限表。
+这里允许空和 NormalizeAPIKeyScopes 拒绝空并不矛盾：后者管签发，不能发出没有权限的密钥；
+前者管鉴权结果，Authenticate 丢掉未知 scope 后可能为空，这时请求应当 403 而不是 500。
 */
 func ValidAPIKeyPrincipal(p Principal) bool {
 	if p.ActorKind != ActorAPIKey {
