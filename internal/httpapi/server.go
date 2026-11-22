@@ -72,17 +72,19 @@ type RedirectOptions struct {
 	TrustProxyHeaders bool
 }
 
-// ConsoleOptions 是管理进程的鉴权、授权与可选 OIDC 登录依赖。
+// ConsoleOptions 是管理进程的鉴权、授权与可选外部登录（OIDC / GitHub OAuth 2.0）依赖。
 type ConsoleOptions struct {
 	Keys       APIKeyAuthenticator
 	Authorizer Authorizer
 	/*
-		OIDC 非空时，ConsoleRoutes 会注册 /api/v1/auth/login 和 /api/v1/auth/callback。
+		OIDC 非空时，ConsoleRoutes 注册 /api/v1/auth/login 和 /api/v1/auth/callback。
+		GitHub 非空时，ConsoleRoutes 注册 /api/v1/auth/github/login 和 /api/v1/auth/github/callback。
 		Sessions 非空时，管理 API 支持会话 Cookie + X-Org-ID 鉴权，并注册 logout 和 /me。
 		Members 非空时，ConsoleRoutes 注册 /api/v1/members 成员管理路由（同样依赖有效会话和成员校验）。
-		三者都为空时不挂登录、会话与成员路由，只支持 API Key（ADR 0018）。
+		全为空时不挂登录、会话与成员路由，只支持 API Key（ADR 0018）。
 	*/
 	OIDC     OIDCClient
+	GitHub   GitHubClient
 	Sessions SessionStore
 	Members  MemberStore
 	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
@@ -132,6 +134,7 @@ type serverDeps struct {
 	sessions          SessionAuthenticator
 	authorizer        Authorizer
 	oidc              OIDCClient
+	github            GitHubClient
 	sessionMgr        SessionManager
 	members           MemberStore
 	sessionTTL        time.Duration
@@ -172,6 +175,7 @@ func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Dur
 		sessions:       opts.Sessions,
 		authorizer:     opts.Authorizer,
 		oidc:           opts.OIDC,
+		github:         opts.GitHub,
 		sessionMgr:     opts.Sessions,
 		members:        opts.Members,
 		sessionTTL:     opts.SessionTTL,
@@ -194,8 +198,8 @@ func newServer(d serverDeps) *Server {
 	logger := slog.New(requestIDHandler{Handler: d.logger.Handler()})
 	csrf := http.NewCrossOriginProtection()
 	var auth *authHandler
-	if d.oidc != nil || d.sessionMgr != nil {
-		auth = newAuthHandler(logger, d.oidc, d.sessionMgr, csrf, d.sessionTTL)
+	if d.oidc != nil || d.github != nil || d.sessionMgr != nil {
+		auth = newAuthHandler(logger, d.oidc, d.github, d.sessionMgr, csrf, d.sessionTTL)
 	}
 	var members *memberHandler
 	if d.members != nil {

@@ -18,13 +18,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"shortlink/internal/identity"
+	"shortlink/internal/identity/fakegithub"
 	"shortlink/internal/identity/fakeoidc"
 	"shortlink/internal/memorystore"
 )
 
 type stubSessionStore struct {
 	calls        int
-	lastID       identity.OIDCIdentity
+	lastID       identity.ExternalIdentity
 	lastTTL      time.Duration
 	err          error
 	nextSess     int64
@@ -42,7 +43,7 @@ func (s *stubSessionStore) AuthenticateSessionForOrg(ctx context.Context, token 
 	return identity.Principal{}, identity.ErrUnauthenticated
 }
 
-func (s *stubSessionStore) CreateSessionForOIDC(_ context.Context, id identity.OIDCIdentity, ttl time.Duration) (identity.IssuedSession, error) {
+func (s *stubSessionStore) CreateSessionForIdentity(_ context.Context, id identity.ExternalIdentity, ttl time.Duration) (identity.IssuedSession, error) {
 	s.calls++
 	s.lastID = id
 	s.lastTTL = ttl
@@ -121,6 +122,84 @@ func newOIDCTestServer(t *testing.T, redirectURL string, sessions SessionStore) 
 	return srv, fake
 }
 
+func newGitHubTestServer(t *testing.T, redirectURL string, sessions SessionStore) (*Server, *fakegithub.Server) {
+	t.Helper()
+	const (
+		clientID     = "gh-console"
+		clientSecret = "gh-console-secret"
+	)
+	fake := fakegithub.Start(t, clientID, clientSecret)
+	provider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		AuthURL:      fake.AuthURL(),
+		TokenURL:     fake.TokenURL(),
+		APIBaseURL:   fake.APIBaseURL(),
+		HTTPClient:   fake.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewGitHubProvider: %v", err)
+	}
+	srv := newServer(serverDeps{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:          memorystore.New(),
+		requestTimeout: 5 * time.Second,
+		registry:       newTestRegistry(),
+		keys:           allowKey{},
+		sessions:       sessions,
+		authorizer:     identity.NewMapAuthorizer(),
+		github:         provider,
+		sessionMgr:     sessions,
+		sessionTTL:     24 * time.Hour,
+	})
+	return srv, fake
+}
+
+func newDualAuthTestServer(t *testing.T, sessions SessionStore) (*Server, *fakeoidc.Server, *fakegithub.Server) {
+	t.Helper()
+	// 故意让两个提供方共用同一把 clientSecret，验证流程 Cookie 仍靠 purpose 前缀做域隔离。
+	const sharedSecret = "shared-console-secret"
+	fakeOIDC := fakeoidc.Start(t, "shortlink-console", sharedSecret)
+	oidcProvider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+		Issuer:       fakeOIDC.URL(),
+		ClientID:     "shortlink-console",
+		ClientSecret: sharedSecret,
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		HTTPClient:   fakeOIDC.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+	fakeGH := fakegithub.Start(t, "gh-console", sharedSecret)
+	ghProvider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+		ClientID:     "gh-console",
+		ClientSecret: sharedSecret,
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+		AuthURL:      fakeGH.AuthURL(),
+		TokenURL:     fakeGH.TokenURL(),
+		APIBaseURL:   fakeGH.APIBaseURL(),
+		HTTPClient:   fakeGH.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewGitHubProvider: %v", err)
+	}
+	srv := newServer(serverDeps{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:          memorystore.New(),
+		requestTimeout: 5 * time.Second,
+		registry:       newTestRegistry(),
+		keys:           allowKey{},
+		sessions:       sessions,
+		authorizer:     identity.NewMapAuthorizer(),
+		oidc:           oidcProvider,
+		github:         ghProvider,
+		sessionMgr:     sessions,
+		sessionTTL:     24 * time.Hour,
+	})
+	return srv, fakeOIDC, fakeGH
+}
+
 func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
 	for _, c := range cookies {
 		if c.Name == name {
@@ -162,6 +241,8 @@ func TestOIDCRoutesDisabledWhenUnconfigured(t *testing.T) {
 	}{
 		{method: http.MethodGet, path: oidcLoginPath},
 		{method: http.MethodGet, path: oidcCallbackPath},
+		{method: http.MethodGet, path: githubLoginPath},
+		{method: http.MethodGet, path: githubCallbackPath},
 		{method: http.MethodPost, path: authLogoutPath},
 		{method: http.MethodGet, path: mePath},
 	}
@@ -231,9 +312,9 @@ func TestOIDCLoginRedirectAndFlowCookie(t *testing.T) {
 			if flowCookie == nil {
 				t.Fatal("missing flow cookie")
 			}
-			if !flowCookie.HttpOnly || flowCookie.SameSite != http.SameSiteLaxMode || flowCookie.Path != oidcCallbackPath || flowCookie.MaxAge != int(oidcFlowCookieTTL/time.Second) || flowCookie.Secure != tt.wantSecure {
+			if !flowCookie.HttpOnly || flowCookie.SameSite != http.SameSiteLaxMode || flowCookie.Path != oidcCallbackPath || flowCookie.MaxAge != int(flowCookieTTL/time.Second) || flowCookie.Secure != tt.wantSecure {
 				t.Errorf("flow cookie = %+v, want HttpOnly/Lax/Path=%s/MaxAge=%d/Secure=%v",
-					flowCookie, oidcCallbackPath, int(oidcFlowCookieTTL/time.Second), tt.wantSecure)
+					flowCookie, oidcCallbackPath, int(flowCookieTTL/time.Second), tt.wantSecure)
 			}
 
 			// 连续两次登录必须生成不同的 state、nonce 和 code_challenge。
@@ -280,9 +361,9 @@ func TestOIDCCallbackSuccessCreatesSessionAndClearsFlowCookie(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
 	if sessions.calls != 1 {
-		t.Fatalf("CreateSessionForOIDC calls = %d, want 1", sessions.calls)
+		t.Fatalf("CreateSessionForIdentity calls = %d, want 1", sessions.calls)
 	}
-	wantID := identity.OIDCIdentity{
+	wantID := identity.ExternalIdentity{
 		Issuer:        fake.URL(),
 		Subject:       "08a8684b-db88-4b73-90a9-3cd1661f5466",
 		Email:         "alice@example.com",
@@ -375,7 +456,7 @@ func TestOIDCCallbackRejectsTamperedAndInvalidFlows(t *testing.T) {
 				t.Fatalf("status = %d, want %d, body = %s", cbRec.Code, tt.wantStatus, cbRec.Body.String())
 			}
 			if sessions.calls != 0 {
-				t.Errorf("CreateSessionForOIDC calls = %d, want 0", sessions.calls)
+				t.Errorf("CreateSessionForIdentity calls = %d, want 0", sessions.calls)
 			}
 			if sessCookie := findCookie(cbRec.Result().Cookies(), SessionCookieName); sessCookie != nil {
 				t.Errorf("unexpected session cookie set on failure: %+v", sessCookie)
@@ -437,7 +518,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 		callbackURL := runAuthorizeAtFake(t, loginRec.Header().Get("Location"))
 
 		// 刚好到 10 分钟过期界限。
-		srv.auth.now = func() time.Time { return now.Add(oidcFlowCookieTTL) }
+		srv.auth.now = func() time.Time { return now.Add(flowCookieTTL) }
 		cbReq := httptest.NewRequest(http.MethodGet, callbackURL.RequestURI(), nil)
 		cbReq.AddCookie(flowCookie)
 		cbRec := httptest.NewRecorder()
@@ -950,6 +1031,285 @@ func TestMe(t *testing.T) {
 		srv.ConsoleRoutes().ServeHTTP(rec, req)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestGitHubAuthFlows(t *testing.T) {
+	t.Run("standalone github enables /me and logout while leaving oidc 404", func(t *testing.T) {
+		sessions := &stubSessionStore{
+			infoFn: func(_ context.Context, token string) (identity.SessionInfo, error) {
+				return identity.SessionInfo{
+					User:      identity.User{ID: 12, Email: "octocat@example.com", Name: "The Octocat"},
+					ExpiresAt: time.Now().UTC().Add(time.Hour),
+				}, nil
+			},
+		}
+		srv, _ := newGitHubTestServer(t, "http://127.0.0.1:8081/api/v1/auth/github/callback", sessions)
+		console := srv.ConsoleRoutes()
+		redirect := srv.RedirectRoutes()
+
+		for _, path := range []string{oidcLoginPath, oidcCallbackPath} {
+			rec := httptest.NewRecorder()
+			console.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("GET %s without OIDC = %d, want 404", path, rec.Code)
+			}
+		}
+		for _, path := range []string{githubLoginPath, githubCallbackPath} {
+			rec := httptest.NewRecorder()
+			redirect.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("redirector GET %s = %d, want 404", path, rec.Code)
+			}
+		}
+
+		// 只配 GitHub 时登出与 /me 照常启用。
+		token, _, err := identity.SessionToken.Generate()
+		if err != nil {
+			t.Fatalf("SessionToken.Generate: %v", err)
+		}
+		meRec := httptest.NewRecorder()
+		meReq := httptest.NewRequest(http.MethodGet, mePath, nil)
+		meReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+		console.ServeHTTP(meRec, meReq)
+		if meRec.Code != http.StatusOK {
+			t.Fatalf("GET /me = %d, want 200, body = %s", meRec.Code, meRec.Body.String())
+		}
+
+		logoutRec := httptest.NewRecorder()
+		logoutReq := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
+		logoutReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+		console.ServeHTTP(logoutRec, logoutReq)
+		if logoutRec.Code != http.StatusNoContent {
+			t.Fatalf("POST /logout = %d, want 204", logoutRec.Code)
+		}
+	})
+
+	t.Run("login redirect sets sl_github_flow cookie without nonce", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			redirectURL string
+			wantSecure  bool
+		}{
+			{name: "http", redirectURL: "http://127.0.0.1:8081/api/v1/auth/github/callback", wantSecure: false},
+			{name: "https", redirectURL: "https://console.example.com/api/v1/auth/github/callback", wantSecure: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				srv, fake := newGitHubTestServer(t, tc.redirectURL, &stubSessionStore{})
+				rec := httptest.NewRecorder()
+				srv.ConsoleRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, githubLoginPath, nil))
+				if rec.Code != http.StatusFound {
+					t.Fatalf("status = %d, want 302", rec.Code)
+				}
+				loc, err := url.Parse(rec.Header().Get("Location"))
+				if err != nil {
+					t.Fatalf("parse Location: %v", err)
+				}
+				if !strings.HasPrefix(loc.String(), fake.AuthURL()+"?") {
+					t.Fatalf("Location = %q, want prefix %q", loc.String(), fake.AuthURL()+"?")
+				}
+				q := loc.Query()
+				if q.Get("client_id") != "gh-console" || q.Get("redirect_uri") != tc.redirectURL || q.Get("scope") != "read:user user:email" ||
+					q.Get("state") == "" || q.Get("code_challenge") == "" || q.Get("code_challenge_method") != "S256" || q.Has("nonce") {
+					t.Fatalf("github authorize query = %v", q)
+				}
+				flowCookie := findCookie(rec.Result().Cookies(), GitHubFlowCookieName)
+				if flowCookie == nil || !flowCookie.HttpOnly || flowCookie.SameSite != http.SameSiteLaxMode ||
+					flowCookie.Path != githubCallbackPath || flowCookie.MaxAge != int(flowCookieTTL/time.Second) || flowCookie.Secure != tc.wantSecure {
+					t.Fatalf("flowCookie = %+v, want HttpOnly/Lax/Path=%s/MaxAge=600/Secure=%v", flowCookie, githubCallbackPath, tc.wantSecure)
+				}
+			})
+		}
+	})
+
+	t.Run("callback success creates session and clears flow cookie", func(t *testing.T) {
+		sessions := &stubSessionStore{}
+		srv, fake := newGitHubTestServer(t, "https://console.example.com/api/v1/auth/github/callback", sessions)
+		fake.SetUser(fakegithub.User{
+			ID:     202601,
+			Login:  "octo-dev",
+			Name:   "Octo Dev",
+			Emails: []fakegithub.Email{{Email: "octo@example.com", Primary: true, Verified: true}},
+		})
+		handler := srv.ConsoleRoutes()
+
+		loginRec := httptest.NewRecorder()
+		handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, githubLoginPath, nil))
+		flowCookie := findCookie(loginRec.Result().Cookies(), GitHubFlowCookieName)
+		cbURL := runAuthorizeAtFake(t, loginRec.Header().Get("Location"))
+
+		// 验证 HEAD 回调返回 405 且不消费一次性流程。
+		headReq := httptest.NewRequest(http.MethodHead, cbURL.RequestURI(), nil)
+		headReq.AddCookie(flowCookie)
+		headRec := httptest.NewRecorder()
+		handler.ServeHTTP(headRec, headReq)
+		if headRec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("HEAD callback = %d, want 405", headRec.Code)
+		}
+
+		cbReq := httptest.NewRequest(http.MethodGet, cbURL.RequestURI(), nil)
+		cbReq.AddCookie(flowCookie)
+		cbRec := httptest.NewRecorder()
+		handler.ServeHTTP(cbRec, cbReq)
+		if cbRec.Code != http.StatusOK {
+			t.Fatalf("GET callback = %d, want 200, body = %s", cbRec.Code, cbRec.Body.String())
+		}
+		wantID := identity.ExternalIdentity{
+			Issuer:        identity.GitHubIssuer,
+			Subject:       "202601",
+			Email:         "octo@example.com",
+			EmailVerified: true,
+			Name:          "Octo Dev",
+		}
+		if sessions.calls != 1 || sessions.lastID != wantID {
+			t.Fatalf("sessions calls=%d lastID=%+v, want %+v", sessions.calls, sessions.lastID, wantID)
+		}
+		sessCookie := findCookie(cbRec.Result().Cookies(), SessionCookieName)
+		if sessCookie == nil || !identity.SessionToken.Valid(sessCookie.Value) || !sessCookie.Secure {
+			t.Fatalf("sessCookie = %+v, want valid Secure session cookie", sessCookie)
+		}
+		clearedFlow := findCookie(cbRec.Result().Cookies(), GitHubFlowCookieName)
+		if clearedFlow == nil || clearedFlow.MaxAge >= 0 || clearedFlow.Path != githubCallbackPath {
+			t.Fatalf("clearedFlow = %+v, want deleted cookie", clearedFlow)
+		}
+		if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("GET "+githubLoginPath, http.MethodGet, strconv.Itoa(http.StatusFound))); got != 1 {
+			t.Errorf("github login metric = %v, want 1", got)
+		}
+		if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("GET "+githubCallbackPath, http.MethodGet, strconv.Itoa(http.StatusOK))); got != 1 {
+			t.Errorf("github callback metric = %v, want 1", got)
+		}
+	})
+
+	t.Run("cross provider flow cookie replay is rejected without clearing", func(t *testing.T) {
+		sessions := &stubSessionStore{}
+		srv, _, _ := newDualAuthTestServer(t, sessions)
+		handler := srv.ConsoleRoutes()
+
+		oidcLoginRec := httptest.NewRecorder()
+		handler.ServeHTTP(oidcLoginRec, httptest.NewRequest(http.MethodGet, oidcLoginPath, nil))
+		oidcCookie := findCookie(oidcLoginRec.Result().Cookies(), OIDCFlowCookieName)
+		oidcLoc, _ := url.Parse(oidcLoginRec.Header().Get("Location"))
+
+		ghLoginRec := httptest.NewRecorder()
+		handler.ServeHTTP(ghLoginRec, httptest.NewRequest(http.MethodGet, githubLoginPath, nil))
+		ghCookie := findCookie(ghLoginRec.Result().Cookies(), GitHubFlowCookieName)
+		ghLoc, _ := url.Parse(ghLoginRec.Header().Get("Location"))
+
+		// OIDC Cookie 重放进 GitHub 回调：即使两者 secret 相同，purpose 前缀不同也会拒绝。
+		reqToGH := httptest.NewRequest(http.MethodGet, githubCallbackPath+"?code=abc&state="+url.QueryEscape(oidcLoc.Query().Get("state")), nil)
+		reqToGH.AddCookie(&http.Cookie{Name: GitHubFlowCookieName, Value: oidcCookie.Value})
+		recToGH := httptest.NewRecorder()
+		handler.ServeHTTP(recToGH, reqToGH)
+		if recToGH.Code != http.StatusBadRequest {
+			t.Fatalf("OIDC cookie on GitHub callback = %d, want 400", recToGH.Code)
+		}
+		if cleared := findCookie(recToGH.Result().Cookies(), GitHubFlowCookieName); cleared != nil {
+			t.Fatalf("OIDC cookie replay unexpectedly cleared GitHub flow cookie: %+v", cleared)
+		}
+
+		// GitHub Cookie 重放进 OIDC 回调：既过不了 HMAC 校验，也缺 nonce。
+		reqToOIDC := httptest.NewRequest(http.MethodGet, oidcCallbackPath+"?code=abc&state="+url.QueryEscape(ghLoc.Query().Get("state")), nil)
+		reqToOIDC.AddCookie(&http.Cookie{Name: OIDCFlowCookieName, Value: ghCookie.Value})
+		recToOIDC := httptest.NewRecorder()
+		handler.ServeHTTP(recToOIDC, reqToOIDC)
+		if recToOIDC.Code != http.StatusBadRequest {
+			t.Fatalf("GitHub cookie on OIDC callback = %d, want 400", recToOIDC.Code)
+		}
+		if cleared := findCookie(recToOIDC.Result().Cookies(), OIDCFlowCookieName); cleared != nil {
+			t.Fatalf("GitHub cookie replay unexpectedly cleared OIDC flow cookie: %+v", cleared)
+		}
+		if sessions.calls != 0 {
+			t.Fatalf("sessions.calls = %d, want 0", sessions.calls)
+		}
+	})
+
+	t.Run("error mappings and state mismatch preserve flow cookie", func(t *testing.T) {
+		sessions := &stubSessionStore{}
+		srv, fake := newGitHubTestServer(t, "http://127.0.0.1:8081/api/v1/auth/github/callback", sessions)
+		handler := srv.ConsoleRoutes()
+
+		// state 不符返回 400 且不删除正在进行的流程 Cookie。
+		loginRec := httptest.NewRecorder()
+		handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, githubLoginPath, nil))
+		flowCookie := findCookie(loginRec.Result().Cookies(), GitHubFlowCookieName)
+		cbURL := runAuthorizeAtFake(t, loginRec.Header().Get("Location"))
+
+		badStateReq := httptest.NewRequest(http.MethodGet, githubCallbackPath+"?code=abc&state=wrong", nil)
+		badStateReq.AddCookie(flowCookie)
+		badStateRec := httptest.NewRecorder()
+		handler.ServeHTTP(badStateRec, badStateReq)
+		if badStateRec.Code != http.StatusBadRequest || findCookie(badStateRec.Result().Cookies(), GitHubFlowCookieName) != nil {
+			t.Fatalf("state mismatch = %d, cookies = %+v", badStateRec.Code, badStateRec.Result().Cookies())
+		}
+
+		// 紧接着同一份有效回调仍然能成功。
+		okReq := httptest.NewRequest(http.MethodGet, cbURL.RequestURI(), nil)
+		okReq.AddCookie(flowCookie)
+		okRec := httptest.NewRecorder()
+		handler.ServeHTTP(okRec, okReq)
+		if okRec.Code != http.StatusOK {
+			t.Fatalf("valid callback after mismatch = %d, want 200", okRec.Code)
+		}
+
+		errorCases := []struct {
+			name       string
+			tamper     fakegithub.Tamper
+			query      func(state string) string
+			wantStatus int
+		}{
+			{
+				name: "provider error param returns 401",
+				query: func(state string) string {
+					return fmt.Sprintf("%s?error=access_denied&state=%s", githubCallbackPath, url.QueryEscape(state))
+				},
+				wantStatus: http.StatusUnauthorized,
+			},
+			{
+				name:       "missing code returns 400",
+				query:      func(state string) string { return githubCallbackPath + "?state=" + url.QueryEscape(state) },
+				wantStatus: http.StatusBadRequest,
+			},
+			{
+				name:       "bad_verification_code returns 401",
+				tamper:     fakegithub.Tamper{TokenError: "bad_verification_code"},
+				wantStatus: http.StatusUnauthorized,
+			},
+			{
+				name:       "incorrect_client_credentials returns 502",
+				tamper:     fakegithub.Tamper{TokenError: "incorrect_client_credentials"},
+				wantStatus: http.StatusBadGateway,
+			},
+			{
+				name:       "user api 500 returns 502",
+				tamper:     fakegithub.Tamper{UserStatus: http.StatusInternalServerError},
+				wantStatus: http.StatusBadGateway,
+			},
+		}
+		for _, tc := range errorCases {
+			t.Run(tc.name, func(t *testing.T) {
+				fake.SetTamper(tc.tamper)
+				t.Cleanup(func() { fake.SetTamper(fakegithub.Tamper{}) })
+
+				lRec := httptest.NewRecorder()
+				handler.ServeHTTP(lRec, httptest.NewRequest(http.MethodGet, githubLoginPath, nil))
+				fCookie := findCookie(lRec.Result().Cookies(), GitHubFlowCookieName)
+				loc, _ := url.Parse(lRec.Header().Get("Location"))
+
+				var reqURI string
+				if tc.query != nil {
+					reqURI = tc.query(loc.Query().Get("state"))
+				} else {
+					reqURI = runAuthorizeAtFake(t, loc.String()).RequestURI()
+				}
+				cReq := httptest.NewRequest(http.MethodGet, reqURI, nil)
+				cReq.AddCookie(fCookie)
+				cRec := httptest.NewRecorder()
+				handler.ServeHTTP(cRec, cReq)
+				if cRec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d, body = %s", cRec.Code, tc.wantStatus, cRec.Body.String())
+				}
+			})
 		}
 	})
 }

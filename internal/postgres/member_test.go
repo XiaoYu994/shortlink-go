@@ -14,7 +14,7 @@ import (
 func createTestMember(t *testing.T, store *Store, tenantID int64, sub, email string, role identity.Role) int64 {
 	t.Helper()
 	ctx := context.Background()
-	issued, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	issued, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       sub,
 		Email:         email,
@@ -22,7 +22,7 @@ func createTestMember(t *testing.T, store *Store, tenantID int64, sub, email str
 		Name:          sub,
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("CreateSessionForOIDC(%s): %v", sub, err)
+		t.Fatalf("CreateSessionForIdentity(%s): %v", sub, err)
 	}
 	if _, err := store.db.ExecContext(ctx,
 		`INSERT INTO memberships (user_id, tenant_id, role) VALUES ($1, $2, $3)`,
@@ -194,14 +194,14 @@ func TestRemoveMember(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert member1 tenant2: %v", err)
 	}
-	member1Sess, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	member1Sess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "member1",
 		Email:         "member1@example.com",
 		EmailVerified: true,
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("CreateSessionForOIDC member1: %v", err)
+		t.Fatalf("CreateSessionForIdentity member1: %v", err)
 	}
 
 	// admin 不能移出 owner；viewer/member 不能移出任何人；非成员操作返回 ErrOrgNotFound；他组织目标返回 ErrMemberNotFound。

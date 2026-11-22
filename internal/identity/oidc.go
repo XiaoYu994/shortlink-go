@@ -19,15 +19,15 @@ import (
 )
 
 const (
-	defaultOIDCHTTPTimeout = 10 * time.Second
-	flowRandomBytes        = 32
+	defaultProviderHTTPTimeout = 10 * time.Second
+	flowRandomBytes            = 32
 )
 
 var (
-	// ErrOIDCAuthFailed 表示授权码兑换被拒绝或 ID Token 校验失败（签名、iss、aud、exp、nonce 或声明非法）。
-	ErrOIDCAuthFailed = errors.New("oidc authentication failed")
-	// ErrOIDCUnavailable 表示身份提供方不可达、返回 5xx 或客户端凭据配置异常。
-	ErrOIDCUnavailable = errors.New("oidc provider unavailable")
+	// ErrAuthFailed 表示授权码兑换被拒绝、访问令牌无效、或 ID Token 校验/身份声明非法。
+	ErrAuthFailed = errors.New("authentication failed")
+	// ErrProviderUnavailable 表示身份提供方不可达、返回 5xx 或客户端凭据配置异常。
+	ErrProviderUnavailable = errors.New("identity provider unavailable")
 	// ErrNonceMismatch 表示 ID Token 里的 nonce 与登录流程 Cookie 中的值不一致。
 	ErrNonceMismatch = errors.New("oidc nonce mismatch")
 )
@@ -42,7 +42,13 @@ type OIDCConfig struct {
 	HTTPClient *http.Client
 }
 
-// OIDCFlow 保存单次授权码登录生成的三个随机值，由 HTTP 层写入短期 HttpOnly Cookie。
+// OAuthFlow 保存纯 OAuth 2.0 授权码登录生成的随机 state 和 PKCE code_verifier（没有 ID Token，所以不需要 nonce）。
+type OAuthFlow struct {
+	State        string
+	CodeVerifier string
+}
+
+// OIDCFlow 保存单次 OIDC 授权码登录生成的三个随机值，由 HTTP 层写入短期 HttpOnly Cookie。
 type OIDCFlow struct {
 	State        string
 	CodeVerifier string
@@ -50,21 +56,36 @@ type OIDCFlow struct {
 }
 
 /*
+NewOAuthFlow 生成纯 OAuth 2.0 授权码流程所需的随机 state 和 PKCE code_verifier。
+state 取 32 字节随机数做 base64url 编码；code_verifier 使用 oauth2.GenerateVerifier。
+*/
+func NewOAuthFlow() (OAuthFlow, error) {
+	state, err := randomURLToken(flowRandomBytes)
+	if err != nil {
+		return OAuthFlow{}, fmt.Errorf("generate oauth state: %w", err)
+	}
+	return OAuthFlow{
+		State:        state,
+		CodeVerifier: oauth2.GenerateVerifier(),
+	}, nil
+}
+
+/*
 NewOIDCFlow 生成单次授权码流程所需的随机 state、PKCE code_verifier 和 nonce。
 state 和 nonce 取 32 字节随机数做 base64url 编码；code_verifier 使用 oauth2.GenerateVerifier。
 */
 func NewOIDCFlow() (OIDCFlow, error) {
-	state, err := randomURLToken(flowRandomBytes)
+	oauthFlow, err := NewOAuthFlow()
 	if err != nil {
-		return OIDCFlow{}, fmt.Errorf("generate oidc state: %w", err)
+		return OIDCFlow{}, err
 	}
 	nonce, err := randomURLToken(flowRandomBytes)
 	if err != nil {
 		return OIDCFlow{}, fmt.Errorf("generate oidc nonce: %w", err)
 	}
 	return OIDCFlow{
-		State:        state,
-		CodeVerifier: oauth2.GenerateVerifier(),
+		State:        oauthFlow.State,
+		CodeVerifier: oauthFlow.CodeVerifier,
 		Nonce:        nonce,
 	}, nil
 }
@@ -110,7 +131,7 @@ func NewOIDCProvider(ctx context.Context, cfg OIDCConfig) (*OIDCProvider, error)
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultOIDCHTTPTimeout}
+		httpClient = &http.Client{Timeout: defaultProviderHTTPTimeout}
 	}
 
 	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, httpClient), cfg.Issuer)
@@ -138,17 +159,17 @@ func NewOIDCProvider(ctx context.Context, cfg OIDCConfig) (*OIDCProvider, error)
 		verifier:      verifier,
 		httpClient:    httpClient,
 		secureCookies: strings.EqualFold(redirectURL.Scheme, "https"),
-		flowCookieKey: deriveFlowCookieKey(cfg.ClientSecret),
+		flowCookieKey: deriveFlowCookieKey("shortlink-oidc-flow-v1", cfg.ClientSecret),
 	}, nil
 }
 
 /*
-deriveFlowCookieKey 从客户端密钥派生流程 Cookie 的 HMAC 密钥。
-不直接拿客户端密钥当 HMAC 密钥，避免两处用途混在同一个字节串上。
+deriveFlowCookieKey 从用途前缀和客户端密钥派生流程 Cookie 的 HMAC 密钥。
+不同用途/提供方传入不同 purpose，不直接拿客户端密钥当 HMAC 密钥，避免两处用途混在同一个字节串上。
 密钥只跟配置走，console 多副本不需要共享内存。
 */
-func deriveFlowCookieKey(clientSecret string) []byte {
-	sum := sha256.Sum256([]byte("shortlink-oidc-flow-v1\x00" + clientSecret))
+func deriveFlowCookieKey(purpose, clientSecret string) []byte {
+	sum := sha256.Sum256([]byte(purpose + "\x00" + clientSecret))
 	return sum[:]
 }
 
@@ -177,33 +198,33 @@ func (p *OIDCProvider) AuthCodeURL(state, codeVerifier, nonce string) string {
 
 /*
 ExchangeAndVerify 用授权码和 PKCE code_verifier 向令牌端点换取令牌，
-再校验 ID Token 的签名、iss、aud、exp 和 expectedNonce，返回规范化后的 OIDCIdentity。
+再校验 ID Token 的签名、iss、aud、exp 和 expectedNonce，返回规范化后的 ExternalIdentity。
 ID Token 只在这里消费一次，不持久化（ADR 0018）。
 */
-func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (OIDCIdentity, error) {
+func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (ExternalIdentity, error) {
 	if code == "" || codeVerifier == "" || expectedNonce == "" {
-		return OIDCIdentity{}, fmt.Errorf("%w: code, code_verifier, and nonce are required", ErrOIDCAuthFailed)
+		return ExternalIdentity{}, fmt.Errorf("%w: code, code_verifier, and nonce are required", ErrAuthFailed)
 	}
 
 	callCtx := oidc.ClientContext(ctx, p.httpClient)
 	token, err := p.oauth.Exchange(callCtx, code, oauth2.VerifierOption(codeVerifier))
 	if err != nil {
-		return OIDCIdentity{}, classifyExchangeError(ctx, err)
+		return ExternalIdentity{}, classifyExchangeError(ctx, err)
 	}
 
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		return OIDCIdentity{}, fmt.Errorf("%w: missing id_token", ErrOIDCAuthFailed)
+		return ExternalIdentity{}, fmt.Errorf("%w: missing id_token", ErrAuthFailed)
 	}
 
 	idToken, err := p.verifier.Verify(callCtx, rawIDToken)
 	if err != nil {
-		return OIDCIdentity{}, classifyVerifyError(ctx, err)
+		return ExternalIdentity{}, classifyVerifyError(ctx, err)
 	}
 
 	// go-oidc 只把 nonce 解析到 IDToken.Nonce，不自动比对，这里显式做常量时间比较。
 	if idToken.Nonce == "" || subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(expectedNonce)) != 1 {
-		return OIDCIdentity{}, fmt.Errorf("%w: %w", ErrOIDCAuthFailed, ErrNonceMismatch)
+		return ExternalIdentity{}, fmt.Errorf("%w: %w", ErrAuthFailed, ErrNonceMismatch)
 	}
 
 	var claims struct {
@@ -212,10 +233,10 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 		Name          string `json:"name"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
-		return OIDCIdentity{}, fmt.Errorf("%w: decode id token claims: %w", ErrOIDCAuthFailed, err)
+		return ExternalIdentity{}, fmt.Errorf("%w: decode id token claims: %w", ErrAuthFailed, err)
 	}
 
-	id, err := (OIDCIdentity{
+	id, err := (ExternalIdentity{
 		Issuer:        idToken.Issuer,
 		Subject:       idToken.Subject,
 		Email:         claims.Email,
@@ -223,7 +244,7 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 		Name:          claims.Name,
 	}).Normalize()
 	if err != nil {
-		return OIDCIdentity{}, fmt.Errorf("%w: %w", ErrOIDCAuthFailed, err)
+		return ExternalIdentity{}, fmt.Errorf("%w: %w", ErrAuthFailed, err)
 	}
 	return id, nil
 }
@@ -231,8 +252,8 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 /*
 classifyExchangeError 把令牌端点的失败分成两类：
 请求 context 取消/超时保留原上下文错误；
-400 里的 invalid_grant 等客户端错误归为 ErrOIDCAuthFailed（401）；
-400 的 server_error、temporarily_unavailable，以及 401 invalid_client、5xx、网络故障归为 ErrOIDCUnavailable（502）。
+400 里的 invalid_grant 等客户端错误归为 ErrAuthFailed（401）；
+400 的 server_error、temporarily_unavailable，以及 401 invalid_client、5xx、网络故障归为 ErrProviderUnavailable（502）。
 */
 func classifyExchangeError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
@@ -242,12 +263,12 @@ func classifyExchangeError(ctx context.Context, err error) error {
 	if errors.As(err, &retrieveErr) && retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusBadRequest {
 		switch retrieveErr.ErrorCode {
 		case "server_error", "temporarily_unavailable":
-			return fmt.Errorf("%w: %w", ErrOIDCUnavailable, err)
+			return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
 		default:
-			return fmt.Errorf("%w: %w", ErrOIDCAuthFailed, err)
+			return fmt.Errorf("%w: %w", ErrAuthFailed, err)
 		}
 	}
-	return fmt.Errorf("%w: %w", ErrOIDCUnavailable, err)
+	return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
 }
 
 /*
@@ -260,7 +281,7 @@ func classifyVerifyError(ctx context.Context, err error) error {
 		return fmt.Errorf("verify id token: %w", ctx.Err())
 	}
 	if strings.Contains(err.Error(), "fetching keys") {
-		return fmt.Errorf("%w: verify id token: %w", ErrOIDCUnavailable, err)
+		return fmt.Errorf("%w: verify id token: %w", ErrProviderUnavailable, err)
 	}
-	return fmt.Errorf("%w: verify id token: %w", ErrOIDCAuthFailed, err)
+	return fmt.Errorf("%w: verify id token: %w", ErrAuthFailed, err)
 }

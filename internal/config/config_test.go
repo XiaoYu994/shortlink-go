@@ -51,6 +51,9 @@ func TestLoadConfig(t *testing.T) {
 		"OIDC_CLIENT_ID":         "",
 		"OIDC_CLIENT_SECRET":     "",
 		"OIDC_REDIRECT_URL":      "",
+		"GITHUB_CLIENT_ID":       "",
+		"GITHUB_CLIENT_SECRET":   "",
+		"GITHUB_REDIRECT_URL":    "",
 	}
 	defaults := Config{
 		Addr:                 defaultAddr,
@@ -360,6 +363,66 @@ func TestLoadConfig(t *testing.T) {
 				"OIDC_REDIRECT_URL":  "/api/v1/auth/callback",
 			},
 			wantErr: "OIDC_REDIRECT_URL",
+		},
+		{
+			name: "github all set",
+			env: map[string]string{
+				"GITHUB_CLIENT_ID":     "gh-client",
+				"GITHUB_CLIENT_SECRET": "gh-secret",
+				"GITHUB_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+			},
+			want: func() Config {
+				c := defaults
+				c.GitHub = GitHubConfig{
+					ClientID:     "gh-client",
+					ClientSecret: "gh-secret",
+					RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+				}
+				return c
+			}(),
+		},
+		{
+			name: "github partially set",
+			env: map[string]string{
+				"GITHUB_CLIENT_ID": "gh-client",
+			},
+			wantErr: "GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL",
+		},
+		{
+			name: "github invalid redirect url",
+			env: map[string]string{
+				"GITHUB_CLIENT_ID":     "gh-client",
+				"GITHUB_CLIENT_SECRET": "gh-secret",
+				"GITHUB_REDIRECT_URL":  "/api/v1/auth/github/callback",
+			},
+			wantErr: "GITHUB_REDIRECT_URL",
+		},
+		{
+			name: "oidc and github both set",
+			env: map[string]string{
+				"OIDC_ISSUER":          "http://127.0.0.1:5556/dex",
+				"OIDC_CLIENT_ID":       "shortlink-console",
+				"OIDC_CLIENT_SECRET":   "shortlink-console-secret",
+				"OIDC_REDIRECT_URL":    "http://127.0.0.1:8081/api/v1/auth/callback",
+				"GITHUB_CLIENT_ID":     "gh-client",
+				"GITHUB_CLIENT_SECRET": "gh-secret",
+				"GITHUB_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+			},
+			want: func() Config {
+				c := defaults
+				c.OIDC = OIDCConfig{
+					Issuer:       "http://127.0.0.1:5556/dex",
+					ClientID:     "shortlink-console",
+					ClientSecret: "shortlink-console-secret",
+					RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+				}
+				c.GitHub = GitHubConfig{
+					ClientID:     "gh-client",
+					ClientSecret: "gh-secret",
+					RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+				}
+				return c
+			}(),
 		},
 	}
 

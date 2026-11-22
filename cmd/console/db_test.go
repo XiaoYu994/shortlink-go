@@ -160,14 +160,14 @@ func TestConsoleMemberInviteUsesDatabase(t *testing.T) {
 
 	store := postgres.NewStore(db)
 	sub := "sub-invite-" + suffix
-	unverified, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	unverified, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       sub,
 		Email:         email,
 		EmailVerified: false,
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("unverified CreateSessionForOIDC: %v", err)
+		t.Fatalf("unverified CreateSessionForIdentity: %v", err)
 	}
 	info, err := store.GetSessionInfo(ctx, unverified.Token)
 	if err != nil {
@@ -177,14 +177,14 @@ func TestConsoleMemberInviteUsesDatabase(t *testing.T) {
 		t.Fatalf("unverified orgs = %+v, want empty", info.Orgs)
 	}
 
-	verified, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	verified, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       sub,
 		Email:         email,
 		EmailVerified: true,
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("verified CreateSessionForOIDC: %v", err)
+		t.Fatalf("verified CreateSessionForIdentity: %v", err)
 	}
 	info, err = store.GetSessionInfo(ctx, verified.Token)
 	if err != nil {

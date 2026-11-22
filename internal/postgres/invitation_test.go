@@ -143,7 +143,7 @@ func TestCreateInvitationValidation(t *testing.T) {
 	}
 }
 
-func TestCreateSessionForOIDCRedeemsInvitations(t *testing.T) {
+func TestCreateSessionForIdentityRedeemsInvitations(t *testing.T) {
 	store, tenant1 := newTestStore(t)
 	ctx := context.Background()
 
@@ -205,7 +205,7 @@ func TestCreateSessionForOIDCRedeemsInvitations(t *testing.T) {
 	}
 
 	// 1. email_verified=false 时绝不兑现邀请（即使以后账号还留在 users 里）。
-	unverified, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	unverified, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-alice",
 		Email:         "alice@example.com",
@@ -224,7 +224,7 @@ func TestCreateSessionForOIDCRedeemsInvitations(t *testing.T) {
 	}
 
 	// 2. 同一用户之后用 email_verified=true 再次登录：兑现全部有效待兑现邀请，忽略已过期和已撤销。
-	verified, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	verified, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-alice",
 		Email:         "ALICE@EXAMPLE.COM",
@@ -271,7 +271,7 @@ func TestCreateSessionForOIDCRedeemsInvitations(t *testing.T) {
 	}
 
 	// 3. 另一个不同 (issuer, subject) 用相同已验证邮箱登录：已兑现邀请不能被重复领取。
-	other, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	other, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "https://other-idp.example.com",
 		Subject:       "sub-alice-other",
 		Email:         "alice@example.com",
@@ -297,7 +297,7 @@ func TestCreateSessionForOIDCRedeemsInvitations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateInvitation duplicate org membership: %v", err)
 	}
-	again, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	again, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-alice",
 		Email:         "alice@example.com",
@@ -322,7 +322,7 @@ func TestCreateSessionForOIDCRedeemsInvitations(t *testing.T) {
 	}
 }
 
-func TestCreateSessionForOIDCRedeemConcurrent(t *testing.T) {
+func TestCreateSessionForIdentityRedeemConcurrent(t *testing.T) {
 	store, tenant1 := newTestStore(t)
 	ctx := context.Background()
 
@@ -345,7 +345,7 @@ func TestCreateSessionForOIDCRedeemConcurrent(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			<-start
-			results[idx], errs[idx] = store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+			results[idx], errs[idx] = store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 				Issuer:        "http://127.0.0.1:5556/dex",
 				Subject:       "sub-race-invite",
 				Email:         "race-invite@example.com",

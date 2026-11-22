@@ -74,13 +74,14 @@ func runServe() error {
 	})
 
 	/*
-		四个 OIDC_* 环境变量全空时不挂载登录与成员管理路由，只支持 API Key（ADR 0018）。
+		OIDC_* 与 GITHUB_* 各自独立启用；全空时不挂载登录、会话与成员管理路由，只支持 API Key（ADR 0018）。
 		变量类型保持为接口，只在启用时赋值，避免把带类型的 nil 指针放进 ConsoleOptions。
 	*/
 	var (
-		oidcClient httpapi.OIDCClient
-		sessions   httpapi.SessionStore
-		members    httpapi.MemberStore
+		oidcClient   httpapi.OIDCClient
+		githubClient httpapi.GitHubClient
+		sessions     httpapi.SessionStore
+		members      httpapi.MemberStore
 	)
 	if cfg.OIDC.Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -95,9 +96,23 @@ func runServe() error {
 			return fmt.Errorf("init oidc provider: %w", err)
 		}
 		oidcClient = provider
+		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
+	}
+	if cfg.GitHub.Enabled() {
+		provider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+			ClientID:     cfg.GitHub.ClientID,
+			ClientSecret: cfg.GitHub.ClientSecret,
+			RedirectURL:  cfg.GitHub.RedirectURL,
+		})
+		if err != nil {
+			return fmt.Errorf("init github provider: %w", err)
+		}
+		githubClient = provider
+		logger.Info("initialized github oauth provider")
+	}
+	if oidcClient != nil || githubClient != nil {
 		sessions = pgStore
 		members = pgStore
-		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
 	}
 
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
@@ -105,6 +120,7 @@ func runServe() error {
 		Keys:       pgStore,
 		Authorizer: identity.NewMapAuthorizer(),
 		OIDC:       oidcClient,
+		GitHub:     githubClient,
 		Sessions:   sessions,
 		Members:    members,
 	})

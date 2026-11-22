@@ -6,23 +6,23 @@ import (
 	"testing"
 )
 
-func TestOIDCIdentityNormalize(t *testing.T) {
+func TestExternalIdentityNormalize(t *testing.T) {
 	tests := []struct {
 		name    string
-		in      OIDCIdentity
-		want    OIDCIdentity
+		in      ExternalIdentity
+		want    ExternalIdentity
 		wantErr bool
 	}{
 		{
 			name: "normalizes email and name",
-			in: OIDCIdentity{
+			in: ExternalIdentity{
 				Issuer:        "http://127.0.0.1:5556/dex",
 				Subject:       "sub-1",
 				Email:         "  Alice@Example.COM ",
 				EmailVerified: true,
 				Name:          "  Alice  ",
 			},
-			want: OIDCIdentity{
+			want: ExternalIdentity{
 				Issuer:        "http://127.0.0.1:5556/dex",
 				Subject:       "sub-1",
 				Email:         "alice@example.com",
@@ -32,13 +32,13 @@ func TestOIDCIdentityNormalize(t *testing.T) {
 		},
 		{
 			name: "empty email cannot be verified",
-			in: OIDCIdentity{
+			in: ExternalIdentity{
 				Issuer:        "http://127.0.0.1:5556/dex",
 				Subject:       "sub-2",
 				Email:         "   ",
 				EmailVerified: true,
 			},
-			want: OIDCIdentity{
+			want: ExternalIdentity{
 				Issuer:        "http://127.0.0.1:5556/dex",
 				Subject:       "sub-2",
 				Email:         "",
@@ -47,32 +47,32 @@ func TestOIDCIdentityNormalize(t *testing.T) {
 		},
 		{
 			name:    "empty issuer rejected",
-			in:      OIDCIdentity{Subject: "sub-1"},
+			in:      ExternalIdentity{Subject: "sub-1"},
 			wantErr: true,
 		},
 		{
 			name:    "padded issuer rejected",
-			in:      OIDCIdentity{Issuer: " https://idp.example.com", Subject: "sub-1"},
+			in:      ExternalIdentity{Issuer: " https://idp.example.com", Subject: "sub-1"},
 			wantErr: true,
 		},
 		{
 			name:    "empty subject rejected",
-			in:      OIDCIdentity{Issuer: "https://idp.example.com"},
+			in:      ExternalIdentity{Issuer: "https://idp.example.com"},
 			wantErr: true,
 		},
 		{
 			name:    "overlong subject rejected",
-			in:      OIDCIdentity{Issuer: "https://idp.example.com", Subject: strings.Repeat("a", maxSubjectBytes+1)},
+			in:      ExternalIdentity{Issuer: "https://idp.example.com", Subject: strings.Repeat("a", maxSubjectBytes+1)},
 			wantErr: true,
 		},
 		{
 			name:    "overlong email rejected",
-			in:      OIDCIdentity{Issuer: "https://idp.example.com", Subject: "sub-1", Email: strings.Repeat("a", maxEmailBytes+1)},
+			in:      ExternalIdentity{Issuer: "https://idp.example.com", Subject: "sub-1", Email: strings.Repeat("a", maxEmailBytes+1)},
 			wantErr: true,
 		},
 		{
 			name:    "overlong name rejected",
-			in:      OIDCIdentity{Issuer: "https://idp.example.com", Subject: "sub-1", Name: strings.Repeat("a", maxNameBytes+1)},
+			in:      ExternalIdentity{Issuer: "https://idp.example.com", Subject: "sub-1", Name: strings.Repeat("a", maxNameBytes+1)},
 			wantErr: true,
 		},
 	}
@@ -80,8 +80,8 @@ func TestOIDCIdentityNormalize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.in.Normalize()
 			if tt.wantErr {
-				if !errors.Is(err, ErrInvalidOIDCIdentity) {
-					t.Fatalf("err = %v, want ErrInvalidOIDCIdentity", err)
+				if !errors.Is(err, ErrInvalidExternalIdentity) {
+					t.Fatalf("err = %v, want ErrInvalidExternalIdentity", err)
 				}
 				return
 			}

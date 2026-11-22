@@ -84,7 +84,7 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExchangeAndVerify: %v", err)
 	}
-	want := identity.OIDCIdentity{
+	want := identity.ExternalIdentity{
 		Issuer:        fake.URL(),
 		Subject:       "sub-alice",
 		Email:         "alice@example.com",
@@ -114,11 +114,11 @@ func TestOIDCProviderRejectsTamperedResponses(t *testing.T) {
 		tamper  fakeoidc.Tamper
 		wantErr error
 	}{
-		{name: "expired code", tamper: fakeoidc.Tamper{CodeExpired: true}, wantErr: identity.ErrOIDCAuthFailed},
-		{name: "wrong signature", tamper: fakeoidc.Tamper{WrongSignature: true}, wantErr: identity.ErrOIDCAuthFailed},
-		{name: "wrong issuer", tamper: fakeoidc.Tamper{Issuer: "https://evil.example.com"}, wantErr: identity.ErrOIDCAuthFailed},
-		{name: "wrong audience", tamper: fakeoidc.Tamper{Audience: "other-client"}, wantErr: identity.ErrOIDCAuthFailed},
-		{name: "expired id token", tamper: fakeoidc.Tamper{ExpiredIDToken: true}, wantErr: identity.ErrOIDCAuthFailed},
+		{name: "expired code", tamper: fakeoidc.Tamper{CodeExpired: true}, wantErr: identity.ErrAuthFailed},
+		{name: "wrong signature", tamper: fakeoidc.Tamper{WrongSignature: true}, wantErr: identity.ErrAuthFailed},
+		{name: "wrong issuer", tamper: fakeoidc.Tamper{Issuer: "https://evil.example.com"}, wantErr: identity.ErrAuthFailed},
+		{name: "wrong audience", tamper: fakeoidc.Tamper{Audience: "other-client"}, wantErr: identity.ErrAuthFailed},
+		{name: "expired id token", tamper: fakeoidc.Tamper{ExpiredIDToken: true}, wantErr: identity.ErrAuthFailed},
 		{name: "wrong nonce", tamper: fakeoidc.Tamper{Nonce: "different-nonce"}, wantErr: identity.ErrNonceMismatch},
 	}
 
@@ -136,8 +136,8 @@ func TestOIDCProviderRejectsTamperedResponses(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
-			if !errors.Is(err, identity.ErrOIDCAuthFailed) {
-				t.Errorf("err = %v, want also wrapping ErrOIDCAuthFailed", err)
+			if !errors.Is(err, identity.ErrAuthFailed) {
+				t.Errorf("err = %v, want also wrapping ErrAuthFailed", err)
 			}
 		})
 	}
@@ -161,8 +161,8 @@ func TestOIDCProviderWrongClientSecretReturnsUnavailable(t *testing.T) {
 	}
 	code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, flow.Nonce))
 	_, err = provider.ExchangeAndVerify(context.Background(), code, flow.CodeVerifier, flow.Nonce)
-	if !errors.Is(err, identity.ErrOIDCUnavailable) {
-		t.Fatalf("err = %v, want ErrOIDCUnavailable", err)
+	if !errors.Is(err, identity.ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
 	}
 }
 
@@ -172,9 +172,9 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 		tamper  fakeoidc.Tamper
 		wantErr error
 	}{
-		{name: "token temporarily unavailable", tamper: fakeoidc.Tamper{TokenError: "temporarily_unavailable"}, wantErr: identity.ErrOIDCUnavailable},
-		{name: "token server error", tamper: fakeoidc.Tamper{TokenError: "server_error"}, wantErr: identity.ErrOIDCUnavailable},
-		{name: "jwks unavailable", tamper: fakeoidc.Tamper{JWKSFailure: true}, wantErr: identity.ErrOIDCUnavailable},
+		{name: "token temporarily unavailable", tamper: fakeoidc.Tamper{TokenError: "temporarily_unavailable"}, wantErr: identity.ErrProviderUnavailable},
+		{name: "token server error", tamper: fakeoidc.Tamper{TokenError: "server_error"}, wantErr: identity.ErrProviderUnavailable},
+		{name: "jwks unavailable", tamper: fakeoidc.Tamper{JWKSFailure: true}, wantErr: identity.ErrProviderUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -199,7 +199,7 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
-			if errors.Is(err, identity.ErrOIDCAuthFailed) {
+			if errors.Is(err, identity.ErrAuthFailed) {
 				t.Errorf("outage was classified as authentication failure: %v", err)
 			}
 		})

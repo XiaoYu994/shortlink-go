@@ -18,8 +18,8 @@ const (
 )
 
 var (
-	// ErrInvalidOIDCIdentity 表示 OIDC 身份声明缺少必填字段或超出数据库约束长度。
-	ErrInvalidOIDCIdentity = errors.New("invalid oidc identity")
+	// ErrInvalidExternalIdentity 表示外部身份声明缺少必填字段或超出数据库约束长度。
+	ErrInvalidExternalIdentity = errors.New("invalid external identity")
 	// ErrInvalidSessionTTL 表示会话有效期不是正时长（至少 1 微秒）。
 	ErrInvalidSessionTTL = errors.New("session ttl must be at least 1 microsecond")
 	// ErrOrgNotFound 表示用户会话有效，但目标组织不存在或当前用户不是其成员。
@@ -73,10 +73,10 @@ type SessionInfo struct {
 }
 
 /*
-OIDCIdentity 是通过 OIDC ID Token 校验后提取的外部身份声明。
+ExternalIdentity 是从外部身份提供方校验或查询后提取的用户身份声明（支持 OIDC ID Token 和 OAuth 2.0 用户接口）。
 用户身份以 (Issuer, Subject) 为唯一键，第一版不按邮箱自动关联不同提供方（ADR 0018）。
 */
-type OIDCIdentity struct {
+type ExternalIdentity struct {
 	Issuer        string
 	Subject       string
 	Email         string
@@ -85,26 +85,26 @@ type OIDCIdentity struct {
 }
 
 /*
-Normalize 规范化并校验 OIDC 身份声明，使其满足 users 和 user_identities 的表约束：
+Normalize 规范化并校验外部身份声明，使其满足 users 和 user_identities 的表约束：
 Issuer 与 Subject 必填且不能含首尾空白；Email 去首尾空白并转小写；
 空邮箱不能标为已验证；各字段长度不超过数据库上限。
 */
-func (id OIDCIdentity) Normalize() (OIDCIdentity, error) {
+func (id ExternalIdentity) Normalize() (ExternalIdentity, error) {
 	if id.Issuer == "" || len(id.Issuer) > maxIssuerBytes || strings.TrimSpace(id.Issuer) != id.Issuer {
-		return OIDCIdentity{}, fmt.Errorf("%w: invalid issuer", ErrInvalidOIDCIdentity)
+		return ExternalIdentity{}, fmt.Errorf("%w: invalid issuer", ErrInvalidExternalIdentity)
 	}
 	if id.Subject == "" || len(id.Subject) > maxSubjectBytes || strings.TrimSpace(id.Subject) != id.Subject {
-		return OIDCIdentity{}, fmt.Errorf("%w: invalid subject", ErrInvalidOIDCIdentity)
+		return ExternalIdentity{}, fmt.Errorf("%w: invalid subject", ErrInvalidExternalIdentity)
 	}
 	email := strings.ToLower(strings.TrimSpace(id.Email))
 	if len(email) > maxEmailBytes {
-		return OIDCIdentity{}, fmt.Errorf("%w: email exceeds %d bytes", ErrInvalidOIDCIdentity, maxEmailBytes)
+		return ExternalIdentity{}, fmt.Errorf("%w: email exceeds %d bytes", ErrInvalidExternalIdentity, maxEmailBytes)
 	}
 	name := strings.TrimSpace(id.Name)
 	if len(name) > maxNameBytes {
-		return OIDCIdentity{}, fmt.Errorf("%w: name exceeds %d bytes", ErrInvalidOIDCIdentity, maxNameBytes)
+		return ExternalIdentity{}, fmt.Errorf("%w: name exceeds %d bytes", ErrInvalidExternalIdentity, maxNameBytes)
 	}
-	return OIDCIdentity{
+	return ExternalIdentity{
 		Issuer:        id.Issuer,
 		Subject:       id.Subject,
 		Email:         email,

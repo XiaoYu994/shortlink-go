@@ -16,14 +16,15 @@ import (
 
 const (
 	identityUniqueConstraint = "uq_user_identities_issuer_subject"
-	maxOIDCLoginAttempts     = 2
+	maxIdentityLoginAttempts = 2
 )
 
-var errIdentityConflict = errors.New("oidc identity unique conflict")
+var errIdentityConflict = errors.New("external identity unique conflict")
 
 /*
-CreateSessionForOIDC 按 (issuer, subject) 找到或创建用户，并在同一事务里签发一条新的服务端会话（阶段 11、ADR 0018）。
-当本次已校验的 ID Token 携带了已验证邮箱（email_verified=true）时，也在同一事务里按该邮箱兑现
+CreateSessionForIdentity 按 (issuer, subject) 找到或创建用户，并在同一事务里签发一条新的服务端会话（阶段 11、ADR 0018）。
+支持 OIDC ID Token 和 GitHub OAuth 2.0 用户信息两种来源：
+当本次外部身份携带了已验证邮箱（email_verified=true）时，也在同一事务里按该邮箱兑现
 尚未过期且未撤销的组织邀请；未验证邮箱绝不兑现，防止借未核实邮箱冒领邀请。
 再次登录只在新声明非空时覆盖邮箱和昵称；邮箱声明缺失时不改 email_verified。
 同一邮箱上已经验证过的标记不会被后来的 false 降回去。邮箱本身变了，则采用新声明里的验证结果。
@@ -32,7 +33,7 @@ CreateSessionForOIDC 按 (issuer, subject) 找到或创建用户，并在同一�
 每次登录都生成全新随机 token 并只存 SHA-256，防止会话固定攻击。
 如果同一 (issuer, subject) 并发首次登录撞上唯一约束，回滚本次事务（不留孤儿 users 行）后重试一次。
 */
-func (s *Store) CreateSessionForOIDC(ctx context.Context, id identity.OIDCIdentity, ttl time.Duration) (identity.IssuedSession, error) {
+func (s *Store) CreateSessionForIdentity(ctx context.Context, id identity.ExternalIdentity, ttl time.Duration) (identity.IssuedSession, error) {
 	norm, err := id.Normalize()
 	if err != nil {
 		return identity.IssuedSession{}, err
@@ -46,27 +47,27 @@ func (s *Store) CreateSessionForOIDC(ctx context.Context, id identity.OIDCIdenti
 
 	token, hash, err := identity.SessionToken.Generate()
 	if err != nil {
-		return identity.IssuedSession{}, fmt.Errorf("create session for oidc: generate token: %w", err)
+		return identity.IssuedSession{}, fmt.Errorf("create session for identity: generate token: %w", err)
 	}
 
-	for range maxOIDCLoginAttempts {
-		issued, err := s.createSessionForOIDCTx(ctx, norm, token, hash, ttl)
+	for range maxIdentityLoginAttempts {
+		issued, err := s.createSessionForIdentityTx(ctx, norm, token, hash, ttl)
 		if errors.Is(err, errIdentityConflict) {
 			continue
 		}
 		return issued, err
 	}
-	return identity.IssuedSession{}, fmt.Errorf("create session for oidc: identity conflict after %d attempts", maxOIDCLoginAttempts)
+	return identity.IssuedSession{}, fmt.Errorf("create session for identity: identity conflict after %d attempts", maxIdentityLoginAttempts)
 }
 
-func (s *Store) createSessionForOIDCTx(ctx context.Context, id identity.OIDCIdentity, token string, hash []byte, ttl time.Duration) (identity.IssuedSession, error) {
+func (s *Store) createSessionForIdentityTx(ctx context.Context, id identity.ExternalIdentity, token string, hash []byte, ttl time.Duration) (identity.IssuedSession, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return identity.IssuedSession{}, fmt.Errorf("create session for oidc: %w", err)
+		return identity.IssuedSession{}, fmt.Errorf("create session for identity: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	user, err := upsertOIDCUserTx(ctx, tx, id)
+	user, err := upsertExternalUserTx(ctx, tx, id)
 	if err != nil {
 		return identity.IssuedSession{}, err
 	}
@@ -89,14 +90,14 @@ RETURNING id, created_at, expires_at, now()`,
 		user.ID, hash, ttl.Microseconds(),
 	).Scan(&sess.ID, &sess.CreatedAt, &sess.ExpiresAt, &dbNow)
 	if err != nil {
-		return identity.IssuedSession{}, fmt.Errorf("create session for oidc: insert session: %w", err)
+		return identity.IssuedSession{}, fmt.Errorf("create session for identity: insert session: %w", err)
 	}
 	sess.CreatedAt = sess.CreatedAt.UTC()
 	sess.ExpiresAt = sess.ExpiresAt.UTC()
 	dbNow = dbNow.UTC()
 
 	if err := tx.Commit(); err != nil {
-		return identity.IssuedSession{}, fmt.Errorf("create session for oidc: commit: %w", err)
+		return identity.IssuedSession{}, fmt.Errorf("create session for identity: commit: %w", err)
 	}
 	return identity.IssuedSession{
 		User:         user,
@@ -106,7 +107,7 @@ RETURNING id, created_at, expires_at, now()`,
 	}, nil
 }
 
-func upsertOIDCUserTx(ctx context.Context, tx *sql.Tx, id identity.OIDCIdentity) (identity.User, error) {
+func upsertExternalUserTx(ctx context.Context, tx *sql.Tx, id identity.ExternalIdentity) (identity.User, error) {
 	var userID int64
 	err := tx.QueryRowContext(ctx, `
 UPDATE user_identities
@@ -129,10 +130,10 @@ WHERE id = $3
 RETURNING id, email, name, created_at`,
 			id.Email, id.Name, userID).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
-			return identity.User{}, fmt.Errorf("create session for oidc: user %d missing for identity", userID)
+			return identity.User{}, fmt.Errorf("create session for identity: user %d missing for identity", userID)
 		}
 		if err != nil {
-			return identity.User{}, fmt.Errorf("create session for oidc: update user: %w", err)
+			return identity.User{}, fmt.Errorf("create session for identity: update user: %w", err)
 		}
 		user.CreatedAt = user.CreatedAt.UTC()
 		return user, nil
@@ -145,7 +146,7 @@ VALUES ($1, $2)
 RETURNING id, email, name, created_at`,
 			id.Email, id.Name).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt)
 		if err != nil {
-			return identity.User{}, fmt.Errorf("create session for oidc: insert user: %w", err)
+			return identity.User{}, fmt.Errorf("create session for identity: insert user: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO user_identities (user_id, issuer, subject, email, email_verified)
@@ -154,13 +155,13 @@ VALUES ($1, $2, $3, $4, $5)`,
 			if isUniqueConstraintViolation(err, identityUniqueConstraint) {
 				return identity.User{}, errIdentityConflict
 			}
-			return identity.User{}, fmt.Errorf("create session for oidc: insert identity: %w", err)
+			return identity.User{}, fmt.Errorf("create session for identity: insert identity: %w", err)
 		}
 		user.CreatedAt = user.CreatedAt.UTC()
 		return user, nil
 
 	default:
-		return identity.User{}, fmt.Errorf("create session for oidc: upsert identity: %w", err)
+		return identity.User{}, fmt.Errorf("create session for identity: upsert identity: %w", err)
 	}
 }
 
@@ -192,7 +193,7 @@ FROM redeemed r
 ON CONFLICT (user_id, tenant_id) DO NOTHING`,
 		userID, email,
 	); err != nil {
-		return fmt.Errorf("create session for oidc: redeem invitations: %w", err)
+		return fmt.Errorf("create session for identity: redeem invitations: %w", err)
 	}
 	return nil
 }

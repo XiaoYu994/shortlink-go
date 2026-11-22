@@ -275,9 +275,26 @@ Cookie: sl_oidc_flow=...
 
 响应体不包含会话明文令牌。授权码过期/重放或 ID Token 校验失败返回 401 `{"error":"authentication failed"}`；身份提供方不可达、JWKS 拉取失败、令牌端点返回 `server_error` / `temporarily_unavailable`、5xx 或客户端密钥配置错误返回 502 `{"error":"identity provider unavailable"}`；超时返回 504。
 
+## GitHub OAuth 2.0 登录
+
+只有在 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GITHUB_REDIRECT_URL` 三个环境变量全部配置时，console 才注册 GitHub 登录和回调路由（全部为空时返回 404，只配一部分时启动失败），可与 `OIDC_*` 独立启用或同时启用。两个端点同样不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store` 且只接受 `GET`。
+
+- `GET /api/v1/auth/github/login`：返回 `302 Found` 跳转到 `https://github.com/login/oauth/authorize`（`scope=read:user user:email`，带随机 `state` 与 PKCE `S256` `code_challenge`，**不传 `nonce`**），并写入短期 `sl_github_flow` Cookie（`Path=/api/v1/auth/github/callback`、`HttpOnly`、`SameSite=Lax`、`Max-Age=600`、`GITHUB_REDIRECT_URL` 为 `https://` 时带 `Secure`）。
+- `GET /api/v1/auth/github/callback`：校验 `sl_github_flow` Cookie 与 `state` 后立即清除该 Cookie；用 `code` + PKCE `code_verifier` 换取 GitHub access token，再在线调用 `GET /user`（取不可变的数字用户 `id` 作为 `subject`、`name` 为空时回退到 `login`）与 `GET /user/emails`（只信任 `primary` 且 `verified` 的主邮箱），以 `(issuer="https://github.com", subject="<numeric id>")` 查找或创建用户、按已验证主邮箱兑现待兑现邀请，并签发同一个 `sl_session` 服务端会话（access token 只在本请求使用，不落库、不打日志）。
+- 与标准 OIDC 的协议差异对照：
+
+| 对比维度 | 标准 OIDC（Dex） | GitHub 纯 OAuth 2.0 |
+| --- | --- | --- |
+| 发现与密钥 | `OIDC_ISSUER/.well-known/openid-configuration` + JWKS 自动拉取 | 无发现文档，硬编码官方授权/令牌/REST 地址 |
+| 身份承载与重放防护 | 签名 JWT（ID Token）+ `nonce` 常量时间比对 | 无 ID Token 与 `nonce`；换回 `access_token` 后在线查 API |
+| 令牌端点错误语义 | HTTP 400（`invalid_grant` 等） | 授权码/凭据错误常返回 **HTTP 200** + 表单 `error=...` |
+| 主体与邮箱验证 | 声明自带 `sub`、`email`、`email_verified` | `/user` 缺可信验证状态，须调 `/user/emails` 取 `primary && verified` |
+
+- 账号隔离：按 `(issuer, subject)` 区分身份，GitHub 与 OIDC 即使主邮箱相同也不会自动合并成同一个平台用户。
+
 ## 当前用户与登出
 
-配置完整 `OIDC_*` 后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
+配置完整 `OIDC_*` 或 `GITHUB_*` 之一后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（两者都未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
 
 ### 查询当前用户
 
@@ -317,7 +334,7 @@ curl -i -X POST -b cookies.txt -c cookies.txt localhost:8081/api/v1/auth/logout
 
 ## 成员管理
 
-配置完整 `OIDC_*` 后，console 同时注册以下成员管理接口（未配置时返回 404）。三个接口都走管理 API 鉴权链（要求 `sl_session` + `X-Org-ID`、受按租户限流和 `CrossOriginProtection` 保护，响应带 `Cache-Control: no-store`）。API Key 永远不包含 `members:read` / `members:write` scope，携带有效 API Key 访问这三个接口固定返回 403 `{"error":"forbidden"}`。
+配置完整 `OIDC_*` 或 `GITHUB_*` 之一后，console 同时注册以下成员管理接口（两者都未配置时返回 404）。三个接口都走管理 API 鉴权链（要求 `sl_session` + `X-Org-ID`、受按租户限流和 `CrossOriginProtection` 保护，响应带 `Cache-Control: no-store`）。API Key 永远不包含 `members:read` / `members:write` scope，携带有效 API Key 访问这三个接口固定返回 403 `{"error":"forbidden"}`。
 
 ### 列出成员
 

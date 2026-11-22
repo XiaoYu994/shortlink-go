@@ -19,16 +19,20 @@ import (
 const (
 	// SessionCookieName 是服务端会话 Cookie 名，作用范围限定在 /api/，不发往 /r/{code}。
 	SessionCookieName = "sl_session"
-	// OIDCFlowCookieName 是授权码登录流程的短期 Cookie 名，只发往回调路径；state 相符后删除。
+	// OIDCFlowCookieName 是 OIDC 授权码登录流程的短期 Cookie 名，只发往 OIDC 回调路径；state 相符后删除。
 	OIDCFlowCookieName = "sl_oidc_flow"
+	// GitHubFlowCookieName 是 GitHub OAuth 2.0 授权码登录流程的短期 Cookie 名，只发往 GitHub 回调路径。
+	GitHubFlowCookieName = "sl_github_flow"
 
-	oidcLoginPath     = apiV1Prefix + "/auth/login"
-	oidcCallbackPath  = apiV1Prefix + "/auth/callback"
-	authLogoutPath    = apiV1Prefix + "/auth/logout"
-	mePath            = apiV1Prefix + "/me"
-	sessionCookiePath = "/api/"
+	oidcLoginPath      = apiV1Prefix + "/auth/login"
+	oidcCallbackPath   = apiV1Prefix + "/auth/callback"
+	githubLoginPath    = apiV1Prefix + "/auth/github/login"
+	githubCallbackPath = apiV1Prefix + "/auth/github/callback"
+	authLogoutPath     = apiV1Prefix + "/auth/logout"
+	mePath             = apiV1Prefix + "/me"
+	sessionCookiePath  = "/api/"
 
-	oidcFlowCookieTTL  = 10 * time.Minute
+	flowCookieTTL      = 10 * time.Minute
 	maxFlowCookieBytes = 1024
 )
 
@@ -38,9 +42,20 @@ OIDCClient 封装 OIDC 授权地址构造和授权码兑换/ID Token 校验。
 */
 type OIDCClient interface {
 	AuthCodeURL(state, codeVerifier, nonce string) string
-	ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (identity.OIDCIdentity, error)
+	ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (identity.ExternalIdentity, error)
 	SecureCookies() bool
 	// FlowCookieKey 是流程 Cookie 的 HMAC 密钥。同一套 OIDC 配置的副本必须返回同一把密钥。
+	FlowCookieKey() []byte
+}
+
+/*
+GitHubClient 封装纯 OAuth 2.0 的 GitHub 授权地址构造与在线用户信息获取。
+相比 OIDCClient 刻意不传 nonce（GitHub 不签发 ID Token）。生产由 identity.GitHubProvider 实现。
+*/
+type GitHubClient interface {
+	AuthCodeURL(state, codeVerifier string) string
+	ExchangeAndFetchUser(ctx context.Context, code, codeVerifier string) (identity.ExternalIdentity, error)
+	SecureCookies() bool
 	FlowCookieKey() []byte
 }
 
@@ -49,7 +64,7 @@ SessionManager 负责服务端会话的签发、当前状态查询与吊销。
 接口放在使用方，方法数保持在 3 个以内，生产由 postgres.Store 实现（ADR 0018）。
 */
 type SessionManager interface {
-	CreateSessionForOIDC(ctx context.Context, id identity.OIDCIdentity, ttl time.Duration) (identity.IssuedSession, error)
+	CreateSessionForIdentity(ctx context.Context, id identity.ExternalIdentity, ttl time.Duration) (identity.IssuedSession, error)
 	GetSessionInfo(ctx context.Context, token string) (identity.SessionInfo, error)
 	RevokeSession(ctx context.Context, token string) error
 }
@@ -67,34 +82,38 @@ authHandler 独立承接登录与会话相关路由（ADR 0019：先在包内拆
 type authHandler struct {
 	logger        *slog.Logger
 	oidc          OIDCClient
+	github        GitHubClient
 	sessions      SessionManager
 	csrf          *http.CrossOriginProtection
 	sessionTTL    time.Duration
 	now           func() time.Time
-	flowCookieKey []byte
+	oidcFlowKey   []byte
+	githubFlowKey []byte
 }
 
-func newAuthHandler(logger *slog.Logger, oidcClient OIDCClient, sessions SessionManager, csrf *http.CrossOriginProtection, sessionTTL time.Duration) *authHandler {
+func newAuthHandler(logger *slog.Logger, oidcClient OIDCClient, githubClient GitHubClient, sessions SessionManager, csrf *http.CrossOriginProtection, sessionTTL time.Duration) *authHandler {
 	if sessionTTL <= 0 {
 		sessionTTL = identity.DefaultSessionTTL
 	}
-	var flowKey []byte
+	var oidcKey []byte
 	if oidcClient != nil {
-		flowKey = append([]byte(nil), oidcClient.FlowCookieKey()...)
+		oidcKey = append([]byte(nil), oidcClient.FlowCookieKey()...)
+	}
+	var githubKey []byte
+	if githubClient != nil {
+		githubKey = append([]byte(nil), githubClient.FlowCookieKey()...)
 	}
 	return &authHandler{
 		logger:        logger,
 		oidc:          oidcClient,
+		github:        githubClient,
 		sessions:      sessions,
 		csrf:          csrf,
 		sessionTTL:    sessionTTL,
 		now:           time.Now,
-		flowCookieKey: flowKey,
+		oidcFlowKey:   oidcKey,
+		githubFlowKey: githubKey,
 	}
-}
-
-func (h *authHandler) secureCookies() bool {
-	return h.oidc != nil && h.oidc.SecureCookies()
 }
 
 func (h *authHandler) registerRoutes(mux *http.ServeMux) {
@@ -102,16 +121,51 @@ func (h *authHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+oidcLoginPath, h.handleLogin)
 		mux.HandleFunc("GET "+oidcCallbackPath, h.handleCallback)
 	}
+	if h.github != nil {
+		mux.HandleFunc("GET "+githubLoginPath, h.handleGitHubLogin)
+		mux.HandleFunc("GET "+githubCallbackPath, h.handleGitHubCallback)
+	}
 	if h.sessions != nil {
 		mux.HandleFunc("POST "+authLogoutPath, h.handleLogout)
 		mux.HandleFunc("GET "+mePath, h.handleMe)
 	}
 }
 
-type oidcFlowCookie struct {
+type flowCookieSpec struct {
+	name         string
+	path         string
+	key          []byte
+	secure       bool
+	requireNonce bool
+}
+
+func (h *authHandler) oidcFlowSpec() flowCookieSpec {
+	return flowCookieSpec{
+		name:         OIDCFlowCookieName,
+		path:         oidcCallbackPath,
+		key:          h.oidcFlowKey,
+		secure:       h.oidc != nil && h.oidc.SecureCookies(),
+		requireNonce: true,
+	}
+}
+
+func (h *authHandler) githubFlowSpec() flowCookieSpec {
+	return flowCookieSpec{
+		name:   GitHubFlowCookieName,
+		path:   githubCallbackPath,
+		key:    h.githubFlowKey,
+		secure: h.github != nil && h.github.SecureCookies(),
+	}
+}
+
+func (h *authHandler) logoutSecureCookies() bool {
+	return (h.oidc != nil && h.oidc.SecureCookies()) || (h.github != nil && h.github.SecureCookies())
+}
+
+type authFlowCookie struct {
 	State        string `json:"s"`
 	CodeVerifier string `json:"v"`
-	Nonce        string `json:"n"`
+	Nonce        string `json:"n,omitempty"`
 	ExpiresAt    int64  `json:"e"`
 }
 
@@ -138,11 +192,41 @@ type meOrgResponse struct {
 	Role string `json:"role"`
 }
 
-/*
-handleLogin 发起 OIDC 授权码登录：每次生成全新的 state、PKCE code_verifier 和 nonce，
-存入 10 分钟的 HttpOnly 流程 Cookie，然后 302 跳转到身份提供方。
-*/
+// handleLogin 发起标准 OIDC 授权码登录（带 state、PKCE code_verifier 和 nonce）。
 func (h *authHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	h.handleLoginFlow(w, r, h.oidcFlowSpec(), func() (authFlowCookie, string, error) {
+		flow, err := identity.NewOIDCFlow()
+		if err != nil {
+			return authFlowCookie{}, "", err
+		}
+		return authFlowCookie{
+			State:        flow.State,
+			CodeVerifier: flow.CodeVerifier,
+			Nonce:        flow.Nonce,
+		}, h.oidc.AuthCodeURL(flow.State, flow.CodeVerifier, flow.Nonce), nil
+	})
+}
+
+// handleGitHubLogin 发起 GitHub 纯 OAuth 2.0 授权码登录（带 state 和 PKCE code_verifier，无 nonce）。
+func (h *authHandler) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
+	h.handleLoginFlow(w, r, h.githubFlowSpec(), func() (authFlowCookie, string, error) {
+		flow, err := identity.NewOAuthFlow()
+		if err != nil {
+			return authFlowCookie{}, "", err
+		}
+		return authFlowCookie{
+			State:        flow.State,
+			CodeVerifier: flow.CodeVerifier,
+		}, h.github.AuthCodeURL(flow.State, flow.CodeVerifier), nil
+	})
+}
+
+func (h *authHandler) handleLoginFlow(
+	w http.ResponseWriter,
+	r *http.Request,
+	spec flowCookieSpec,
+	start func() (authFlowCookie, string, error),
+) {
 	if isClientGone(h.logger, r) {
 		return
 	}
@@ -152,49 +236,62 @@ func (h *authHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flow, err := identity.NewOIDCFlow()
+	flow, authURL, err := start()
 	if err != nil {
-		h.logger.ErrorContext(r.Context(), "generate oidc flow", "err", err)
+		h.logger.ErrorContext(r.Context(), "start external login", "err", err)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	expiresAt := h.now().UTC().Add(oidcFlowCookieTTL)
-	cookieVal, err := encodeFlowCookie(oidcFlowCookie{
-		State:        flow.State,
-		CodeVerifier: flow.CodeVerifier,
-		Nonce:        flow.Nonce,
-		ExpiresAt:    expiresAt.Unix(),
-	}, h.flowCookieKey)
+	expiresAt := h.now().UTC().Add(flowCookieTTL)
+	flow.ExpiresAt = expiresAt.Unix()
+	cookieVal, err := encodeFlowCookie(flow, spec.key)
 	if err != nil {
-		h.logger.ErrorContext(r.Context(), "encode oidc flow cookie", "err", err)
+		h.logger.ErrorContext(r.Context(), "encode flow cookie", "err", err)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
-		Name:     OIDCFlowCookieName,
+		Name:     spec.name,
 		Value:    cookieVal,
-		Path:     oidcCallbackPath,
-		MaxAge:   int(oidcFlowCookieTTL / time.Second),
+		Path:     spec.path,
+		MaxAge:   int(flowCookieTTL / time.Second),
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   h.secureCookies(),
+		Secure:   spec.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, h.oidc.AuthCodeURL(flow.State, flow.CodeVerifier, flow.Nonce), http.StatusFound)
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
+	h.handleCallbackFlow(w, r, h.oidcFlowSpec(), func(ctx context.Context, code string, flow authFlowCookie) (identity.ExternalIdentity, error) {
+		return h.oidc.ExchangeAndVerify(ctx, code, flow.CodeVerifier, flow.Nonce)
+	})
+}
+
+func (h *authHandler) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	h.handleCallbackFlow(w, r, h.githubFlowSpec(), func(ctx context.Context, code string, flow authFlowCookie) (identity.ExternalIdentity, error) {
+		return h.github.ExchangeAndFetchUser(ctx, code, flow.CodeVerifier)
+	})
 }
 
 /*
-handleCallback 处理 OIDC 回调：
-1. 读取流程 Cookie，校验 HMAC 和过期时间；缺失或损坏时直接 400，不写 Set-Cookie；
+handleCallbackFlow 编排授权码回调的公共流程（适用于 OIDC 与 GitHub OAuth 2.0）：
+1. 读取对应提供方的流程 Cookie，校验 HMAC、过期时间和必需字段；缺失或损坏时直接 400，不写 Set-Cookie；
 2. 常量时间比对 state，不符时 400，同样不删除 Cookie，避免无关请求清掉正在进行的登录；
 3. state 相符后立即删除一次性流程 Cookie，再检查上游 error 和授权码；
-4. 用 code 和 PKCE code_verifier 换令牌，校验 ID Token 签名、iss、aud、exp 和 nonce；
+4. 调用具体提供方兑换令牌并提取标准化 ExternalIdentity；
 5. 找到或创建用户，签发全新服务端会话并写入 HttpOnly Cookie，返回用户摘要 JSON。
 */
-func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
+func (h *authHandler) handleCallbackFlow(
+	w http.ResponseWriter,
+	r *http.Request,
+	spec flowCookieSpec,
+	exchange func(ctx context.Context, code string, flow authFlowCookie) (identity.ExternalIdentity, error),
+) {
 	if isClientGone(h.logger, r) {
 		return
 	}
@@ -204,13 +301,13 @@ func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.sessions == nil {
-		h.logger.ErrorContext(r.Context(), "oidc callback", "err", errors.New("session creator is nil"))
+		h.logger.ErrorContext(r.Context(), "auth callback", "err", errors.New("session creator is nil"))
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	w.Header().Set("Cache-Control", "no-store")
-	flow, ok := h.readFlowCookie(r)
+	flow, ok := h.readFlowCookie(r, spec)
 	if !ok {
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusBadRequest, "invalid login state")
 		return
@@ -223,9 +320,9 @@ func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// state 已经对上，这次回调消费掉流程 Cookie。对不上的请求不能删，否则跨站访问会清掉正在进行的登录。
-	h.clearFlowCookie(w)
-	if oidcErr := q.Get("error"); oidcErr != "" {
-		h.logger.WarnContext(r.Context(), "oidc provider returned error", "oidc_error", oidcErr)
+	clearFlowCookie(w, spec)
+	if authErr := q.Get("error"); authErr != "" {
+		h.logger.WarnContext(r.Context(), "identity provider returned error", "provider_error", authErr)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusUnauthorized, "authentication failed")
 		return
 	}
@@ -236,13 +333,13 @@ func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := h.oidc.ExchangeAndVerify(r.Context(), code, flow.CodeVerifier, flow.Nonce)
+	id, err := exchange(r.Context(), code, flow)
 	if err != nil {
-		h.handleOIDCError(w, r, err)
+		h.handleProviderError(w, r, err)
 		return
 	}
 
-	issued, err := h.sessions.CreateSessionForOIDC(r.Context(), id, h.sessionTTL)
+	issued, err := h.sessions.CreateSessionForIdentity(r.Context(), id, h.sessionTTL)
 	if err != nil {
 		handleStoreErr(h.logger, w, r, "create session", err)
 		return
@@ -261,7 +358,7 @@ func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   maxAge,
 		Expires:  issued.Session.ExpiresAt.UTC(),
 		HttpOnly: true,
-		Secure:   h.secureCookies(),
+		Secure:   spec.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -316,7 +413,7 @@ func (h *authHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0).UTC(),
 		HttpOnly: true,
-		Secure:   h.secureCookies(),
+		Secure:   h.logoutSecureCookies(),
 		SameSite: http.SameSiteLaxMode,
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -373,55 +470,55 @@ func (h *authHandler) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *authHandler) readFlowCookie(r *http.Request) (oidcFlowCookie, bool) {
-	cookie, err := r.Cookie(OIDCFlowCookieName)
+func (h *authHandler) readFlowCookie(r *http.Request, spec flowCookieSpec) (authFlowCookie, bool) {
+	cookie, err := r.Cookie(spec.name)
 	if err != nil {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
-	flow, ok := decodeFlowCookie(cookie.Value, h.flowCookieKey)
+	flow, ok := decodeFlowCookie(cookie.Value, spec.key, spec.requireNonce)
 	if !ok {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
 	if h.now().UTC().Unix() >= flow.ExpiresAt {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
 	return flow, true
 }
 
-func (h *authHandler) clearFlowCookie(w http.ResponseWriter) {
+func clearFlowCookie(w http.ResponseWriter, spec flowCookieSpec) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     OIDCFlowCookieName,
+		Name:     spec.name,
 		Value:    "",
-		Path:     oidcCallbackPath,
+		Path:     spec.path,
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0).UTC(),
 		HttpOnly: true,
-		Secure:   h.secureCookies(),
+		Secure:   spec.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
-func (h *authHandler) handleOIDCError(w http.ResponseWriter, r *http.Request, err error) {
+func (h *authHandler) handleProviderError(w http.ResponseWriter, r *http.Request, err error) {
 	if isClientGone(h.logger, r) {
 		return
 	}
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		h.logger.WarnContext(r.Context(), "oidc callback timed out", "err", err)
+		h.logger.WarnContext(r.Context(), "auth callback timed out", "err", err)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusGatewayTimeout, "request timed out")
-	case errors.Is(err, identity.ErrOIDCAuthFailed):
-		h.logger.WarnContext(r.Context(), "oidc authentication failed", "err", err)
+	case errors.Is(err, identity.ErrAuthFailed):
+		h.logger.WarnContext(r.Context(), "external authentication failed", "err", err)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusUnauthorized, "authentication failed")
-	case errors.Is(err, identity.ErrOIDCUnavailable):
-		h.logger.ErrorContext(r.Context(), "oidc provider unavailable", "err", err)
+	case errors.Is(err, identity.ErrProviderUnavailable):
+		h.logger.ErrorContext(r.Context(), "identity provider unavailable", "err", err)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusBadGateway, "identity provider unavailable")
 	default:
-		h.logger.ErrorContext(r.Context(), "oidc callback error", "err", err)
+		h.logger.ErrorContext(r.Context(), "auth callback error", "err", err)
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 	}
 }
 
-func encodeFlowCookie(flow oidcFlowCookie, key []byte) (string, error) {
+func encodeFlowCookie(flow authFlowCookie, key []byte) (string, error) {
 	raw, err := json.Marshal(flow)
 	if err != nil {
 		return "", err
@@ -432,33 +529,39 @@ func encodeFlowCookie(flow oidcFlowCookie, key []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
-func decodeFlowCookie(sealed string, key []byte) (oidcFlowCookie, bool) {
+func decodeFlowCookie(sealed string, key []byte, requireNonce bool) (authFlowCookie, bool) {
 	if sealed == "" || len(sealed) > maxFlowCookieBytes {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
 	payloadB64, macB64, ok := strings.Cut(sealed, ".")
 	if !ok || payloadB64 == "" || macB64 == "" || strings.Contains(macB64, ".") {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
 	if err != nil {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
 	gotMAC, err := base64.RawURLEncoding.DecodeString(macB64)
 	if err != nil {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write(payload)
 	if !hmac.Equal(gotMAC, mac.Sum(nil)) {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
-	var flow oidcFlowCookie
+	var flow authFlowCookie
 	if err := json.Unmarshal(payload, &flow); err != nil {
-		return oidcFlowCookie{}, false
+		return authFlowCookie{}, false
 	}
-	if flow.State == "" || flow.CodeVerifier == "" || flow.Nonce == "" || flow.ExpiresAt <= 0 {
-		return oidcFlowCookie{}, false
+	if flow.State == "" || flow.CodeVerifier == "" || flow.ExpiresAt <= 0 {
+		return authFlowCookie{}, false
+	}
+	if requireNonce && flow.Nonce == "" {
+		return authFlowCookie{}, false
+	}
+	if !requireNonce && flow.Nonce != "" {
+		return authFlowCookie{}, false
 	}
 	return flow, true
 }

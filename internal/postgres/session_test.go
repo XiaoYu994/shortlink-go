@@ -13,11 +13,11 @@ import (
 	"shortlink/internal/tenant"
 )
 
-func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
+func TestCreateSessionForIdentityFirstAndRepeatLogin(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 
-	first, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	first, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-alice",
 		Email:         " Alice@Example.COM ",
@@ -25,7 +25,7 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 		Name:          " Alice ",
 	}, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("first CreateSessionForOIDC: %v", err)
+		t.Fatalf("first CreateSessionForIdentity: %v", err)
 	}
 	if !identity.SessionToken.Valid(first.Token) {
 		t.Fatalf("first token %q is not a valid session token", first.Token)
@@ -51,7 +51,7 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 	}
 
 	// 第二次登录同一个 (issuer, subject)：复用同一用户，同步最新资料，签发全新会话令牌。
-	second, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	second, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-alice",
 		Email:         "alice-new@example.com",
@@ -59,7 +59,7 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 		Name:          "Alice Updated",
 	}, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("second CreateSessionForOIDC: %v", err)
+		t.Fatalf("second CreateSessionForIdentity: %v", err)
 	}
 	if second.User.ID != first.User.ID {
 		t.Fatalf("second user id = %d, want %d", second.User.ID, first.User.ID)
@@ -83,7 +83,7 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 	}
 
 	// 不同提供方即使邮箱相同，也不能按邮箱自动合并成同一个用户（ADR 0018）。
-	otherProvider, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	otherProvider, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "https://other-idp.example.com",
 		Subject:       "sub-alice",
 		Email:         "alice-new@example.com",
@@ -91,18 +91,18 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 		Name:          "Alice Other",
 	}, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("otherProvider CreateSessionForOIDC: %v", err)
+		t.Fatalf("otherProvider CreateSessionForIdentity: %v", err)
 	}
 	if otherProvider.User.ID == first.User.ID {
 		t.Fatalf("different issuer with same email was merged into user %d", first.User.ID)
 	}
 }
 
-func TestCreateSessionForOIDCConcurrentFirstLogin(t *testing.T) {
+func TestCreateSessionForIdentityConcurrentFirstLogin(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 
-	id := identity.OIDCIdentity{
+	id := identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-race",
 		Email:         "race@example.com",
@@ -120,7 +120,7 @@ func TestCreateSessionForOIDCConcurrentFirstLogin(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			<-start
-			results[idx], errs[idx] = store.CreateSessionForOIDC(ctx, id, time.Hour)
+			results[idx], errs[idx] = store.CreateSessionForIdentity(ctx, id, time.Hour)
 		}(i)
 	}
 	close(start)
@@ -159,18 +159,18 @@ func TestCreateSessionForOIDCConcurrentFirstLogin(t *testing.T) {
 	}
 }
 
-func TestCreateSessionForOIDCValidation(t *testing.T) {
+func TestCreateSessionForIdentityValidation(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	if _, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:  "http://127.0.0.1:5556/dex",
 		Subject: "",
-	}, time.Hour); !errors.Is(err, identity.ErrInvalidOIDCIdentity) {
-		t.Fatalf("empty subject err = %v, want ErrInvalidOIDCIdentity", err)
+	}, time.Hour); !errors.Is(err, identity.ErrInvalidExternalIdentity) {
+		t.Fatalf("empty subject err = %v, want ErrInvalidExternalIdentity", err)
 	}
 
-	if _, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	if _, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:  "http://127.0.0.1:5556/dex",
 		Subject: "sub-1",
 	}, 0); !errors.Is(err, identity.ErrInvalidSessionTTL) {
@@ -178,22 +178,22 @@ func TestCreateSessionForOIDCValidation(t *testing.T) {
 	}
 }
 
-func TestCreateSessionForOIDCKeepsProfileWhenClaimsAreAbsent(t *testing.T) {
+func TestCreateSessionForIdentityKeepsProfileWhenClaimsAreAbsent(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
-	id := identity.OIDCIdentity{
+	id := identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-keep",
 		Email:         "keep@example.com",
 		EmailVerified: true,
 		Name:          "Keep",
 	}
-	first, err := store.CreateSessionForOIDC(ctx, id, time.Hour)
+	first, err := store.CreateSessionForIdentity(ctx, id, time.Hour)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 
-	omitted, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	omitted, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:  id.Issuer,
 		Subject: id.Subject,
 	}, time.Hour)
@@ -212,7 +212,7 @@ func TestCreateSessionForOIDCKeepsProfileWhenClaimsAreAbsent(t *testing.T) {
 		t.Fatalf("identity after omitted claims = (%q, %v), want verified keep@example.com", email, verified)
 	}
 
-	sameEmail, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	sameEmail, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        id.Issuer,
 		Subject:       id.Subject,
 		Email:         "keep@example.com",
@@ -249,7 +249,7 @@ func TestAuthenticateSessionForOrg(t *testing.T) {
 		t.Fatalf("insert other tenant: %v", err)
 	}
 
-	issued, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	issued, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-auth",
 		Email:         "auth@example.com",
@@ -257,7 +257,7 @@ func TestAuthenticateSessionForOrg(t *testing.T) {
 		Name:          "Auth User",
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("CreateSessionForOIDC: %v", err)
+		t.Fatalf("CreateSessionForIdentity: %v", err)
 	}
 
 	// 尚未加入任何组织，访问任意组织都应返回 ErrOrgNotFound。
@@ -342,12 +342,12 @@ func TestAuthenticateSessionForOrg(t *testing.T) {
 		}
 	}
 
-	expired, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	expired, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:  "http://127.0.0.1:5556/dex",
 		Subject: "sub-auth",
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("CreateSessionForOIDC expired: %v", err)
+		t.Fatalf("CreateSessionForIdentity expired: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
 		`UPDATE sessions SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 second' WHERE id = $1`,
@@ -378,7 +378,7 @@ func TestGetSessionInfoAndRevokeSession(t *testing.T) {
 		t.Fatalf("insert second tenant: %v", err)
 	}
 
-	sess1, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	sess1, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-info",
 		Email:         "info@example.com",
@@ -386,15 +386,15 @@ func TestGetSessionInfoAndRevokeSession(t *testing.T) {
 		Name:          "Info User",
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("first CreateSessionForOIDC: %v", err)
+		t.Fatalf("first CreateSessionForIdentity: %v", err)
 	}
 	// 同一用户的第二个会话，用于确认吊销其中一个不影响另一个。
-	sess2, err := store.CreateSessionForOIDC(ctx, identity.OIDCIdentity{
+	sess2, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:  "http://127.0.0.1:5556/dex",
 		Subject: "sub-info",
 	}, time.Hour)
 	if err != nil {
-		t.Fatalf("second CreateSessionForOIDC: %v", err)
+		t.Fatalf("second CreateSessionForIdentity: %v", err)
 	}
 
 	// 无组织时 Orgs 为空。

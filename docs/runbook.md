@@ -762,6 +762,21 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
    curl -i -X POST -b cookies.txt -c cookies.txt http://127.0.0.1:8081/api/v1/auth/logout
    ```
 
+## 本地 GitHub OAuth 2.0 登录（可选）
+
+如果要在本地真实联调 GitHub OAuth 2.0（可单独开启，也可与上面的 Dex OIDC 并存）：
+
+1. 在 GitHub Developer Settings 创建一个 OAuth App，将 Authorization callback URL 设为 `http://127.0.0.1:8081/api/v1/auth/github/callback`。
+2. 在 `.env` 取消 `GITHUB_*` 三行注释并填入对应凭据：
+
+   ```txt
+   GITHUB_CLIENT_ID=<你的 Client ID>
+   GITHUB_CLIENT_SECRET=<你的 Client Secret>
+   GITHUB_REDIRECT_URL=http://127.0.0.1:8081/api/v1/auth/github/callback
+   ```
+
+3. 启动 `make run-console` 后，在浏览器打开 `http://127.0.0.1:8081/api/v1/auth/github/login` 完成授权（若要自动兑现组织邀请，需要用 `console member invite` 预先登记该 GitHub 账号主邮箱且该邮箱在 GitHub 已验证）。GitHub 与 Dex 按 `(issuer, subject)` 隔离，即使邮箱相同也不会自动合并账号。
+
 ## 查看和调整租户配额与限流
 
 租户行上有几个值：`link_usage`（本月，即 UTC 自然月，已创建的链接数，删除不减）、`link_usage_month`（这个用量属于哪个月）、`link_quota`（每月创建上限，默认 1000）、`rate_limit_per_second`（管理 API 每秒请求数，默认 10）。用运维命令查看和修改，不给管理 API 加写接口。命令只连 PostgreSQL，不连接 Redis。
@@ -957,7 +972,8 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
 | `VISITOR_SALT is required` | `.env` 里没有配置访客哈希的盐；从 `.env.example` 补一行开发占位值 |
 | `OIDC 服务不可达` | 冒烟或启动开启 `OIDC_*` 的 console 前没起 Dex；使用项目自带 compose 时先跑 `make deps-up` |
-| `OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `OIDC_*`；要么四个全配（参考上面的 Dex 示例），要么全部留空只用 API Key |
+| `OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `OIDC_*`；要么四个全配（参考上面的 Dex 示例），要么全部留空 |
+| `GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `GITHUB_*`；要么三个全配，要么全部留空 |
 | 统计里 `unique_visitors` 一直是 0 | 检查 redirector 是否配置了 `VISITOR_SALT`；代理后面还需要 `TRUST_PROXY_HEADERS=true`，否则所有请求的 IP 都一样 |
 | `PATCH` 成功后仍跳旧地址 | 看 console 的 `shortlink_cache_writes_total{result="error"}`；Redis 写失败时旧值最多保留到 TTL（1 小时） |
 | 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `CACHE_MISS_CONCURRENCY` |

@@ -1,10 +1,10 @@
 /*
 Package identity 定义管理请求的认证主体（Principal）、API Key 与会话令牌格式/哈希、
-OIDC 客户端、权限授权实现与组织成员管理规则（阶段 11、ADR 0018/0019）。
+OIDC / GitHub OAuth 2.0 客户端、权限授权实现与组织成员管理规则（阶段 11、ADR 0018/0019）。
 
 人与 API Key 是两种凭证，鉴权后统一写成 context 里的 Principal，
 handler 只读 Principal 并通过 Authorizer 检查权限。
-OIDC 发现、授权码兑换和 ID Token 验签也收口在本包，httpapi 只编排 HTTP 跳转、Cookie 和错误响应。
+OIDC 发现、ID Token 验签与 GitHub OAuth 2.0 授权码/用户信息拉取也收口在本包，httpapi 只编排 HTTP 跳转、Cookie 和错误响应。
 */
 package identity
 

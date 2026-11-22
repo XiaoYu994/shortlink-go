@@ -18,6 +18,7 @@ import (
 
 	"shortlink/internal/httpapi"
 	"shortlink/internal/identity"
+	"shortlink/internal/identity/fakegithub"
 	"shortlink/internal/identity/fakeoidc"
 )
 
@@ -697,19 +698,29 @@ func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeo
 
 func loginViaFakeOIDC(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
 	t.Helper()
+	return loginViaProvider(t, handler, "/api/v1/auth/login", httpapi.OIDCFlowCookieName)
+}
+
+func loginViaFakeGitHub(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
+	t.Helper()
+	return loginViaProvider(t, handler, "/api/v1/auth/github/login", httpapi.GitHubFlowCookieName)
+}
+
+func loginViaProvider(t *testing.T, handler http.Handler, loginPath, flowCookieName string) (*http.Cookie, int64, string) {
+	t.Helper()
 	loginRec := httptest.NewRecorder()
-	handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil))
+	handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, loginPath, nil))
 	if loginRec.Code != http.StatusFound {
-		t.Fatalf("login status = %d, want 302", loginRec.Code)
+		t.Fatalf("login %s status = %d, want 302", loginPath, loginRec.Code)
 	}
 	var flowCookie *http.Cookie
 	for _, c := range loginRec.Result().Cookies() {
-		if c.Name == httpapi.OIDCFlowCookieName {
+		if c.Name == flowCookieName {
 			flowCookie = c
 		}
 	}
 	if flowCookie == nil {
-		t.Fatal("missing flow cookie")
+		t.Fatalf("missing flow cookie %s", flowCookieName)
 	}
 
 	noRedirect := &http.Client{
@@ -797,6 +808,144 @@ func countLinks(t *testing.T, store *Store) int {
 		t.Fatalf("count links: %v", err)
 	}
 	return n
+}
+
+/*
+TestHTTPGitHubLoginIsolationAndInvitationRedemption 端到端验证第二个身份提供方 GitHub：
+1. 与 OIDC 挂载在同一台 console 上时，相同已验证邮箱不自动合并为同一平台用户；
+2. GitHub 仅在 /user/emails 返回 primary 且 verified 的邮箱时才兑现邀请并放行组织管理接口。
+*/
+func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
+	store, tenant1 := newTestStore(t)
+	ctx := context.Background()
+
+	fakeOIDC := fakeoidc.Start(t, "shortlink-console", "shortlink-console-secret")
+	oidcProvider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+		Issuer:       fakeOIDC.URL(),
+		ClientID:     "shortlink-console",
+		ClientSecret: "shortlink-console-secret",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		HTTPClient:   fakeOIDC.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+
+	fakeGH := fakegithub.Start(t, "gh-console", "gh-console-secret")
+	ghProvider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+		ClientID:     "gh-console",
+		ClientSecret: "gh-console-secret",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+		AuthURL:      fakeGH.AuthURL(),
+		TokenURL:     fakeGH.TokenURL(),
+		APIBaseURL:   fakeGH.APIBaseURL(),
+		HTTPClient:   fakeGH.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewGitHubProvider: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+		Keys:       store,
+		Authorizer: identity.NewMapAuthorizer(),
+		OIDC:       oidcProvider,
+		GitHub:     ghProvider,
+		Sessions:   store,
+		Members:    store,
+	}).ConsoleRoutes()
+
+	// 1. OIDC 与 GitHub 同一邮箱登录，各自建独立用户。
+	fakeOIDC.SetUser(fakeoidc.User{
+		Subject:       "sub-alice-oidc",
+		Email:         "alice@example.com",
+		EmailVerified: true,
+		Name:          "Alice OIDC",
+	})
+	_, oidcUserID, _ := loginViaFakeOIDC(t, handler)
+
+	fakeGH.SetUser(fakegithub.User{
+		ID:     10001,
+		Login:  "alice-gh",
+		Name:   "Alice GH",
+		Emails: []fakegithub.Email{{Email: "alice@example.com", Primary: true, Verified: true}},
+	})
+	_, ghUserID, _ := loginViaFakeGitHub(t, handler)
+	if oidcUserID == ghUserID {
+		t.Fatalf("different providers merged into same user %d by email", oidcUserID)
+	}
+
+	// 2. GitHub 邀请兑现只认 primary && verified 邮箱。
+	if _, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenant1,
+		Email:    "dev@example.com",
+		Role:     identity.RoleMember,
+	}); err != nil {
+		t.Fatalf("CreateInvitation: %v", err)
+	}
+
+	fakeGH.SetUser(fakegithub.User{
+		ID:    2026,
+		Login: "dev-gh",
+		Name:  "Dev GH",
+		Emails: []fakegithub.Email{
+			{Email: "dev@example.com", Primary: true, Verified: false},
+		},
+	})
+	unverifiedCookie, devUserID1, _ := loginViaFakeGitHub(t, handler)
+
+	readMe := func(sess *http.Cookie) []struct {
+		ID   int64  `json:"id"`
+		Role string `json:"role"`
+	} {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+		req.AddCookie(sess)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /me = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Organizations []struct {
+				ID   int64  `json:"id"`
+				Role string `json:"role"`
+			} `json:"organizations"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode /me: %v", err)
+		}
+		return body.Organizations
+	}
+	if orgs := readMe(unverifiedCookie); len(orgs) != 0 {
+		t.Fatalf("unverified GitHub login redeemed invitation: orgs=%+v", orgs)
+	}
+
+	fakeGH.SetUser(fakegithub.User{
+		ID:    2026,
+		Login: "dev-gh",
+		Name:  "Dev GH",
+		Emails: []fakegithub.Email{
+			{Email: "dev@example.com", Primary: true, Verified: true},
+		},
+	})
+	verifiedCookie, devUserID2, _ := loginViaFakeGitHub(t, handler)
+	if devUserID2 != devUserID1 {
+		t.Fatalf("same GitHub ID created new user %d (want %d)", devUserID2, devUserID1)
+	}
+	orgs := readMe(verifiedCookie)
+	if len(orgs) != 1 || orgs[0].ID != tenant1 || orgs[0].Role != "member" {
+		t.Fatalf("verified GitHub orgs = %+v, want tenant1(member)", orgs)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/from-github"}`))
+	createReq.AddCookie(verifiedCookie)
+	createReq.Header.Set("X-Org-ID", strconv.FormatInt(tenant1, 10))
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("POST /links with GitHub session = %d, want 201, body = %s", createRec.Code, createRec.Body.String())
+	}
 }
 
 /*
