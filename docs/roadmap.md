@@ -113,7 +113,7 @@
 - [x] `make smoke` 走一次 Dex 登录；配置和文档同步
 - [ ] （可选）把 `Authorizer` 换成 Casbin 实现，验证策略模式接口边界
 - [ ] （可选）接入 GitHub 作为第二个身份提供方，对比纯 OAuth 2.0 和 OIDC
-- [ ] （可选）用 `testing/synctest` 重写限流器和 `ClickRecorder` 依赖时间的测试
+- [x] （可选）用 `testing/synctest` 重写限流器和 `ClickRecorder` 依赖时间的测试
 
 ## 阶段 12：审计日志（待立 ADR）
 

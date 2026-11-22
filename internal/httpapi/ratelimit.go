@@ -37,10 +37,6 @@ type tenantRateLimiter struct {
 	mu        sync.Mutex
 	buckets   map[int64]*limiterEntry
 	lastSweep time.Time
-	// now 和下面两个时长可以在测试里替换，生产用默认值。
-	now        func() time.Time
-	idleTTL    time.Duration
-	sweepEvery time.Duration
 }
 
 type limiterEntry struct {
@@ -49,13 +45,9 @@ type limiterEntry struct {
 }
 
 func newTenantRateLimiter() *tenantRateLimiter {
-	now := time.Now
 	return &tenantRateLimiter{
-		buckets:    make(map[int64]*limiterEntry),
-		lastSweep:  now(),
-		now:        now,
-		idleTTL:    limiterIdleTTL,
-		sweepEvery: limiterSweepPeriod,
+		buckets:   make(map[int64]*limiterEntry),
+		lastSweep: time.Now(),
 	}
 }
 
@@ -69,7 +61,7 @@ func (l *tenantRateLimiter) allow(tn tenant.Tenant) (retryAfter time.Duration, a
 		return 0, true
 	}
 
-	now := l.now()
+	now := time.Now()
 	l.mu.Lock()
 	entry, ok := l.buckets[tn.ID]
 	if !ok {
@@ -110,12 +102,12 @@ func (l *tenantRateLimiter) allow(tn tenant.Tenant) (retryAfter time.Duration, a
 
 // sweepLocked 清掉长时间没有请求的租户。调用方必须持有 l.mu。
 func (l *tenantRateLimiter) sweepLocked(now time.Time) {
-	if now.Sub(l.lastSweep) < l.sweepEvery {
+	if now.Sub(l.lastSweep) < limiterSweepPeriod {
 		return
 	}
 	l.lastSweep = now
 	for id, entry := range l.buckets {
-		if now.Sub(entry.lastSeen) > l.idleTTL {
+		if now.Sub(entry.lastSeen) > limiterIdleTTL {
 			delete(l.buckets, id)
 		}
 	}

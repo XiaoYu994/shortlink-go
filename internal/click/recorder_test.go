@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,13 +29,10 @@ type memStore struct {
 	counts map[int64]int64
 	last   []Click
 	err    error
-	// wrote 在成功写入后收到一次信号。容量是 1，避免堵住 worker。
-	wrote chan struct{}
 }
 
 func (s *memStore) RecordClicks(_ context.Context, clicks []Click) error {
 	if s.err != nil {
-		s.signalWrote()
 		return s.err
 	}
 	s.mu.Lock()
@@ -46,18 +44,7 @@ func (s *memStore) RecordClicks(_ context.Context, clicks []Click) error {
 		s.counts[c.LinkID]++
 	}
 	s.last = append([]Click(nil), clicks...)
-	s.signalWrote()
 	return nil
-}
-
-func (s *memStore) signalWrote() {
-	if s.wrote == nil {
-		return
-	}
-	select {
-	case s.wrote <- struct{}{}:
-	default:
-	}
 }
 
 func (s *memStore) get(id int64) int64 {
@@ -138,27 +125,27 @@ func TestRecordPreservesMetadata(t *testing.T) {
 }
 
 func TestFlushesWhenBatchFull(t *testing.T) {
-	store := &memStore{wrote: make(chan struct{}, 1)}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 2, Interval: time.Hour})
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := r.Close(ctx); err != nil {
-			t.Errorf("Close: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		store := &memStore{}
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 2, Interval: time.Hour})
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := r.Close(ctx); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+		})
+
+		record(r, 3)
+		record(r, 3)
+		// Wait 等后台 worker 取走这两条点击并在同步写完后重新阻塞在 select 上。
+		synctest.Wait()
+
+		if got := store.get(3); got != 2 {
+			t.Errorf("clicks[3] = %d, want 2", got)
 		}
 	})
-
-	record(r, 3)
-	record(r, 3)
-	select {
-	case <-store.wrote:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for batch flush")
-	}
-	if got := store.get(3); got != 2 {
-		t.Errorf("clicks[3] = %d, want 2", got)
-	}
 }
 
 func TestCloseReturnsWriteError(t *testing.T) {
@@ -209,36 +196,40 @@ func (s *blockingStore) RecordClicks(context.Context, []Click) error {
 }
 
 func TestRecordDropsWhenBufferFull(t *testing.T) {
-	store := &blockingStore{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{Buffer: 2, BatchSize: 1, Interval: time.Hour})
-	t.Cleanup(func() {
-		close(store.release)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := r.Close(ctx); err != nil {
-			t.Errorf("Close: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		store := &blockingStore{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		var releaseOnce sync.Once
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{Buffer: 2, BatchSize: 1, Interval: time.Hour})
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(store.release) })
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := r.Close(ctx); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+		})
+
+		record(r, 1)
+		synctest.Wait()
+		select {
+		case <-store.entered:
+		default:
+			t.Fatal("worker did not block in RecordClicks")
+		}
+
+		// worker 已经取走 1 并停在写库上，channel 是空的。再放 3 条，缓冲只有 2 个位置。
+		record(r, 2)
+		record(r, 3)
+		record(r, 4)
+
+		if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 1 {
+			t.Errorf("dropped = %v, want 1", got)
 		}
 	})
-
-	record(r, 1)
-	select {
-	case <-store.entered:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for the worker to block in RecordClicks")
-	}
-
-	// worker 已经取走 1 并停在写库上，channel 是空的。再放 3 条，缓冲只有 2 个位置。
-	record(r, 2)
-	record(r, 3)
-	record(r, 4)
-
-	if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 1 {
-		t.Errorf("dropped = %v, want 1", got)
-	}
 }
 
 func TestRecordAfterCloseDoesNotPanic(t *testing.T) {
@@ -307,53 +298,62 @@ func TestMetricsRegistered(t *testing.T) {
 }
 
 func TestFlushesOnInterval(t *testing.T) {
-	store := &memStore{wrote: make(chan struct{}, 1)}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 10, Interval: 15 * time.Millisecond})
+	synctest.Test(t, func(t *testing.T) {
+		store := &memStore{}
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 10, Interval: time.Second})
+		t.Cleanup(func() {
+			_ = r.Close(context.Background())
+		})
 
-	record(r, 5)
-	select {
-	case <-store.wrote:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for interval flush")
-	}
+		record(r, 5)
+		// 差 1ms 到达间隔时，定时刷盘还没有触发。
+		synctest.Sleep(time.Second - time.Millisecond)
+		if got := store.get(5); got != 0 {
+			t.Fatalf("clicks[5] before interval = %d, want 0", got)
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := r.Close(ctx); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if got := store.get(5); got != 1 {
-		t.Errorf("clicks[5] = %d, want 1", got)
-	}
-	if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultSuccess}); got != 1 {
-		t.Errorf("written success = %v, want 1", got)
-	}
+		// 补齐最后 1ms，synctest.Sleep 会等到 worker 处理完定时信号并写回后才返回。
+		synctest.Sleep(time.Millisecond)
+		if got := store.get(5); got != 1 {
+			t.Errorf("clicks[5] = %d, want 1", got)
+		}
+		if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultSuccess}); got != 1 {
+			t.Errorf("written success = %v, want 1", got)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := r.Close(ctx); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
 }
 
 func TestRunningWriteErrorIsMetricOnly(t *testing.T) {
-	store := &memStore{err: errors.New("db down"), wrote: make(chan struct{}, 1)}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{Buffer: 4, BatchSize: 1, Interval: time.Hour})
+	synctest.Test(t, func(t *testing.T) {
+		store := &memStore{err: errors.New("db down")}
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{Buffer: 4, BatchSize: 1, Interval: time.Hour})
+		t.Cleanup(func() {
+			_ = r.Close(context.Background())
+		})
 
-	record(r, 1)
-	select {
-	case <-store.wrote:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for the running flush")
-	}
+		record(r, 1)
+		synctest.Wait()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := r.Close(ctx); err != nil {
-		t.Fatalf("Close = %v, want nil", err)
-	}
-	if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 1 {
-		t.Errorf("written error = %v, want 1", got)
-	}
-	if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 0 {
-		t.Errorf("dropped = %v, want 0", got)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := r.Close(ctx); err != nil {
+			t.Fatalf("Close = %v, want nil", err)
+		}
+		if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 1 {
+			t.Errorf("written error = %v, want 1", got)
+		}
+		if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 0 {
+			t.Errorf("dropped = %v, want 0", got)
+		}
+	})
 }
 
 /*
@@ -361,122 +361,139 @@ TestDrainFullBatchError 把 worker 挡在第一批上，让后面的满批留在
 Close 之后这些满批走排空，写失败要返回给 Close，不能只打日志。
 */
 func TestDrainFullBatchError(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	storeErr := errors.New("db down")
-	var mu sync.Mutex
-	var calls int
-	store := &fnStore{fn: func(context.Context, []Click) error {
-		mu.Lock()
-		calls++
-		n := calls
-		mu.Unlock()
-		if n == 1 {
-			close(entered)
-			<-release
-			return nil
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		storeErr := errors.New("db down")
+		var mu sync.Mutex
+		var calls int
+		store := &fnStore{fn: func(context.Context, []Click) error {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			if n == 1 {
+				close(entered)
+				<-release
+				return nil
+			}
+			return storeErr
+		}}
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 2, Interval: time.Hour})
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			_ = r.Close(context.Background())
+		})
+
+		record(r, 1)
+		record(r, 1)
+		synctest.Wait()
+		select {
+		case <-entered:
+		default:
+			t.Fatal("worker did not block in first flush")
 		}
-		return storeErr
-	}}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{Buffer: 8, BatchSize: 2, Interval: time.Hour})
+		for range 4 {
+			record(r, 2)
+		}
 
-	record(r, 1)
-	record(r, 1)
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for the first flush")
-	}
-	for range 4 {
-		record(r, 2)
-	}
+		errCh := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			errCh <- r.Close(ctx)
+		}()
+		// Close 持有写锁置位 stopped 并阻塞在 r.done 上，synctest.Wait 确保排空状态已就绪。
+		synctest.Wait()
+		if r.draining() == nil {
+			t.Fatal("Close has not started draining")
+		}
+		releaseOnce.Do(func() { close(release) })
 
-	errCh := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		errCh <- r.Close(ctx)
-	}()
-	waitStopped(t, r)
-	close(release)
-
-	err := <-errCh
-	if !errors.Is(err, storeErr) {
-		t.Fatalf("Close error = %v, want db down", err)
-	}
-	if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 4 {
-		t.Errorf("written error = %v, want 4", got)
-	}
-	if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultSuccess}); got != 2 {
-		t.Errorf("written success = %v, want 2", got)
-	}
+		err := <-errCh
+		if !errors.Is(err, storeErr) {
+			t.Fatalf("Close error = %v, want db down", err)
+		}
+		if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 4 {
+			t.Errorf("written error = %v, want 4", got)
+		}
+		if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultSuccess}); got != 2 {
+			t.Errorf("written success = %v, want 2", got)
+		}
+	})
 }
 
 /*
 TestDrainStopsWhenCloseContextEnds 固定排空的时限是 Close 的 ctx。
-若满批各自再占一份 writeTimeout，这里会按批数乘上去，Close 不会在 2s 内返回。
+若满批各自再占一份 writeTimeout，这里会按批数乘上去，耗时将超过 150ms。
 */
 func TestDrainStopsWhenCloseContextEnds(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var mu sync.Mutex
-	var calls int
-	store := &fnStore{fn: func(ctx context.Context, _ []Click) error {
-		mu.Lock()
-		calls++
-		n := calls
-		mu.Unlock()
-		if n == 1 {
-			close(entered)
-			<-release
-			return nil
-		}
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		var mu sync.Mutex
+		var calls int
+		store := &fnStore{fn: func(ctx context.Context, _ []Click) error {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			if n == 1 {
+				close(entered)
+				<-release
+				return nil
+			}
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}}
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{
+			Buffer: 16, BatchSize: 2, Interval: time.Hour, WriteTimeout: 5 * time.Second,
+		})
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			_ = r.Close(context.Background())
+		})
+
+		record(r, 1)
+		record(r, 1)
+		synctest.Wait()
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-			return nil
+		case <-entered:
+		default:
+			t.Fatal("worker did not block in first flush")
 		}
-	}}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{
-		Buffer: 16, BatchSize: 2, Interval: time.Hour, WriteTimeout: 5 * time.Second,
+		for range 6 {
+			record(r, 2)
+		}
+
+		errCh := make(chan error, 1)
+		started := time.Now()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+			errCh <- r.Close(ctx)
+		}()
+		synctest.Wait()
+		releaseOnce.Do(func() { close(release) })
+
+		err := <-errCh
+		if got := time.Since(started); got != 150*time.Millisecond {
+			t.Fatalf("Close took %s, want exact close timeout 150ms", got)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close error = %v, want deadline exceeded", err)
+		}
 	})
-
-	record(r, 1)
-	record(r, 1)
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for the first flush")
-	}
-	for range 6 {
-		record(r, 2)
-	}
-
-	errCh := make(chan error, 1)
-	started := time.Now()
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-		defer cancel()
-		errCh <- r.Close(ctx)
-	}()
-	waitStopped(t, r)
-	close(release)
-
-	var err error
-	select {
-	case err = <-errCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not return within 2s")
-	}
-	if time.Since(started) > 2*time.Second {
-		t.Fatalf("Close took %s, drain did not share the close context", time.Since(started))
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Close error = %v, want deadline exceeded", err)
-	}
 }
 
 /*
@@ -484,30 +501,38 @@ TestCloseWaitsForCanceledWrite 固定 ctx 到期后 Close 仍等这一批写完�
 尾部用的就是 Close 的 ctx，取消会让写入返回，Close 再把这个错误交出去。
 */
 func TestCloseWaitsForCanceledWrite(t *testing.T) {
-	finished := make(chan struct{})
-	store := &fnStore{fn: func(ctx context.Context, _ []Click) error {
-		<-ctx.Done()
-		close(finished)
-		return ctx.Err()
-	}}
-	reg := prometheus.NewRegistry()
-	r := New(store, discardLogger(), reg, Options{Buffer: 4, BatchSize: 10, Interval: time.Hour})
-	record(r, 1)
+	synctest.Test(t, func(t *testing.T) {
+		finished := make(chan struct{})
+		store := &fnStore{fn: func(ctx context.Context, _ []Click) error {
+			<-ctx.Done()
+			// 模拟存储驱动收到取消后再做一次 10ms 收尾；Close 必须等它彻底返回。
+			time.Sleep(10 * time.Millisecond)
+			close(finished)
+			return ctx.Err()
+		}}
+		reg := prometheus.NewRegistry()
+		r := New(store, discardLogger(), reg, Options{Buffer: 4, BatchSize: 10, Interval: time.Hour})
+		record(r, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	err := r.Close(ctx)
-	select {
-	case <-finished:
-	default:
-		t.Fatal("Close returned before the write finished")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Close error = %v, want deadline exceeded", err)
-	}
-	if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 1 {
-		t.Errorf("written error = %v, want 1", got)
-	}
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		err := r.Close(ctx)
+		select {
+		case <-finished:
+		default:
+			t.Fatal("Close returned before the write finished")
+		}
+		if got := time.Since(started); got != 60*time.Millisecond {
+			t.Errorf("Close took %s, want 60ms (50ms deadline + 10ms cleanup)", got)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close error = %v, want deadline exceeded", err)
+		}
+		if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 1 {
+			t.Errorf("written error = %v, want 1", got)
+		}
+	})
 }
 
 func TestWorkerPanicStopsRecorder(t *testing.T) {
@@ -539,21 +564,6 @@ type panicStore struct{}
 
 func (panicStore) RecordClicks(context.Context, []Click) error {
 	panic("store exploded")
-}
-
-func waitStopped(t *testing.T, r *Recorder) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		r.mu.RLock()
-		stopped := r.stopped
-		r.mu.RUnlock()
-		if stopped {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("timed out waiting for the recorder to stop")
 }
 
 func gatheredCounter(t *testing.T, g prometheus.Gatherer, name string, labels map[string]string) float64 {
