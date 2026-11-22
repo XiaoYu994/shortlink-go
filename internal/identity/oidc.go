@@ -120,13 +120,12 @@ func NewOIDCProvider(ctx context.Context, cfg OIDCConfig) (*OIDCProvider, error)
 	if cfg.Issuer == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
 		return nil, errors.New("oidc config: issuer, client id, client secret, and redirect url are required")
 	}
-	issuerURL, err := url.Parse(cfg.Issuer)
-	if err != nil || (issuerURL.Scheme != "http" && issuerURL.Scheme != "https") || issuerURL.Host == "" || issuerURL.RawQuery != "" || issuerURL.Fragment != "" {
-		return nil, fmt.Errorf("oidc config: invalid issuer %q", cfg.Issuer)
+	if _, err := parseEndpointURL(cfg.Issuer, "oidc config", "issuer"); err != nil {
+		return nil, err
 	}
-	redirectURL, err := url.Parse(cfg.RedirectURL)
-	if err != nil || (redirectURL.Scheme != "http" && redirectURL.Scheme != "https") || redirectURL.Host == "" || redirectURL.Fragment != "" {
-		return nil, fmt.Errorf("oidc config: invalid redirect url %q", cfg.RedirectURL)
+	redirectURL, err := parseRedirectURL(cfg.RedirectURL, "oidc config", "redirect url")
+	if err != nil {
+		return nil, err
 	}
 
 	httpClient := cfg.HTTPClient
@@ -161,6 +160,26 @@ func NewOIDCProvider(ctx context.Context, cfg OIDCConfig) (*OIDCProvider, error)
 		secureCookies: strings.EqualFold(redirectURL.Scheme, "https"),
 		flowCookieKey: deriveFlowCookieKey("shortlink-oidc-flow-v1", cfg.ClientSecret),
 	}, nil
+}
+
+/*
+parseEndpointURL 校验身份提供方的基准地址或端点 URL：只接受带主机的 http/https 地址，拒绝查询串与片段。
+parseRedirectURL 校验回调地址：允许查询串，仍拒绝片段。两个函数分开命名，避免调用处传难以理解的 bool 旗标。
+*/
+func parseEndpointURL(raw, prefix, field string) (*url.URL, error) {
+	u, err := parseRedirectURL(raw, prefix, field)
+	if err != nil || u.RawQuery != "" {
+		return nil, fmt.Errorf("%s: invalid %s %q", prefix, field, raw)
+	}
+	return u, nil
+}
+
+func parseRedirectURL(raw, prefix, field string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
+		return nil, fmt.Errorf("%s: invalid %s %q", prefix, field, raw)
+	}
+	return u, nil
 }
 
 /*
@@ -259,8 +278,7 @@ func classifyExchangeError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("exchange authorization code: %w", ctx.Err())
 	}
-	var retrieveErr *oauth2.RetrieveError
-	if errors.As(err, &retrieveErr) && retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusBadRequest {
+	if retrieveErr, ok := errors.AsType[*oauth2.RetrieveError](err); ok && retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusBadRequest {
 		switch retrieveErr.ErrorCode {
 		case "server_error", "temporarily_unavailable":
 			return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)

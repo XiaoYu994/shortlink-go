@@ -251,7 +251,7 @@ WHERE s.token_hash = $1
 		return identity.Principal{}, identity.ErrOrgNotFound
 	}
 	role := identity.Role(roleStr.String)
-	if !identity.ValidRole(role) {
+	if !role.Valid() {
 		return identity.Principal{}, fmt.Errorf("authenticate session: invalid role %q", roleStr.String)
 	}
 
@@ -324,7 +324,7 @@ WHERE s.token_hash = $1
 	}
 	for _, org := range orgs {
 		role := identity.Role(org.Role)
-		if !identity.ValidRole(role) {
+		if !role.Valid() {
 			return identity.SessionInfo{}, fmt.Errorf("get session info: invalid role %q", org.Role)
 		}
 		info.Orgs = append(info.Orgs, identity.UserOrg{

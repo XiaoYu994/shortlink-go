@@ -29,8 +29,8 @@ type stubMemberStore struct {
 	lastRole     identity.Role
 
 	listFn   func(ctx context.Context, tenantID int64) ([]identity.Member, error)
-	updateFn func(ctx context.Context, tenantID, actorUserID, targetUserID int64, newRole identity.Role) (identity.Member, error)
-	removeFn func(ctx context.Context, tenantID, actorUserID, targetUserID int64) error
+	updateFn func(ctx context.Context, p identity.UpdateMemberRoleParams) (identity.Member, error)
+	removeFn func(ctx context.Context, p identity.RemoveMemberParams) error
 }
 
 func (s *stubMemberStore) ListMembers(ctx context.Context, tenantID int64) ([]identity.Member, error) {
@@ -42,31 +42,31 @@ func (s *stubMemberStore) ListMembers(ctx context.Context, tenantID int64) ([]id
 	return nil, nil
 }
 
-func (s *stubMemberStore) UpdateMemberRole(ctx context.Context, tenantID, actorUserID, targetUserID int64, newRole identity.Role) (identity.Member, error) {
+func (s *stubMemberStore) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRoleParams) (identity.Member, error) {
 	s.updateCalls++
-	s.lastTenantID = tenantID
-	s.lastActorID = actorUserID
-	s.lastTargetID = targetUserID
-	s.lastRole = newRole
+	s.lastTenantID = p.TenantID
+	s.lastActorID = p.ActorUserID
+	s.lastTargetID = p.TargetUserID
+	s.lastRole = p.NewRole
 	if s.updateFn != nil {
-		return s.updateFn(ctx, tenantID, actorUserID, targetUserID, newRole)
+		return s.updateFn(ctx, p)
 	}
 	return identity.Member{
-		UserID:   targetUserID,
+		UserID:   p.TargetUserID,
 		Email:    "target@example.com",
 		Name:     "Target",
-		Role:     newRole,
+		Role:     p.NewRole,
 		JoinedAt: time.Date(2026, 11, 22, 8, 0, 0, 0, time.UTC),
 	}, nil
 }
 
-func (s *stubMemberStore) RemoveMember(ctx context.Context, tenantID, actorUserID, targetUserID int64) error {
+func (s *stubMemberStore) RemoveMember(ctx context.Context, p identity.RemoveMemberParams) error {
 	s.removeCalls++
-	s.lastTenantID = tenantID
-	s.lastActorID = actorUserID
-	s.lastTargetID = targetUserID
+	s.lastTenantID = p.TenantID
+	s.lastActorID = p.ActorUserID
+	s.lastTargetID = p.TargetUserID
 	if s.removeFn != nil {
-		return s.removeFn(ctx, tenantID, actorUserID, targetUserID)
+		return s.removeFn(ctx, p)
 	}
 	return nil
 }
@@ -394,10 +394,10 @@ func TestMemberStoreErrorMappingsAndSuccessResponses(t *testing.T) {
 					listFn: func(context.Context, int64) ([]identity.Member, error) {
 						return nil, tc.err
 					},
-					updateFn: func(context.Context, int64, int64, int64, identity.Role) (identity.Member, error) {
+					updateFn: func(context.Context, identity.UpdateMemberRoleParams) (identity.Member, error) {
 						return identity.Member{}, tc.err
 					},
-					removeFn: func(context.Context, int64, int64, int64) error {
+					removeFn: func(context.Context, identity.RemoveMemberParams) error {
 						return tc.err
 					},
 				}

@@ -52,7 +52,7 @@ func TestValidAPIKeyPrincipal(t *testing.T) {
 	}
 }
 
-func TestValidRole(t *testing.T) {
+func TestRoleValid(t *testing.T) {
 	tests := []struct {
 		role Role
 		want bool
@@ -66,8 +66,8 @@ func TestValidRole(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.role), func(t *testing.T) {
-			if got := ValidRole(tt.role); got != tt.want {
-				t.Errorf("ValidRole(%q) = %v, want %v", tt.role, got, tt.want)
+			if got := tt.role.Valid(); got != tt.want {
+				t.Errorf("Role(%q).Valid() = %v, want %v", tt.role, got, tt.want)
 			}
 		})
 	}

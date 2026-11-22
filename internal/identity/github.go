@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -77,19 +76,19 @@ func NewGitHubProvider(cfg GitHubConfig) (*GitHubProvider, error) {
 	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
 		return nil, errors.New("github config: client id, client secret, and redirect url are required")
 	}
-	redirectURL, err := parseProviderURL(cfg.RedirectURL, "redirect url", true)
+	redirectURL, err := parseRedirectURL(cfg.RedirectURL, "github config", "redirect url")
 	if err != nil {
 		return nil, err
 	}
-	authURL, err := optionalProviderURL(cfg.AuthURL, defaultGitHubAuthURL, "auth url")
+	authURL, err := optionalEndpointURL(cfg.AuthURL, defaultGitHubAuthURL, "auth url")
 	if err != nil {
 		return nil, err
 	}
-	tokenURL, err := optionalProviderURL(cfg.TokenURL, defaultGitHubTokenURL, "token url")
+	tokenURL, err := optionalEndpointURL(cfg.TokenURL, defaultGitHubTokenURL, "token url")
 	if err != nil {
 		return nil, err
 	}
-	apiBaseURL, err := optionalProviderURL(cfg.APIBaseURL, defaultGitHubAPIBaseURL, "api base url")
+	apiBaseURL, err := optionalEndpointURL(cfg.APIBaseURL, defaultGitHubAPIBaseURL, "api base url")
 	if err != nil {
 		return nil, err
 	}
@@ -119,22 +118,14 @@ func NewGitHubProvider(cfg GitHubConfig) (*GitHubProvider, error) {
 	}, nil
 }
 
-func optionalProviderURL(raw, fallback, field string) (string, error) {
+func optionalEndpointURL(raw, fallback, field string) (string, error) {
 	if raw == "" {
 		return fallback, nil
 	}
-	if _, err := parseProviderURL(raw, field, false); err != nil {
+	if _, err := parseEndpointURL(raw, "github config", field); err != nil {
 		return "", err
 	}
 	return raw, nil
-}
-
-func parseProviderURL(raw, field string, allowQuery bool) (*url.URL, error) {
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" || (!allowQuery && u.RawQuery != "") {
-		return nil, fmt.Errorf("github config: invalid %s %q", field, raw)
-	}
-	return u, nil
 }
 
 // SecureCookies 报告登录流程 Cookie 和会话 Cookie 是否应带 Secure 属性（按 GITHUB_REDIRECT_URL 的协议决定）。
@@ -277,8 +268,7 @@ func classifyGitHubExchangeError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("exchange github code: %w", ctx.Err())
 	}
-	var retrieveErr *oauth2.RetrieveError
-	if errors.As(err, &retrieveErr) && retrieveErr.Response != nil &&
+	if retrieveErr, ok := errors.AsType[*oauth2.RetrieveError](err); ok && retrieveErr.Response != nil &&
 		(retrieveErr.Response.StatusCode == http.StatusOK || retrieveErr.Response.StatusCode == http.StatusBadRequest) {
 		switch retrieveErr.ErrorCode {
 		case "bad_verification_code", "invalid_grant", "access_denied", "expired_token", "unverified_user_email", "invalid_request":

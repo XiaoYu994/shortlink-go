@@ -119,6 +119,24 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 /*
+parseFlags 解析子命令参数并拒绝多余位置参数。
+返回 (false, nil) 表示用户请求了 -h/--help；返回 (false, errUsage) 表示参数非法。
+*/
+func parseFlags(fs *flag.FlagSet, args []string, stderr io.Writer) (bool, error) {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return false, nil
+		}
+		return false, errUsage
+	}
+	if fs.NArg() != 0 {
+		writeUsage(stderr)
+		return false, errUsage
+	}
+	return true, nil
+}
+
+/*
 parseLinkCommand 解析 link 子命令。link 需要 PostgreSQL 和 Redis，
 和 key、tenant 的存储分开打开，见 run 里的分派。
 */
@@ -146,14 +164,11 @@ func parseLinkBan(args []string, stderr io.Writer) (linkCommand, error) {
 	fs := newFlagSet("link ban", stderr)
 	code := fs.String("code", "", "短码")
 	reason := fs.String("reason", "", "封禁原因")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
 	banReason := link.BanReason(*reason)
-	if fs.NArg() != 0 || *code == "" || !banReason.Valid() {
+	if *code == "" || !banReason.Valid() {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
@@ -170,13 +185,10 @@ func parseLinkBan(args []string, stderr io.Writer) (linkCommand, error) {
 func parseLinkUnban(args []string, stderr io.Writer) (linkCommand, error) {
 	fs := newFlagSet("link unban", stderr)
 	code := fs.String("code", "", "短码")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
-	if fs.NArg() != 0 || *code == "" {
+	if *code == "" {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
@@ -244,15 +256,8 @@ func parseIssue(args []string, stderr io.Writer) (command, error) {
 	expires := fs.String("expires", "", "RFC3339 到期时间，省略表示不过期")
 	var scopes scopeFlag
 	fs.Var(&scopes, "scope", "权限范围（links:read、links:write、stats:read），可重复传入或用逗号分隔")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
-	}
-	if fs.NArg() != 0 {
-		writeUsage(stderr)
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
 
 	params := postgres.IssueAPIKeyParams{
@@ -299,13 +304,10 @@ func parseScopeFlags(values []string) ([]identity.Perm, error) {
 func parseList(args []string, stderr io.Writer) (command, error) {
 	fs := newFlagSet("list", stderr)
 	tenantID := fs.Int64("tenant", 0, "租户 ID")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
-	if fs.NArg() != 0 || *tenantID <= 0 {
+	if *tenantID <= 0 {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
@@ -322,13 +324,10 @@ func parseList(args []string, stderr io.Writer) (command, error) {
 func parseRevoke(args []string, stderr io.Writer) (command, error) {
 	fs := newFlagSet("revoke", stderr)
 	keyID := fs.Int64("id", 0, "密钥 ID")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
-	if fs.NArg() != 0 || *keyID <= 0 {
+	if *keyID <= 0 {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
@@ -345,13 +344,10 @@ func parseRevoke(args []string, stderr io.Writer) (command, error) {
 func parseTenantShow(args []string, stderr io.Writer) (command, error) {
 	fs := newFlagSet("tenant show", stderr)
 	tenantID := fs.Int64("tenant", 0, "租户 ID")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
-	if fs.NArg() != 0 || *tenantID <= 0 {
+	if *tenantID <= 0 {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
@@ -375,13 +371,10 @@ func parseTenantSet(args []string, stderr io.Writer) (command, error) {
 	tenantID := fs.Int64("tenant", 0, "租户 ID")
 	linkQuota := fs.Int64("link-quota", 0, "每个 UTC 自然月最多创建的链接数")
 	rateLimit := fs.Int("rate-limit", 0, "管理 API 每秒请求数，0 表示不限制")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
-	if fs.NArg() != 0 || *tenantID <= 0 {
+	if *tenantID <= 0 {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
@@ -420,18 +413,15 @@ func parseMemberInvite(args []string, stderr io.Writer) (command, error) {
 	email := fs.String("email", "", "受邀人邮箱")
 	roleStr := fs.String("role", "", "成员角色（owner、admin、member、viewer）")
 	expires := fs.String("expires", "", "RFC3339 到期时间，省略表示不过期")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, nil
-		}
-		return nil, errUsage
+	if ok, err := parseFlags(fs, args, stderr); !ok {
+		return nil, err
 	}
-	if fs.NArg() != 0 || *tenantID <= 0 || strings.TrimSpace(*email) == "" || *roleStr == "" {
+	if *tenantID <= 0 || strings.TrimSpace(*email) == "" || *roleStr == "" {
 		writeUsage(stderr)
 		return nil, errUsage
 	}
 	role := identity.Role(*roleStr)
-	if !identity.ValidRole(role) {
+	if !role.Valid() {
 		writeUsage(stderr)
 		return nil, errUsage
 	}

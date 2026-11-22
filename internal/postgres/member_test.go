@@ -103,70 +103,70 @@ func TestUpdateMemberRole(t *testing.T) {
 	outsider := createTestMember(t, store, tenant2, "outsider", "outsider@example.com", identity.RoleOwner)
 
 	// 1. 仅有一名 owner 时不能降级自己，但保留 owner -> owner 允许。
-	if _, err := store.UpdateMemberRole(ctx, tenant1, owner1, owner1, identity.RoleAdmin); !errors.Is(err, identity.ErrLastOwner) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: owner1, NewRole: identity.RoleAdmin}); !errors.Is(err, identity.ErrLastOwner) {
 		t.Fatalf("demote sole owner err = %v, want ErrLastOwner", err)
 	}
-	sameOwner, err := store.UpdateMemberRole(ctx, tenant1, owner1, owner1, identity.RoleOwner)
+	sameOwner, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: owner1, NewRole: identity.RoleOwner})
 	if err != nil || sameOwner.Role != identity.RoleOwner {
 		t.Fatalf("sole owner owner->owner = (%+v, %v)", sameOwner, err)
 	}
 
 	// 2. owner 提拔 member 为 owner，再自我降级为 admin（此时仍有另一名 owner）。
-	promoted, err := store.UpdateMemberRole(ctx, tenant1, owner1, member1, identity.RoleOwner)
+	promoted, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: member1, NewRole: identity.RoleOwner})
 	if err != nil || promoted.Role != identity.RoleOwner || promoted.Email != "member1@example.com" {
 		t.Fatalf("promote to owner = (%+v, %v)", promoted, err)
 	}
-	selfDemoted, err := store.UpdateMemberRole(ctx, tenant1, owner1, owner1, identity.RoleAdmin)
+	selfDemoted, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: owner1, NewRole: identity.RoleAdmin})
 	if err != nil || selfDemoted.Role != identity.RoleAdmin {
 		t.Fatalf("self demote with 2 owners = (%+v, %v)", selfDemoted, err)
 	}
 	// owner1 先变回 owner，member1 变回 member，方便测后续规则。
-	if _, err := store.UpdateMemberRole(ctx, tenant1, member1, owner1, identity.RoleOwner); err != nil {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: member1, TargetUserID: owner1, NewRole: identity.RoleOwner}); err != nil {
 		t.Fatalf("restore owner1: %v", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, owner1, member1, identity.RoleMember); err != nil {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: member1, NewRole: identity.RoleMember}); err != nil {
 		t.Fatalf("restore member1: %v", err)
 	}
 
 	// 3. admin 可以调整 admin/member/viewer，含自我降级；但不能动 owner，也不能把任何人（含不存在目标）升为 owner。
-	if _, err := store.UpdateMemberRole(ctx, tenant1, admin1, owner1, identity.RoleMember); !errors.Is(err, identity.ErrMemberForbidden) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: owner1, NewRole: identity.RoleMember}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("admin demote owner err = %v, want ErrMemberForbidden", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, admin1, viewer1, identity.RoleOwner); !errors.Is(err, identity.ErrMemberForbidden) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: viewer1, NewRole: identity.RoleOwner}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("admin promote viewer to owner err = %v, want ErrMemberForbidden", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, admin1, 999999, identity.RoleOwner); !errors.Is(err, identity.ErrMemberForbidden) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: 999999, NewRole: identity.RoleOwner}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("admin promote missing target to owner err = %v, want ErrMemberForbidden", err)
 	}
-	gotViewer, err := store.UpdateMemberRole(ctx, tenant1, admin1, viewer1, identity.RoleAdmin)
+	gotViewer, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: viewer1, NewRole: identity.RoleAdmin})
 	if err != nil || gotViewer.Role != identity.RoleAdmin {
 		t.Fatalf("admin promote viewer to admin = (%+v, %v)", gotViewer, err)
 	}
 	// admin 自我降级为 member 后不再拥有权限。
-	if _, err := store.UpdateMemberRole(ctx, tenant1, admin1, admin1, identity.RoleMember); err != nil {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: admin1, NewRole: identity.RoleMember}); err != nil {
 		t.Fatalf("admin self demote: %v", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, admin1, member1, identity.RoleViewer); !errors.Is(err, identity.ErrMemberForbidden) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: member1, NewRole: identity.RoleViewer}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("demoted admin err = %v, want ErrMemberForbidden", err)
 	}
 
 	// 4. member/viewer 操作拒绝；非组织成员返回 ErrOrgNotFound；他组织/不存在目标返回 ErrMemberNotFound；非法角色返回 ErrInvalidRole。
-	if _, err := store.UpdateMemberRole(ctx, tenant1, member1, viewer1, identity.RoleMember); !errors.Is(err, identity.ErrMemberForbidden) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: member1, TargetUserID: viewer1, NewRole: identity.RoleMember}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("member actor err = %v, want ErrMemberForbidden", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, outsider, viewer1, identity.RoleMember); !errors.Is(err, identity.ErrOrgNotFound) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: outsider, TargetUserID: viewer1, NewRole: identity.RoleMember}); !errors.Is(err, identity.ErrOrgNotFound) {
 		t.Fatalf("outsider actor err = %v, want ErrOrgNotFound", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, owner1, outsider, identity.RoleMember); !errors.Is(err, identity.ErrMemberNotFound) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: outsider, NewRole: identity.RoleMember}); !errors.Is(err, identity.ErrMemberNotFound) {
 		t.Fatalf("other org target err = %v, want ErrMemberNotFound", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, owner1, 999999, identity.RoleMember); !errors.Is(err, identity.ErrMemberNotFound) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: 999999, NewRole: identity.RoleMember}); !errors.Is(err, identity.ErrMemberNotFound) {
 		t.Fatalf("missing target err = %v, want ErrMemberNotFound", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, owner1, 0, identity.RoleMember); !errors.Is(err, identity.ErrMemberNotFound) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: 0, NewRole: identity.RoleMember}); !errors.Is(err, identity.ErrMemberNotFound) {
 		t.Fatalf("zero target err = %v, want ErrMemberNotFound", err)
 	}
-	if _, err := store.UpdateMemberRole(ctx, tenant1, owner1, member1, identity.Role("guest")); !errors.Is(err, identity.ErrInvalidRole) {
+	if _, err := store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: member1, NewRole: identity.Role("guest")}); !errors.Is(err, identity.ErrInvalidRole) {
 		t.Fatalf("invalid role err = %v, want ErrInvalidRole", err)
 	}
 }
@@ -205,35 +205,35 @@ func TestRemoveMember(t *testing.T) {
 	}
 
 	// admin 不能移出 owner；viewer/member 不能移出任何人；非成员操作返回 ErrOrgNotFound；他组织目标返回 ErrMemberNotFound。
-	if err := store.RemoveMember(ctx, tenant1, admin1, owner1); !errors.Is(err, identity.ErrMemberForbidden) {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: owner1}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("admin remove owner err = %v, want ErrMemberForbidden", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, member1, viewer1); !errors.Is(err, identity.ErrMemberForbidden) {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: member1, TargetUserID: viewer1}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("member remove viewer err = %v, want ErrMemberForbidden", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, viewer1, member1); !errors.Is(err, identity.ErrMemberForbidden) {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: viewer1, TargetUserID: member1}); !errors.Is(err, identity.ErrMemberForbidden) {
 		t.Fatalf("viewer remove member err = %v, want ErrMemberForbidden", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, outsider, viewer1); !errors.Is(err, identity.ErrOrgNotFound) {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: outsider, TargetUserID: viewer1}); !errors.Is(err, identity.ErrOrgNotFound) {
 		t.Fatalf("outsider remove err = %v, want ErrOrgNotFound", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, owner1, outsider); !errors.Is(err, identity.ErrMemberNotFound) {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: outsider}); !errors.Is(err, identity.ErrMemberNotFound) {
 		t.Fatalf("remove other org member err = %v, want ErrMemberNotFound", err)
 	}
 
 	// admin 可以移出 viewer、其他 admin 以及自己。
-	if err := store.RemoveMember(ctx, tenant1, admin1, viewer1); err != nil {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: viewer1}); err != nil {
 		t.Fatalf("admin remove viewer: %v", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, admin1, admin2); err != nil {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: admin2}); err != nil {
 		t.Fatalf("admin remove admin2: %v", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, admin1, admin1); err != nil {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: admin1, TargetUserID: admin1}); err != nil {
 		t.Fatalf("admin remove self: %v", err)
 	}
 
 	// owner1 移出 member1：tenant1 立即失去成员身份，但 member1 的会话在 tenant2 仍然有效。
-	if err := store.RemoveMember(ctx, tenant1, owner1, member1); err != nil {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: member1}); err != nil {
 		t.Fatalf("owner remove member1: %v", err)
 	}
 	if _, err := store.AuthenticateSessionForOrg(ctx, member1Sess.Token, tenant1); !errors.Is(err, identity.ErrOrgNotFound) {
@@ -245,10 +245,10 @@ func TestRemoveMember(t *testing.T) {
 	}
 
 	// 两名 owner 时 owner1 可以移出 owner2；只剩 owner1 时禁止再移出自己。
-	if err := store.RemoveMember(ctx, tenant1, owner1, owner2); err != nil {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: owner2}); err != nil {
 		t.Fatalf("owner1 remove owner2: %v", err)
 	}
-	if err := store.RemoveMember(ctx, tenant1, owner1, owner1); !errors.Is(err, identity.ErrLastOwner) {
+	if err := store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: owner1, TargetUserID: owner1}); !errors.Is(err, identity.ErrLastOwner) {
 		t.Fatalf("remove last owner err = %v, want ErrLastOwner", err)
 	}
 }
@@ -265,11 +265,11 @@ func TestLastOwnerProtectionConcurrent(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			<-start
-			errs[0] = store.RemoveMember(ctx, tenant1, ownerA, ownerB)
+			errs[0] = store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: ownerA, TargetUserID: ownerB})
 		})
 		wg.Go(func() {
 			<-start
-			errs[1] = store.RemoveMember(ctx, tenant1, ownerB, ownerA)
+			errs[1] = store.RemoveMember(ctx, identity.RemoveMemberParams{TenantID: tenant1, ActorUserID: ownerB, TargetUserID: ownerA})
 		})
 		close(start)
 		wg.Wait()
@@ -289,11 +289,11 @@ func TestLastOwnerProtectionConcurrent(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			<-start
-			_, errs[0] = store.UpdateMemberRole(ctx, tenant1, ownerA, ownerB, identity.RoleMember)
+			_, errs[0] = store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: ownerA, TargetUserID: ownerB, NewRole: identity.RoleMember})
 		})
 		wg.Go(func() {
 			<-start
-			_, errs[1] = store.UpdateMemberRole(ctx, tenant1, ownerB, ownerA, identity.RoleMember)
+			_, errs[1] = store.UpdateMemberRole(ctx, identity.UpdateMemberRoleParams{TenantID: tenant1, ActorUserID: ownerB, TargetUserID: ownerA, NewRole: identity.RoleMember})
 		})
 		close(start)
 		wg.Wait()

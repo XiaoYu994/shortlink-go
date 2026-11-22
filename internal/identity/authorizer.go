@@ -4,7 +4,7 @@ import "slices"
 
 /*
 MapAuthorizer 按固定角色权限表和 API Key scope 做权限判断。
-它是 httpapi.Authorizer 策略接口的默认实现；以后替换成策略引擎时，
+它是 console.Authorizer 策略接口的默认实现；以后替换成策略引擎时，
 handler 和中间件不需要改动。
 */
 type MapAuthorizer struct {

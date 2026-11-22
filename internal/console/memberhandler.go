@@ -19,8 +19,8 @@ MemberStore 定义成员管理接口需要的存储能力。
 */
 type MemberStore interface {
 	ListMembers(ctx context.Context, tenantID int64) ([]identity.Member, error)
-	UpdateMemberRole(ctx context.Context, tenantID, actorUserID, targetUserID int64, newRole identity.Role) (identity.Member, error)
-	RemoveMember(ctx context.Context, tenantID, actorUserID, targetUserID int64) error
+	UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRoleParams) (identity.Member, error)
+	RemoveMember(ctx context.Context, p identity.RemoveMemberParams) error
 }
 
 /*
@@ -127,7 +127,7 @@ func (h *memberHandler) handleUpdateRole(w http.ResponseWriter, r *http.Request)
 	}
 
 	newRole := identity.Role(req.Role)
-	if !identity.ValidRole(newRole) {
+	if !newRole.Valid() {
 		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, "invalid role")
 		return
 	}
@@ -136,7 +136,12 @@ func (h *memberHandler) handleUpdateRole(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	updated, err := h.members.UpdateMemberRole(r.Context(), p.Tenant.ID, p.ActorID, targetUserID, newRole)
+	updated, err := h.members.UpdateMemberRole(r.Context(), identity.UpdateMemberRoleParams{
+		TenantID:     p.Tenant.ID,
+		ActorUserID:  p.ActorID,
+		TargetUserID: targetUserID,
+		NewRole:      newRole,
+	})
 	if err != nil {
 		h.handleMemberError(w, r, "update member role", err, targetUserID)
 		return
@@ -168,7 +173,11 @@ func (h *memberHandler) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.members.RemoveMember(r.Context(), p.Tenant.ID, p.ActorID, targetUserID); err != nil {
+	if err := h.members.RemoveMember(r.Context(), identity.RemoveMemberParams{
+		TenantID:     p.Tenant.ID,
+		ActorUserID:  p.ActorID,
+		TargetUserID: targetUserID,
+	}); err != nil {
 		h.handleMemberError(w, r, "remove member", err, targetUserID)
 		return
 	}

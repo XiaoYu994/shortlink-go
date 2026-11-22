@@ -23,6 +23,27 @@ type Member struct {
 	JoinedAt time.Time
 }
 
+/*
+UpdateMemberRoleParams 是修改组织成员角色的参数。
+使用具名结构体避免连续三个 int64 位置参数在调用方写反。
+*/
+type UpdateMemberRoleParams struct {
+	TenantID     int64
+	ActorUserID  int64
+	TargetUserID int64
+	NewRole      Role
+}
+
+/*
+RemoveMemberParams 是将成员移出组织的参数。
+使用具名结构体避免连续三个 int64 位置参数在调用方写反。
+*/
+type RemoveMemberParams struct {
+	TenantID     int64
+	ActorUserID  int64
+	TargetUserID int64
+}
+
 // CanManageMembers 判断执行者角色是否拥有管理组织成员的基础资格（owner 或 admin）。
 func CanManageMembers(actorRole Role) bool {
 	return actorRole == RoleOwner || actorRole == RoleAdmin
@@ -34,7 +55,7 @@ CanAssignMemberRole 判断执行者角色是否有权在组织内授予 newRole�
 admin 不能把任何人设为 owner，其余角色无权授予成员角色。
 */
 func CanAssignMemberRole(actorRole, newRole Role) bool {
-	if !CanManageMembers(actorRole) || !ValidRole(newRole) {
+	if !CanManageMembers(actorRole) || !newRole.Valid() {
 		return false
 	}
 	return actorRole == RoleOwner || newRole != RoleOwner
@@ -55,7 +76,7 @@ owner 可移出任意成员（最后一名 owner 不变量由存储层事务保�
 admin 不能移出 owner，但可以移出 admin、member、viewer（含自行退出）。
 */
 func CanRemoveMember(actorRole, targetRole Role) bool {
-	if !CanManageMembers(actorRole) || !ValidRole(targetRole) {
+	if !CanManageMembers(actorRole) || !targetRole.Valid() {
 		return false
 	}
 	return actorRole == RoleOwner || targetRole != RoleOwner

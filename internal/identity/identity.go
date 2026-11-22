@@ -4,7 +4,7 @@ OIDC / GitHub OAuth 2.0 客户端、权限授权实现与组织成员管理规�
 
 人与 API Key 是两种凭证，鉴权后统一写成 context 里的 Principal，
 handler 只读 Principal 并通过 Authorizer 检查权限。
-OIDC 发现、ID Token 验签与 GitHub OAuth 2.0 授权码/用户信息拉取也收口在本包，httpapi 只编排 HTTP 跳转、Cookie 和错误响应。
+OIDC 发现、ID Token 验签与 GitHub OAuth 2.0 授权码/用户信息拉取也收口在本包，console 只编排 HTTP 跳转、Cookie 和错误响应。
 */
 package identity
 
@@ -48,8 +48,8 @@ const (
 	RoleViewer Role = "viewer"
 )
 
-// ValidRole 报告 r 是否属于系统定义的固定组织角色。
-func ValidRole(r Role) bool {
+// Valid 报告 r 是否属于系统定义的固定组织角色。
+func (r Role) Valid() bool {
 	switch r {
 	case RoleOwner, RoleAdmin, RoleMember, RoleViewer:
 		return true
@@ -144,7 +144,7 @@ func ValidUserPrincipal(p Principal) bool {
 	return p.ActorKind == ActorUser &&
 		p.ActorID > 0 &&
 		p.Tenant.ID > 0 &&
-		ValidRole(p.Role) &&
+		p.Role.Valid() &&
 		len(p.Scopes) == 0
 }
 

@@ -50,7 +50,7 @@ ORDER BY m.user_id`, tenantID)
 			return nil, fmt.Errorf("list members: %w", err)
 		}
 		role := identity.Role(roleStr)
-		if !identity.ValidRole(role) {
+		if !role.Valid() {
 			return nil, fmt.Errorf("list members: invalid role %q for user %d", roleStr, member.UserID)
 		}
 		member.Role = role
@@ -92,7 +92,7 @@ FOR UPDATE`, tenantID, actorUserID, targetUserID)
 			return memberScope{}, fmt.Errorf("lock member scope: %w", err)
 		}
 		role := identity.Role(roleStr)
-		if !identity.ValidRole(role) {
+		if !role.Valid() {
 			return memberScope{}, fmt.Errorf("lock member scope: invalid role %q for user %d", roleStr, uid)
 		}
 		if uid == actorUserID {
@@ -121,15 +121,15 @@ UpdateMemberRole 在事务内校验执行者实时角色、目标成员关系与
 校验顺序确保 admin 尝试授予 owner 权限时即使目标不存在也返回 ErrMemberForbidden，
 非组织成员的操作者返回 ErrOrgNotFound，最后一名 owner 被降级时返回 ErrLastOwner。
 */
-func (s *Store) UpdateMemberRole(ctx context.Context, tenantID, actorUserID, targetUserID int64, newRole identity.Role) (identity.Member, error) {
-	if tenantID <= 0 || actorUserID <= 0 {
+func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRoleParams) (identity.Member, error) {
+	if p.TenantID <= 0 || p.ActorUserID <= 0 {
 		return identity.Member{}, identity.ErrOrgNotFound
 	}
-	if targetUserID <= 0 {
+	if p.TargetUserID <= 0 {
 		return identity.Member{}, identity.ErrMemberNotFound
 	}
-	if !identity.ValidRole(newRole) {
-		return identity.Member{}, fmt.Errorf("%w: %q", identity.ErrInvalidRole, newRole)
+	if !p.NewRole.Valid() {
+		return identity.Member{}, fmt.Errorf("%w: %q", identity.ErrInvalidRole, p.NewRole)
 	}
 	if err := ctx.Err(); err != nil {
 		return identity.Member{}, err
@@ -141,22 +141,20 @@ func (s *Store) UpdateMemberRole(ctx context.Context, tenantID, actorUserID, tar
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	scope, err := lockMemberScopeTx(ctx, tx, tenantID, actorUserID, targetUserID)
+	scope, err := lockMemberScopeTx(ctx, tx, p.TenantID, p.ActorUserID, p.TargetUserID)
 	if err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
 	}
 	switch {
 	case !scope.actorFound:
 		return identity.Member{}, identity.ErrOrgNotFound
-	case !identity.CanManageMembers(scope.actorRole):
-		return identity.Member{}, identity.ErrMemberForbidden
-	case !identity.CanAssignMemberRole(scope.actorRole, newRole):
+	case !identity.CanAssignMemberRole(scope.actorRole, p.NewRole):
 		return identity.Member{}, identity.ErrMemberForbidden
 	case !scope.targetFound:
 		return identity.Member{}, identity.ErrMemberNotFound
-	case !identity.CanManageMemberRole(scope.actorRole, scope.targetRole, newRole):
+	case !identity.CanManageMemberRole(scope.actorRole, scope.targetRole, p.NewRole):
 		return identity.Member{}, identity.ErrMemberForbidden
-	case scope.targetRole == identity.RoleOwner && newRole != identity.RoleOwner && scope.ownerCount <= 1:
+	case scope.targetRole == identity.RoleOwner && p.NewRole != identity.RoleOwner && scope.ownerCount <= 1:
 		return identity.Member{}, identity.ErrLastOwner
 	}
 
@@ -172,16 +170,16 @@ WHERE m.tenant_id = $1
   AND m.user_id = $2
   AND u.id = m.user_id
 RETURNING m.user_id, u.email, u.name, m.role, m.created_at`,
-		tenantID, targetUserID, string(newRole),
+		p.TenantID, p.TargetUserID, string(p.NewRole),
 	).Scan(&member.UserID, &member.Email, &member.Name, &roleStr, &member.JoinedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return identity.Member{}, fmt.Errorf("update member role: user %d missing", targetUserID)
+		return identity.Member{}, fmt.Errorf("update member role: user %d missing", p.TargetUserID)
 	}
 	if err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
 	}
 	role := identity.Role(roleStr)
-	if !identity.ValidRole(role) {
+	if !role.Valid() {
 		return identity.Member{}, fmt.Errorf("update member role: invalid role %q", roleStr)
 	}
 	member.Role = role
@@ -197,11 +195,11 @@ RETURNING m.user_id, u.email, u.name, m.role, m.created_at`,
 RemoveMember 在事务内校验执行者实时角色、目标成员关系与至少一名 owner 不变量，并删除成员关系。
 只删除 memberships 行，不吊销 sessions：用户可能同时属于多个组织，移出当前组织后其会话在其余组织仍有效。
 */
-func (s *Store) RemoveMember(ctx context.Context, tenantID, actorUserID, targetUserID int64) error {
-	if tenantID <= 0 || actorUserID <= 0 {
+func (s *Store) RemoveMember(ctx context.Context, p identity.RemoveMemberParams) error {
+	if p.TenantID <= 0 || p.ActorUserID <= 0 {
 		return identity.ErrOrgNotFound
 	}
-	if targetUserID <= 0 {
+	if p.TargetUserID <= 0 {
 		return identity.ErrMemberNotFound
 	}
 	if err := ctx.Err(); err != nil {
@@ -214,7 +212,7 @@ func (s *Store) RemoveMember(ctx context.Context, tenantID, actorUserID, targetU
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	scope, err := lockMemberScopeTx(ctx, tx, tenantID, actorUserID, targetUserID)
+	scope, err := lockMemberScopeTx(ctx, tx, p.TenantID, p.ActorUserID, p.TargetUserID)
 	if err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
@@ -233,7 +231,7 @@ func (s *Store) RemoveMember(ctx context.Context, tenantID, actorUserID, targetU
 
 	res, err := tx.ExecContext(ctx, `
 DELETE FROM memberships
-WHERE tenant_id = $1 AND user_id = $2`, tenantID, targetUserID)
+WHERE tenant_id = $1 AND user_id = $2`, p.TenantID, p.TargetUserID)
 	if err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}

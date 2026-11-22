@@ -47,7 +47,7 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 	if err != nil {
 		return identity.Invitation{}, err
 	}
-	if !identity.ValidRole(p.Role) {
+	if !p.Role.Valid() {
 		return identity.Invitation{}, fmt.Errorf("%w: %q", identity.ErrInvalidRole, p.Role)
 	}
 	if p.InvitedBy != nil && *p.InvitedBy <= 0 {
