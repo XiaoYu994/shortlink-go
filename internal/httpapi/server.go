@@ -78,10 +78,11 @@ type ConsoleOptions struct {
 	Authorizer Authorizer
 	/*
 		OIDC 非空时，ConsoleRoutes 会注册 /api/v1/auth/login 和 /api/v1/auth/callback。
-		为空时不挂登录路由，只支持 API Key（ADR 0018）。
+		Sessions 非空时，管理 API 支持会话 Cookie + X-Org-ID 鉴权，并注册 logout 和 /me。
+		两者都为空时不挂登录与会话路由，只支持 API Key（ADR 0018）。
 	*/
 	OIDC     OIDCClient
-	Sessions SessionCreator
+	Sessions SessionStore
 	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
 	SessionTTL time.Duration
 }
@@ -93,7 +94,9 @@ type Server struct {
 	admin          LinkAdminStore
 	stats          LinkStatsStore
 	keys           APIKeyAuthenticator
+	sessions       SessionAuthenticator
 	authz          Authorizer
+	csrf           *http.CrossOriginProtection
 	auth           *authHandler
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
@@ -123,9 +126,10 @@ type serverDeps struct {
 	admin             LinkAdminStore
 	stats             LinkStatsStore
 	keys              APIKeyAuthenticator
+	sessions          SessionAuthenticator
 	authorizer        Authorizer
 	oidc              OIDCClient
-	sessions          SessionCreator
+	sessionMgr        SessionManager
 	sessionTTL        time.Duration
 	requestTimeout    time.Duration
 	registry          *prometheus.Registry
@@ -149,7 +153,9 @@ func NewRedirector(logger *slog.Logger, store LinkStore, requestTimeout time.Dur
 
 /*
 NewConsole 组装管理进程。
-Keys 或 Authorizer 为 nil 时采用默认拒绝策略，管理接口返回 500，而不是把鉴权或权限放开。
+Authorizer 为 nil 时，已经通过鉴权的管理请求返回 500，而不是放开权限。
+Keys 为 nil 时，带 Authorization 的请求返回 500；不带 Authorization 且 Sessions 非空时仍走会话鉴权。
+Keys 和 Sessions 都为空时，管理请求返回 500。
 ConsoleStore 同时提供跳转读取、管理 CRUD 和统计查询。
 */
 func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Duration, registry *prometheus.Registry, opts ConsoleOptions) *Server {
@@ -159,9 +165,10 @@ func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Dur
 		admin:          store,
 		stats:          store,
 		keys:           opts.Keys,
+		sessions:       opts.Sessions,
 		authorizer:     opts.Authorizer,
 		oidc:           opts.OIDC,
-		sessions:       opts.Sessions,
+		sessionMgr:     opts.Sessions,
 		sessionTTL:     opts.SessionTTL,
 		requestTimeout: requestTimeout,
 		registry:       registry,
@@ -180,9 +187,10 @@ registry 由 main 创建并注入，/metrics 从这里收集；测试每次传�
 */
 func newServer(d serverDeps) *Server {
 	logger := slog.New(requestIDHandler{Handler: d.logger.Handler()})
+	csrf := http.NewCrossOriginProtection()
 	var auth *authHandler
-	if d.oidc != nil {
-		auth = newAuthHandler(logger, d.oidc, d.sessions, d.sessionTTL)
+	if d.oidc != nil || d.sessionMgr != nil {
+		auth = newAuthHandler(logger, d.oidc, d.sessionMgr, csrf, d.sessionTTL)
 	}
 	return &Server{
 		logger:         logger,
@@ -190,7 +198,9 @@ func newServer(d serverDeps) *Server {
 		admin:          d.admin,
 		stats:          d.stats,
 		keys:           d.keys,
+		sessions:       d.sessions,
 		authz:          d.authorizer,
+		csrf:           csrf,
 		auth:           auth,
 		requestTimeout: d.requestTimeout,
 		registry:       d.registry,

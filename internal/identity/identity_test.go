@@ -4,6 +4,8 @@ import (
 	"errors"
 	"slices"
 	"testing"
+
+	"shortlink/internal/tenant"
 )
 
 func TestAllAPIKeyScopesReturnsCopy(t *testing.T) {
@@ -44,6 +46,79 @@ func TestValidAPIKeyPrincipal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ValidAPIKeyPrincipal(tt.p); got != tt.want {
 				t.Errorf("ValidAPIKeyPrincipal(%+v) = %v, want %v", tt.p, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidRole(t *testing.T) {
+	tests := []struct {
+		role Role
+		want bool
+	}{
+		{role: RoleOwner, want: true},
+		{role: RoleAdmin, want: true},
+		{role: RoleMember, want: true},
+		{role: RoleViewer, want: true},
+		{role: "", want: false},
+		{role: Role("superadmin"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.role), func(t *testing.T) {
+			if got := ValidRole(tt.role); got != tt.want {
+				t.Errorf("ValidRole(%q) = %v, want %v", tt.role, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidUserPrincipal(t *testing.T) {
+	validTenant := tenant.Tenant{ID: 7}
+	tests := []struct {
+		name string
+		p    Principal
+		want bool
+	}{
+		{
+			name: "valid owner",
+			p:    Principal{Tenant: validTenant, ActorKind: ActorUser, ActorID: 10, Role: RoleOwner},
+			want: true,
+		},
+		{
+			name: "valid viewer",
+			p:    Principal{Tenant: validTenant, ActorKind: ActorUser, ActorID: 10, Role: RoleViewer},
+			want: true,
+		},
+		{
+			name: "api key actor rejected",
+			p:    Principal{Tenant: validTenant, ActorKind: ActorAPIKey, ActorID: 10, Role: RoleOwner},
+			want: false,
+		},
+		{
+			name: "missing actor id rejected",
+			p:    Principal{Tenant: validTenant, ActorKind: ActorUser, Role: RoleMember},
+			want: false,
+		},
+		{
+			name: "missing tenant id rejected",
+			p:    Principal{ActorKind: ActorUser, ActorID: 10, Role: RoleMember},
+			want: false,
+		},
+		{
+			name: "invalid role rejected",
+			p:    Principal{Tenant: validTenant, ActorKind: ActorUser, ActorID: 10, Role: Role("guest")},
+			want: false,
+		},
+		{
+			name: "user with scopes rejected",
+			p:    Principal{Tenant: validTenant, ActorKind: ActorUser, ActorID: 10, Role: RoleMember, Scopes: AllAPIKeyScopes()},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidUserPrincipal(tt.p); got != tt.want {
+				t.Errorf("ValidUserPrincipal(%+v) = %v, want %v", tt.p, got, tt.want)
 			}
 		})
 	}

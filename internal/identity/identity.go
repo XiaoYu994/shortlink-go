@@ -36,6 +36,16 @@ const (
 	RoleViewer Role = "viewer"
 )
 
+// ValidRole 报告 r 是否属于系统定义的固定组织角色。
+func ValidRole(r Role) bool {
+	switch r {
+	case RoleOwner, RoleAdmin, RoleMember, RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
 // Perm 表示具体操作权限，由路由或 handler 检查。
 type Perm string
 
@@ -85,6 +95,19 @@ func ValidAPIKeyPrincipal(p Principal) bool {
 		}
 	}
 	return true
+}
+
+/*
+ValidUserPrincipal 报告 p 能不能作为用户会话鉴权的结果放进请求。
+执行者必须是 user，具备正的 ActorID 与 Tenant.ID，角色属于固定枚举，
+且不能携带 API Key 的 Scopes（用户的权限只来自角色映射）。
+*/
+func ValidUserPrincipal(p Principal) bool {
+	return p.ActorKind == ActorUser &&
+		p.ActorID > 0 &&
+		p.Tenant.ID > 0 &&
+		ValidRole(p.Role) &&
+		len(p.Scopes) == 0
 }
 
 /*

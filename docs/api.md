@@ -13,6 +13,8 @@
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
 | console | `GET` | `/api/v1/auth/login` | 发起 OIDC 授权码登录（仅配置完整 `OIDC_*` 时注册） |
 | console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（仅配置完整 `OIDC_*` 时注册） |
+| console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/me` | 返回当前登录用户信息与所属组织列表（仅配置完整 `OIDC_*` 时注册） |
 | console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
 | console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接（需要 `links:read`） |
@@ -20,9 +22,14 @@
 | console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204（需要 `links:write`） |
 | console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客（需要 `stats:read`） |
 
-本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。宿主机进程的入口是 `deploy/nginx.conf`，容器栈的入口是 `deploy/nginx.stack.conf`。两份都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且要带 API Key。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 和 `/readyz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放，由这层反向代理不转发。
+本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。宿主机进程的入口是 `deploy/nginx.conf`，容器栈的入口是 `deploy/nginx.stack.conf`。两份都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且需要通过 API Key 或会话鉴权。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 和 `/readyz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放，由这层反向代理不转发。
 
-管理 API 的租户与权限只来自 `Authorization` 头里的密钥。链接的 `tenant_id` 由服务端写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不透露链接是否存在；自己的被封禁链接是例外，修改和删除返回 403。每个管理请求按顺序经过鉴权、按租户限流和权限校验：密钥无效返回 401，超限返回 429 和 `Retry-After`，密钥缺少当前接口所需 scope 返回 403 和 `{"error":"forbidden"}`。每个租户还有每月创建数配额，满了返回 403。配额和限流都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
+管理 API 支持两种凭证，按 `Authorization` 头优先且不回退：
+
+- **API Key**（带 `Authorization: Bearer slk_...`）：租户与权限只来自密钥本身，`X-Org-ID` 请求头和 `sl_session` Cookie 一律忽略，也不受跨站写保护约束。如果请求带了 `Authorization` 头但格式不对或密钥无效，直接返回 401，不会回退到会话 Cookie。
+- **用户会话**（不带 `Authorization` 头、携带 `sl_session` Cookie）：需要同时带 `X-Org-ID: <组织 ID>` 请求头。这条路径的响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不选用其中任何一份，也不查库。缺失或格式非法的 `X-Org-ID` 返回 400，此时不查会话是否已失效。非安全方法（`POST`/`PATCH`/`DELETE`）会经过 Go 标准库 `http.CrossOriginProtection` 检查，跨站写请求返回 403 `{"error":"cross-origin request rejected"}`。令牌格式非法，或 `X-Org-ID` 合法但令牌无效、过期或已登出，返回 401，且不带 `WWW-Authenticate`。没有 Cookie，或未启用会话存储时，401 仍带 `Bearer`，方便只使用 API Key 的客户端。用户不是该组织成员或组织不存在一律返回 404 `{"error":"organization not found"}`，不暴露组织是否存在。成员角色变更、移出组织、登出或调整租户限流后，下一次请求立刻生效；管理 API 要带上合法的 `X-Org-ID` 才会表现为 401，否则仍是 400。
+
+链接的 `tenant_id` 由服务端从鉴权结果写入，请求体、查询参数和路径里都不能传。其他租户的链接和不存在的链接一律返回 404，不透露链接是否存在；自己的被封禁链接是例外，修改和删除返回 403。每个管理请求按顺序经过鉴权、按租户限流和权限校验：凭证无效返回 401，超限返回 429 和 `Retry-After`，缺少当前接口所需权限（API Key 看 `scopes`，用户看组织角色映射）返回 403 和 `{"error":"forbidden"}`。每个租户还有每月创建数配额，满了返回 403。配额和限流都由租户配置决定，查看和调整见 [runbook](runbook.md)。公开跳转、探针、指标和未鉴权的 401 流量不经过限流。
 
 ## 创建短链
 
@@ -264,6 +271,46 @@ Cookie: sl_oidc_flow=...
 ```
 
 响应体不包含会话明文令牌。授权码过期/重放或 ID Token 校验失败返回 401 `{"error":"authentication failed"}`；身份提供方不可达、JWKS 拉取失败、令牌端点返回 `server_error` / `temporarily_unavailable`、5xx 或客户端密钥配置错误返回 502 `{"error":"identity provider unavailable"}`；超时返回 504。
+
+## 当前用户与登出
+
+配置完整 `OIDC_*` 后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
+
+### 查询当前用户
+
+```bash
+curl -s -b cookies.txt localhost:8081/api/v1/me
+```
+
+不需要传 `X-Org-ID`（传了也会忽略），即使尚未加入任何组织也能调用；只带 `Authorization: Bearer slk_...` 而没有有效会话 Cookie 时返回 401 `{"error":"unauthorized"}`。成功返回 `200 OK`：
+
+```json
+{
+  "user": {
+    "id": 1,
+    "email": "alice@example.com",
+    "name": "Alice"
+  },
+  "expires_at": "2026-11-28T14:15:00Z",
+  "organizations": [
+    {
+      "id": 1,
+      "name": "acme",
+      "role": "owner"
+    }
+  ]
+}
+```
+
+尚未加入任何组织时 `organizations` 为 `[]`。
+
+### 登出
+
+```bash
+curl -i -X POST -b cookies.txt -c cookies.txt localhost:8081/api/v1/auth/logout
+```
+
+经过 `http.CrossOriginProtection` 检查，跨站 `POST` 返回 403 `{"error":"cross-origin request rejected"}`（不吊销会话也不清 Cookie）。同源或非浏览器请求在数据库里将当前会话标记为已吊销并清除 `sl_session` Cookie，返回 `204 No Content`。无 Cookie、Cookie 格式无效或已吊销时同样返回 204（幂等）。请求里有多份 `sl_session` 时返回 401，不吊销、也不清 Cookie。登出后，下一次 `/api/v1/me` 立刻返回 401。管理 API 在 `X-Org-ID` 合法时立刻返回 401；`X-Org-ID` 缺失或非法时仍返回 400，不因会话已失效而改成 401。
 
 ## 跳转
 

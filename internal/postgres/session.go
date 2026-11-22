@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"shortlink/internal/identity"
+	"shortlink/internal/tenant"
 )
 
 const (
@@ -158,4 +160,156 @@ VALUES ($1, $2, $3, $4, $5)`,
 func isUniqueConstraintViolation(err error, constraint string) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
+}
+
+/*
+AuthenticateSessionForOrg 校验会话令牌并确认该用户在目标组织中的成员身份与角色。
+令牌格式非法、未命中、已吊销或已过期统一返回 identity.ErrUnauthenticated（401）；
+会话有效但用户不是 orgID 成员或组织不存在返回 identity.ErrOrgNotFound（404，不暴露组织是否存在）。
+每次请求实时查库，确保登出、改角色、移出组织与调整限流后下一次请求立即生效（ADR 0018）。
+*/
+func (s *Store) AuthenticateSessionForOrg(ctx context.Context, token string, orgID int64) (identity.Principal, error) {
+	if err := ctx.Err(); err != nil {
+		return identity.Principal{}, err
+	}
+	if !identity.ValidSessionToken(token) {
+		return identity.Principal{}, identity.ErrUnauthenticated
+	}
+
+	var (
+		userID     int64
+		tenantID   sql.NullInt64
+		externalID sql.NullString
+		rateLimit  sql.NullInt64
+		roleStr    sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT u.id,
+       t.id, t.external_id, t.rate_limit_per_second,
+       m.role
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+LEFT JOIN memberships m ON m.user_id = u.id AND m.tenant_id = $2
+LEFT JOIN tenants t ON t.id = m.tenant_id
+WHERE s.token_hash = $1
+  AND s.revoked_at IS NULL
+  AND s.expires_at > now()`,
+		identity.HashSessionToken(token), orgID,
+	).Scan(&userID, &tenantID, &externalID, &rateLimit, &roleStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return identity.Principal{}, identity.ErrUnauthenticated
+	}
+	if err != nil {
+		return identity.Principal{}, fmt.Errorf("authenticate session: %w", err)
+	}
+	if !tenantID.Valid || !roleStr.Valid {
+		return identity.Principal{}, identity.ErrOrgNotFound
+	}
+	role := identity.Role(roleStr.String)
+	if !identity.ValidRole(role) {
+		return identity.Principal{}, fmt.Errorf("authenticate session: invalid role %q", roleStr.String)
+	}
+
+	tn := tenant.Tenant{
+		ID:        tenantID.Int64,
+		RateLimit: int(rateLimit.Int64),
+	}
+	if externalID.Valid {
+		tn.ExternalID = externalID.String
+	}
+	return identity.Principal{
+		Tenant:    tn,
+		ActorKind: identity.ActorUser,
+		ActorID:   userID,
+		Role:      role,
+	}, nil
+}
+
+/*
+GetSessionInfo 校验会话令牌并返回关联用户、会话过期时间及所属组织列表（按组织 ID 升序）。
+用户和组织在同一条语句里读出，避免登出落在两次查询之间时仍返回 200。
+令牌无效、未命中、已吊销或已过期返回 identity.ErrUnauthenticated。
+*/
+func (s *Store) GetSessionInfo(ctx context.Context, token string) (identity.SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return identity.SessionInfo{}, err
+	}
+	if !identity.ValidSessionToken(token) {
+		return identity.SessionInfo{}, identity.ErrUnauthenticated
+	}
+
+	var (
+		info     identity.SessionInfo
+		orgsJSON []byte
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT u.id, u.email, u.name, u.created_at, s.expires_at,
+       COALESCE((
+           SELECT json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'role', m.role)
+               ORDER BY t.id
+           )
+           FROM memberships m
+           JOIN tenants t ON t.id = m.tenant_id
+           WHERE m.user_id = u.id
+       ), '[]'::json)
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+WHERE s.token_hash = $1
+  AND s.revoked_at IS NULL
+  AND s.expires_at > now()`,
+		identity.HashSessionToken(token),
+	).Scan(&info.User.ID, &info.User.Email, &info.User.Name, &info.User.CreatedAt, &info.ExpiresAt, &orgsJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return identity.SessionInfo{}, identity.ErrUnauthenticated
+	}
+	if err != nil {
+		return identity.SessionInfo{}, fmt.Errorf("get session info: %w", err)
+	}
+	info.User.CreatedAt = info.User.CreatedAt.UTC()
+	info.ExpiresAt = info.ExpiresAt.UTC()
+
+	var orgs []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(orgsJSON, &orgs); err != nil {
+		return identity.SessionInfo{}, fmt.Errorf("get session info: decode orgs: %w", err)
+	}
+	for _, org := range orgs {
+		role := identity.Role(org.Role)
+		if !identity.ValidRole(role) {
+			return identity.SessionInfo{}, fmt.Errorf("get session info: invalid role %q", org.Role)
+		}
+		info.Orgs = append(info.Orgs, identity.UserOrg{
+			ID:   org.ID,
+			Name: org.Name,
+			Role: role,
+		})
+	}
+	return info, nil
+}
+
+/*
+RevokeSession 吊销指定明文令牌对应的服务端会话，使其立刻失效。
+格式非法、会话不存在或已吊销时均视为幂等成功。
+*/
+func (s *Store) RevokeSession(ctx context.Context, token string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !identity.ValidSessionToken(token) {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET revoked_at = now()
+WHERE token_hash = $1
+  AND revoked_at IS NULL`,
+		identity.HashSessionToken(token),
+	); err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	return nil
 }

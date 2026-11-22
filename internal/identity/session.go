@@ -28,6 +28,10 @@ var (
 	ErrInvalidOIDCIdentity = errors.New("invalid oidc identity")
 	// ErrInvalidSessionTTL 表示会话有效期不是正时长（至少 1 微秒）。
 	ErrInvalidSessionTTL = errors.New("session ttl must be at least 1 microsecond")
+	// ErrUnauthenticated 表示会话令牌格式非法、不存在、已过期或已吊销。
+	ErrUnauthenticated = errors.New("unauthenticated")
+	// ErrOrgNotFound 表示用户会话有效，但目标组织不存在或当前用户不是其成员。
+	ErrOrgNotFound = errors.New("organization not found")
 )
 
 // User 是平台用户主档，对应 users 表。
@@ -60,6 +64,20 @@ type IssuedSession struct {
 		浏览器在同时收到 Max-Age 和 Expires 时只认 Max-Age，这个值让 Cookie 寿命跟 sessions 行对齐。
 	*/
 	CookieMaxAge time.Duration
+}
+
+// UserOrg 表示用户所属的一个组织及其在该组织中的角色。
+type UserOrg struct {
+	ID   int64
+	Name string
+	Role Role
+}
+
+// SessionInfo 是当前有效会话关联的用户、到期时刻与所属组织列表。
+type SessionInfo struct {
+	User      User
+	ExpiresAt time.Time
+	Orgs      []UserOrg
 }
 
 /*

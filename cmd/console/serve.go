@@ -79,7 +79,7 @@ func runServe() error {
 	*/
 	var (
 		oidcClient httpapi.OIDCClient
-		sessions   httpapi.SessionCreator
+		sessions   httpapi.SessionStore
 	)
 	if cfg.OIDC.Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

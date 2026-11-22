@@ -22,15 +22,27 @@ import (
 	"shortlink/internal/memorystore"
 )
 
-type stubSessionCreator struct {
-	calls    int
-	lastID   identity.OIDCIdentity
-	lastTTL  time.Duration
-	err      error
-	nextSess int64
+type stubSessionStore struct {
+	calls        int
+	lastID       identity.OIDCIdentity
+	lastTTL      time.Duration
+	err          error
+	nextSess     int64
+	authFn       func(ctx context.Context, token string, orgID int64) (identity.Principal, error)
+	infoFn       func(ctx context.Context, token string) (identity.SessionInfo, error)
+	revokeFn     func(ctx context.Context, token string) error
+	revokedToken string
+	revokeCalls  int
 }
 
-func (s *stubSessionCreator) CreateSessionForOIDC(_ context.Context, id identity.OIDCIdentity, ttl time.Duration) (identity.IssuedSession, error) {
+func (s *stubSessionStore) AuthenticateSessionForOrg(ctx context.Context, token string, orgID int64) (identity.Principal, error) {
+	if s.authFn != nil {
+		return s.authFn(ctx, token, orgID)
+	}
+	return identity.Principal{}, identity.ErrUnauthenticated
+}
+
+func (s *stubSessionStore) CreateSessionForOIDC(_ context.Context, id identity.OIDCIdentity, ttl time.Duration) (identity.IssuedSession, error) {
 	s.calls++
 	s.lastID = id
 	s.lastTTL = ttl
@@ -61,7 +73,23 @@ func (s *stubSessionCreator) CreateSessionForOIDC(_ context.Context, id identity
 	}, nil
 }
 
-func newOIDCTestServer(t *testing.T, redirectURL string, sessions SessionCreator) (*Server, *fakeoidc.Server) {
+func (s *stubSessionStore) GetSessionInfo(ctx context.Context, token string) (identity.SessionInfo, error) {
+	if s.infoFn != nil {
+		return s.infoFn(ctx, token)
+	}
+	return identity.SessionInfo{}, identity.ErrUnauthenticated
+}
+
+func (s *stubSessionStore) RevokeSession(ctx context.Context, token string) error {
+	s.revokeCalls++
+	s.revokedToken = token
+	if s.revokeFn != nil {
+		return s.revokeFn(ctx, token)
+	}
+	return nil
+}
+
+func newOIDCTestServer(t *testing.T, redirectURL string, sessions SessionStore) (*Server, *fakeoidc.Server) {
 	t.Helper()
 	const (
 		clientID     = "shortlink-console"
@@ -84,9 +112,10 @@ func newOIDCTestServer(t *testing.T, redirectURL string, sessions SessionCreator
 		requestTimeout: 5 * time.Second,
 		registry:       newTestRegistry(),
 		keys:           allowKey{},
+		sessions:       sessions,
 		authorizer:     identity.NewMapAuthorizer(),
 		oidc:           provider,
-		sessions:       sessions,
+		sessionMgr:     sessions,
 		sessionTTL:     24 * time.Hour,
 	})
 	return srv, fake
@@ -127,21 +156,30 @@ func TestOIDCRoutesDisabledWhenUnconfigured(t *testing.T) {
 	srv := newTestServer()
 	handler := srv.ConsoleRoutes()
 
-	for _, path := range []string{oidcLoginPath, oidcCallbackPath} {
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: oidcLoginPath},
+		{method: http.MethodGet, path: oidcCallbackPath},
+		{method: http.MethodPost, path: authLogoutPath},
+		{method: http.MethodGet, path: mePath},
+	}
+	for _, rt := range routes {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		handler.ServeHTTP(rec, httptest.NewRequest(rt.method, rt.path, nil))
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("GET %s without OIDC = %d, want 404", path, rec.Code)
+			t.Errorf("%s %s without OIDC = %d, want 404", rt.method, rt.path, rec.Code)
 		}
 	}
 
-	// RedirectRoutes 永远不挂登录路由。
-	srvWithOIDC, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", &stubSessionCreator{})
-	for _, path := range []string{oidcLoginPath, oidcCallbackPath} {
+	// RedirectRoutes 永远不挂登录与会话路由。
+	srvWithOIDC, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", &stubSessionStore{})
+	for _, rt := range routes {
 		rec := httptest.NewRecorder()
-		srvWithOIDC.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		srvWithOIDC.RedirectRoutes().ServeHTTP(rec, httptest.NewRequest(rt.method, rt.path, nil))
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("redirector GET %s = %d, want 404", path, rec.Code)
+			t.Errorf("redirector %s %s = %d, want 404", rt.method, rt.path, rec.Code)
 		}
 	}
 }
@@ -158,7 +196,7 @@ func TestOIDCLoginRedirectAndFlowCookie(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, fake := newOIDCTestServer(t, tt.redirectURL, &stubSessionCreator{})
+			srv, fake := newOIDCTestServer(t, tt.redirectURL, &stubSessionStore{})
 			handler := srv.ConsoleRoutes()
 
 			rec1 := httptest.NewRecorder()
@@ -214,7 +252,7 @@ func TestOIDCLoginRedirectAndFlowCookie(t *testing.T) {
 }
 
 func TestOIDCCallbackSuccessCreatesSessionAndClearsFlowCookie(t *testing.T) {
-	sessions := &stubSessionCreator{}
+	sessions := &stubSessionStore{}
 	const redirectURL = "https://console.example.com/api/v1/auth/callback"
 	srv, fake := newOIDCTestServer(t, redirectURL, sessions)
 	handler := srv.ConsoleRoutes()
@@ -315,7 +353,7 @@ func TestOIDCCallbackRejectsTamperedAndInvalidFlows(t *testing.T) {
 
 	for _, tt := range tamperTests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions := &stubSessionCreator{}
+			sessions := &stubSessionStore{}
 			srv, fake := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 			fake.SetTamper(tt.tamper)
 			handler := srv.ConsoleRoutes()
@@ -356,7 +394,7 @@ func TestOIDCCallbackRejectsTamperedAndInvalidFlows(t *testing.T) {
 
 func TestOIDCCallbackEdgeCases(t *testing.T) {
 	t.Run("missing flow cookie returns 400", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		rec := httptest.NewRecorder()
 		srv.ConsoleRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, oidcCallbackPath+"?code=abc&state=xyz", nil))
@@ -372,7 +410,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("malformed flow cookie returns 400", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		req := httptest.NewRequest(http.MethodGet, oidcCallbackPath+"?code=abc&state=xyz", nil)
 		req.AddCookie(&http.Cookie{Name: OIDCFlowCookieName, Value: "not-valid-base64!!!"})
@@ -387,7 +425,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("expired flow cookie returns 400", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
 		srv.auth.now = func() time.Time { return now }
@@ -413,7 +451,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("provider error parameter returns 401", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -436,7 +474,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("missing code returns 400", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -459,7 +497,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("HEAD on callback returns 405 without consuming session", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -490,7 +528,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("replaying same callback fails with 401", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -530,7 +568,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("session store error returns 500 without cookie", func(t *testing.T) {
-		sessions := &stubSessionCreator{err: errors.New("db down")}
+		sessions := &stubSessionStore{err: errors.New("db down")}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -552,7 +590,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("state mismatch does not burn the in-progress login", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -582,7 +620,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("forged flow cookie is rejected and does not replace the real one", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -614,7 +652,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("jwks failure returns 502", func(t *testing.T) {
-		sessions := &stubSessionCreator{}
+		sessions := &stubSessionStore{}
 		srv, fake := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
 		handler := srv.ConsoleRoutes()
 
@@ -633,6 +671,285 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 		}
 		if sessions.calls != 0 {
 			t.Errorf("sessions.calls = %d, want 0", sessions.calls)
+		}
+	})
+}
+
+func TestLogout(t *testing.T) {
+	validToken := "sls_" + strings.Repeat("12", 32)
+
+	t.Run("revokes session and clears cookie", func(t *testing.T) {
+		sessions := &stubSessionStore{}
+		srv, _ := newOIDCTestServer(t, "https://console.example.com/api/v1/auth/callback", sessions)
+		handler := srv.ConsoleRoutes()
+
+		req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204, body = %s", rec.Code, rec.Body.String())
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("body = %q, want empty", rec.Body.String())
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+		if sessions.revokeCalls != 1 || sessions.revokedToken != validToken {
+			t.Errorf("revokeCalls=%d token=%q, want 1 / %q", sessions.revokeCalls, sessions.revokedToken, validToken)
+		}
+
+		cleared := findCookie(rec.Result().Cookies(), SessionCookieName)
+		if cleared == nil || cleared.Value != "" || cleared.MaxAge >= 0 || cleared.Path != "/api/" || !cleared.HttpOnly || !cleared.Secure || cleared.SameSite != http.SameSiteLaxMode {
+			t.Errorf("cleared cookie = %+v, want deleted HttpOnly/Secure/Lax/Path=/api/", cleared)
+		}
+		if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("POST "+authLogoutPath, http.MethodPost, strconv.Itoa(http.StatusNoContent))); got != 1 {
+			t.Errorf("logout metric = %v, want 1", got)
+		}
+	})
+
+	t.Run("missing or malformed cookie is idempotent 204 without db call", func(t *testing.T) {
+		for _, val := range []string{"", "bad-token"} {
+			sessions := &stubSessionStore{}
+			srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+			req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
+			if val != "" {
+				req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: val})
+			}
+			rec := httptest.NewRecorder()
+			srv.ConsoleRoutes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204", rec.Code)
+			}
+			if sessions.revokeCalls != 0 {
+				t.Errorf("revokeCalls = %d, want 0", sessions.revokeCalls)
+			}
+			if cleared := findCookie(rec.Result().Cookies(), SessionCookieName); cleared == nil || cleared.MaxAge >= 0 || cleared.Secure {
+				t.Errorf("cleared cookie = %+v, want deleted non-secure cookie on http", cleared)
+			}
+		}
+	})
+
+	t.Run("cross-origin logout rejected with 403 without revoking or clearing cookie", func(t *testing.T) {
+		for _, hdr := range []struct{ k, v string }{
+			{k: "Sec-Fetch-Site", v: "cross-site"},
+			{k: "Origin", v: "https://evil.example"},
+		} {
+			sessions := &stubSessionStore{}
+			srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+			req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
+			req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+			req.Header.Set(hdr.k, hdr.v)
+			rec := httptest.NewRecorder()
+			srv.ConsoleRoutes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s=%s status = %d, want 403, body = %s", hdr.k, hdr.v, rec.Code, rec.Body.String())
+			}
+			if sessions.revokeCalls != 0 {
+				t.Errorf("revokeCalls = %d, want 0", sessions.revokeCalls)
+			}
+			if cleared := findCookie(rec.Result().Cookies(), SessionCookieName); cleared != nil {
+				t.Errorf("unexpected Set-Cookie on 403: %+v", cleared)
+			}
+		}
+	})
+
+	t.Run("duplicate session cookies return 401 without revoking or clearing", func(t *testing.T) {
+		sessions := &stubSessionStore{}
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "sls_" + strings.Repeat("ab", 32)})
+		rec := httptest.NewRecorder()
+		srv.ConsoleRoutes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+		}
+		if sessions.revokeCalls != 0 {
+			t.Errorf("revokeCalls = %d, want 0", sessions.revokeCalls)
+		}
+		if cleared := findCookie(rec.Result().Cookies(), SessionCookieName); cleared != nil {
+			t.Errorf("cleared cookie on duplicate session cookies: %+v", cleared)
+		}
+	})
+
+	t.Run("store error returns 500 without clearing cookie", func(t *testing.T) {
+		sessions := &stubSessionStore{
+			revokeFn: func(context.Context, string) error { return errors.New("db down") },
+		}
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+		rec := httptest.NewRecorder()
+		srv.ConsoleRoutes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+		if cleared := findCookie(rec.Result().Cookies(), SessionCookieName); cleared != nil {
+			t.Errorf("cleared cookie on store error: %+v", cleared)
+		}
+	})
+
+	t.Run("GET logout returns 405", func(t *testing.T) {
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", &stubSessionStore{})
+		rec := httptest.NewRecorder()
+		srv.ConsoleRoutes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authLogoutPath, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET logout = %d, want 405", rec.Code)
+		}
+	})
+}
+
+func TestMe(t *testing.T) {
+	validToken := "sls_" + strings.Repeat("34", 32)
+	expires := time.Date(2026, 11, 29, 10, 0, 0, 0, time.UTC)
+
+	t.Run("returns user and organizations and ignores X-Org-ID", func(t *testing.T) {
+		sessions := &stubSessionStore{
+			infoFn: func(_ context.Context, token string) (identity.SessionInfo, error) {
+				if token != validToken {
+					return identity.SessionInfo{}, identity.ErrUnauthenticated
+				}
+				return identity.SessionInfo{
+					User:      identity.User{ID: 7, Email: "alice@example.com", Name: "Alice"},
+					ExpiresAt: expires,
+					Orgs: []identity.UserOrg{
+						{ID: 1, Name: "acme", Role: identity.RoleOwner},
+						{ID: 2, Name: "beta", Role: identity.RoleViewer},
+					},
+				}, nil
+			},
+		}
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		req := httptest.NewRequest(http.MethodGet, mePath, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+		req.Header.Set(orgIDHeader, "not-an-org")
+		rec := httptest.NewRecorder()
+		srv.ConsoleRoutes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+		var resp meResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode /me: %v", err)
+		}
+		if resp.User.ID != 7 || resp.User.Email != "alice@example.com" || resp.User.Name != "Alice" || !resp.ExpiresAt.Equal(expires) {
+			t.Errorf("resp user/expires = %+v", resp)
+		}
+		if len(resp.Organizations) != 2 || resp.Organizations[0] != (meOrgResponse{ID: 1, Name: "acme", Role: "owner"}) || resp.Organizations[1] != (meOrgResponse{ID: 2, Name: "beta", Role: "viewer"}) {
+			t.Errorf("organizations = %+v", resp.Organizations)
+		}
+		if got := testutil.ToFloat64(srv.metrics.requests.WithLabelValues("GET "+mePath, http.MethodGet, strconv.Itoa(http.StatusOK))); got != 1 {
+			t.Errorf("/me metric = %v, want 1", got)
+		}
+	})
+
+	t.Run("empty organizations encodes as JSON array", func(t *testing.T) {
+		sessions := &stubSessionStore{
+			infoFn: func(context.Context, string) (identity.SessionInfo, error) {
+				return identity.SessionInfo{
+					User:      identity.User{ID: 8, Email: "bob@example.com", Name: "Bob"},
+					ExpiresAt: expires,
+				}, nil
+			},
+		}
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		req := httptest.NewRequest(http.MethodGet, mePath, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+		rec := httptest.NewRecorder()
+		srv.ConsoleRoutes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"organizations":[]`) {
+			t.Errorf("body = %s, want empty JSON array for organizations", rec.Body.String())
+		}
+	})
+
+	t.Run("unauthorized cases return 401 without Bearer challenge", func(t *testing.T) {
+		sessions := &stubSessionStore{
+			infoFn: func(context.Context, string) (identity.SessionInfo, error) {
+				return identity.SessionInfo{}, identity.ErrUnauthenticated
+			},
+		}
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		handler := srv.ConsoleRoutes()
+
+		cases := []struct {
+			name string
+			req  func() *http.Request
+		}{
+			{
+				name: "missing cookie",
+				req:  func() *http.Request { return httptest.NewRequest(http.MethodGet, mePath, nil) },
+			},
+			{
+				name: "malformed cookie",
+				req: func() *http.Request {
+					r := httptest.NewRequest(http.MethodGet, mePath, nil)
+					r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "invalid"})
+					return r
+				},
+			},
+			{
+				name: "api key only",
+				req: func() *http.Request {
+					r := httptest.NewRequest(http.MethodGet, mePath, nil)
+					authorize(r)
+					return r
+				},
+			},
+			{
+				name: "unknown or expired session",
+				req: func() *http.Request {
+					r := httptest.NewRequest(http.MethodGet, mePath, nil)
+					r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+					return r
+				},
+			},
+			{
+				name: "duplicate session cookies",
+				req: func() *http.Request {
+					r := httptest.NewRequest(http.MethodGet, mePath, nil)
+					r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+					r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "sls_" + strings.Repeat("ab", 32)})
+					return r
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, tc.req())
+				if rec.Code != http.StatusUnauthorized {
+					t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+				}
+				if got := rec.Header().Get("WWW-Authenticate"); got != "" {
+					t.Errorf("WWW-Authenticate = %q, want empty on session-only /me", got)
+				}
+			})
+		}
+	})
+
+	t.Run("store error returns 500", func(t *testing.T) {
+		sessions := &stubSessionStore{
+			infoFn: func(context.Context, string) (identity.SessionInfo, error) {
+				return identity.SessionInfo{}, errors.New("db down")
+			},
+		}
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		req := httptest.NewRequest(http.MethodGet, mePath, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
+		rec := httptest.NewRecorder()
+		srv.ConsoleRoutes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500, body = %s", rec.Code, rec.Body.String())
 		}
 	})
 }
