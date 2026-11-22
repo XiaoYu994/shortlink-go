@@ -471,6 +471,200 @@ func TestHTTPOIDCLoginRedeemsVerifiedInvitationOnly(t *testing.T) {
 	}
 }
 
+/*
+TestHTTPMemberManagementImmediateEffect 端到端验证 Step 6（ADR 0018）：
+1. API Key 访问成员管理返回 403；viewer 可读列表但写操作与建链返回 403；
+2. 最后一名 owner 不能自我降级或移出（409）；admin 不能改/删 owner 或提拔 owner（403）；
+3. 修改角色（升级/降级）或移出组织后，受影响成员的现有会话下一次请求立刻生效，跨站写被拒绝；
+4. 移出组织不吊销会话，目标用户在其他组织的操作保持正常。
+*/
+func TestHTTPMemberManagementImmediateEffect(t *testing.T) {
+	store, tenant1 := newTestStore(t)
+	ctx := context.Background()
+
+	var tenant2 int64
+	if err := store.db.QueryRowContext(ctx,
+		`INSERT INTO tenants (name, rate_limit_per_second) VALUES ('org-member-two', 0) RETURNING id`,
+	).Scan(&tenant2); err != nil {
+		t.Fatalf("insert tenant2: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tenants SET rate_limit_per_second = 0 WHERE id = $1`, tenant1); err != nil {
+		t.Fatalf("disable tenant1 rate limit: %v", err)
+	}
+
+	if _, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenant1,
+		Email:    "alice@example.com",
+		Role:     identity.RoleOwner,
+	}); err != nil {
+		t.Fatalf("invite alice: %v", err)
+	}
+	if _, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenant1,
+		Email:    "bob@example.com",
+		Role:     identity.RoleViewer,
+	}); err != nil {
+		t.Fatalf("invite bob tenant1: %v", err)
+	}
+	if _, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenant2,
+		Email:    "bob@example.com",
+		Role:     identity.RoleMember,
+	}); err != nil {
+		t.Fatalf("invite bob tenant2: %v", err)
+	}
+
+	fake, handler := newOIDCSeamHandler(t, ctx, store)
+	fake.SetUser(fakeoidc.User{Subject: "sub-alice", Email: "alice@example.com", EmailVerified: true, Name: "Alice"})
+	aliceCookie, aliceID, _ := loginViaFakeOIDC(t, handler)
+	fake.SetUser(fakeoidc.User{Subject: "sub-bob", Email: "bob@example.com", EmailVerified: true, Name: "Bob"})
+	bobCookie, bobID, _ := loginViaFakeOIDC(t, handler)
+
+	doWithSession := func(cookie *http.Cookie, method, path string, orgID int64, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.AddCookie(cookie)
+		if orgID > 0 {
+			req.Header.Set("X-Org-ID", strconv.FormatInt(orgID, 10))
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. 全权限 API Key 对成员管理三个端点一律返回 403。
+	issuedKey, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{
+		TenantID: tenant1,
+		Scopes:   identity.AllAPIKeyScopes(),
+	})
+	if err != nil {
+		t.Fatalf("IssueAPIKey: %v", err)
+	}
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/api/v1/members"},
+		{method: http.MethodPatch, path: "/api/v1/members/" + strconv.FormatInt(bobID, 10), body: `{"role":"member"}`},
+		{method: http.MethodDelete, path: "/api/v1/members/" + strconv.FormatInt(bobID, 10)},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+issuedKey.Plaintext)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("api key %s %s = %d, want 403, body = %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 2. Bob（viewer）可读列表（按 user_id 升序），但改成员和建链均返回 403。
+	listRec := doWithSession(bobCookie, http.MethodGet, "/api/v1/members", tenant1, "")
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("bob list members = %d, want 200, body = %s", listRec.Code, listRec.Body.String())
+	}
+	var listResp struct {
+		Items []struct {
+			UserID int64  `json:"user_id"`
+			Role   string `json:"role"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode members list: %v", err)
+	}
+	if len(listResp.Items) != 2 || listResp.Items[0].UserID != aliceID || listResp.Items[0].Role != "owner" ||
+		listResp.Items[1].UserID != bobID || listResp.Items[1].Role != "viewer" {
+		t.Fatalf("members list = %+v", listResp.Items)
+	}
+	if rec := doWithSession(bobCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(aliceID, 10), tenant1, `{"role":"viewer"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer patch member = %d, want 403", rec.Code)
+	}
+	if rec := doWithSession(bobCookie, http.MethodDelete, "/api/v1/members/"+strconv.FormatInt(aliceID, 10), tenant1, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer delete member = %d, want 403", rec.Code)
+	}
+	if rec := doWithSession(bobCookie, http.MethodPost, "/api/v1/links", tenant1, `{"url":"https://example.com/viewer-denied"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer create link = %d, want 403", rec.Code)
+	}
+
+	// 3. Alice 是组织唯一 owner，自我降级或移出返回 409。
+	if rec := doWithSession(aliceCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(aliceID, 10), tenant1, `{"role":"admin"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("last owner demote = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := doWithSession(aliceCookie, http.MethodDelete, "/api/v1/members/"+strconv.FormatInt(aliceID, 10), tenant1, ""); rec.Code != http.StatusConflict {
+		t.Fatalf("last owner delete = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Alice 把 Bob 改为 member，Bob 原会话不重登立刻可以创建短链。
+	if rec := doWithSession(aliceCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(bobID, 10), tenant1, `{"role":"member"}`); rec.Code != http.StatusOK {
+		t.Fatalf("promote bob to member = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := doWithSession(bobCookie, http.MethodPost, "/api/v1/links", tenant1, `{"url":"https://example.com/bob-member"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("bob create link as member = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. Alice 把 Bob 升为 admin；Bob 不能改/删 Alice（owner）或把任何人设为 owner。
+	if rec := doWithSession(aliceCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(bobID, 10), tenant1, `{"role":"admin"}`); rec.Code != http.StatusOK {
+		t.Fatalf("promote bob to admin = %d, want 200", rec.Code)
+	}
+	if rec := doWithSession(bobCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(aliceID, 10), tenant1, `{"role":"member"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin patch owner = %d, want 403", rec.Code)
+	}
+	if rec := doWithSession(bobCookie, http.MethodDelete, "/api/v1/members/"+strconv.FormatInt(aliceID, 10), tenant1, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin delete owner = %d, want 403", rec.Code)
+	}
+	if rec := doWithSession(bobCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(bobID, 10), tenant1, `{"role":"owner"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin promote to owner = %d, want 403", rec.Code)
+	}
+
+	// 6. Alice 把 Bob 降回 viewer，Bob 原会话立刻被禁止建链。
+	if rec := doWithSession(aliceCookie, http.MethodPatch, "/api/v1/members/"+strconv.FormatInt(bobID, 10), tenant1, `{"role":"viewer"}`); rec.Code != http.StatusOK {
+		t.Fatalf("demote bob to viewer = %d, want 200", rec.Code)
+	}
+	if rec := doWithSession(bobCookie, http.MethodPost, "/api/v1/links", tenant1, `{"url":"https://example.com/bob-demoted"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("bob create link after demotion = %d, want 403", rec.Code)
+	}
+
+	// 7. 跨站 DELETE 被 CrossOriginProtection 拒绝，Bob 仍在 tenant1。
+	csrfReq := httptest.NewRequest(http.MethodDelete, "/api/v1/members/"+strconv.FormatInt(bobID, 10), nil)
+	csrfReq.AddCookie(aliceCookie)
+	csrfReq.Header.Set("X-Org-ID", strconv.FormatInt(tenant1, 10))
+	csrfReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	csrfRec := httptest.NewRecorder()
+	handler.ServeHTTP(csrfRec, csrfReq)
+	if csrfRec.Code != http.StatusForbidden || !strings.Contains(csrfRec.Body.String(), "cross-origin request rejected") {
+		t.Fatalf("cross-site delete = (%d, %s), want 403 cross-origin request rejected", csrfRec.Code, csrfRec.Body.String())
+	}
+	if rec := doWithSession(bobCookie, http.MethodGet, "/api/v1/members", tenant1, ""); rec.Code != http.StatusOK {
+		t.Fatalf("bob still in tenant1 after rejected csrf = %d, want 200", rec.Code)
+	}
+
+	// 8. Alice 移出 Bob：Bob 在 tenant1 立刻 404，/me 不再包含 tenant1 但仍保留 tenant2，且 tenant2 建链正常。
+	if rec := doWithSession(aliceCookie, http.MethodDelete, "/api/v1/members/"+strconv.FormatInt(bobID, 10), tenant1, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove bob = %d, want 204, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := doWithSession(bobCookie, http.MethodGet, "/api/v1/links", tenant1, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("bob tenant1 after removal = %d, want 404", rec.Code)
+	}
+	meRec := doWithSession(bobCookie, http.MethodGet, "/api/v1/me", 0, "")
+	if meRec.Code != http.StatusOK {
+		t.Fatalf("bob /me = %d, body = %s", meRec.Code, meRec.Body.String())
+	}
+	var meBody struct {
+		Organizations []struct {
+			ID   int64  `json:"id"`
+			Role string `json:"role"`
+		} `json:"organizations"`
+	}
+	if err := json.Unmarshal(meRec.Body.Bytes(), &meBody); err != nil {
+		t.Fatalf("decode bob /me: %v", err)
+	}
+	if len(meBody.Organizations) != 1 || meBody.Organizations[0].ID != tenant2 || meBody.Organizations[0].Role != "member" {
+		t.Fatalf("bob orgs after removal = %+v, want only tenant2(member)", meBody.Organizations)
+	}
+	if rec := doWithSession(bobCookie, http.MethodPost, "/api/v1/links", tenant2, `{"url":"https://example.com/bob-t2"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("bob create link in tenant2 = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeoidc.Server, http.Handler) {
 	t.Helper()
 	const (
@@ -496,6 +690,7 @@ func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeo
 		Authorizer: identity.NewMapAuthorizer(),
 		OIDC:       provider,
 		Sessions:   store,
+		Members:    store,
 	})
 	return fake, srv.ConsoleRoutes()
 }

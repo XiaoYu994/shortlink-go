@@ -79,10 +79,12 @@ type ConsoleOptions struct {
 	/*
 		OIDC 非空时，ConsoleRoutes 会注册 /api/v1/auth/login 和 /api/v1/auth/callback。
 		Sessions 非空时，管理 API 支持会话 Cookie + X-Org-ID 鉴权，并注册 logout 和 /me。
-		两者都为空时不挂登录与会话路由，只支持 API Key（ADR 0018）。
+		Members 非空时，ConsoleRoutes 注册 /api/v1/members 成员管理路由（同样依赖有效会话和成员校验）。
+		三者都为空时不挂登录、会话与成员路由，只支持 API Key（ADR 0018）。
 	*/
 	OIDC     OIDCClient
 	Sessions SessionStore
+	Members  MemberStore
 	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
 	SessionTTL time.Duration
 }
@@ -98,6 +100,7 @@ type Server struct {
 	authz          Authorizer
 	csrf           *http.CrossOriginProtection
 	auth           *authHandler
+	members        *memberHandler
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
@@ -130,6 +133,7 @@ type serverDeps struct {
 	authorizer        Authorizer
 	oidc              OIDCClient
 	sessionMgr        SessionManager
+	members           MemberStore
 	sessionTTL        time.Duration
 	requestTimeout    time.Duration
 	registry          *prometheus.Registry
@@ -169,6 +173,7 @@ func NewConsole(logger *slog.Logger, store ConsoleStore, requestTimeout time.Dur
 		authorizer:     opts.Authorizer,
 		oidc:           opts.OIDC,
 		sessionMgr:     opts.Sessions,
+		members:        opts.Members,
 		sessionTTL:     opts.SessionTTL,
 		requestTimeout: requestTimeout,
 		registry:       registry,
@@ -192,6 +197,10 @@ func newServer(d serverDeps) *Server {
 	if d.oidc != nil || d.sessionMgr != nil {
 		auth = newAuthHandler(logger, d.oidc, d.sessionMgr, csrf, d.sessionTTL)
 	}
+	var members *memberHandler
+	if d.members != nil {
+		members = newMemberHandler(logger, d.members)
+	}
 	return &Server{
 		logger:         logger,
 		store:          d.store,
@@ -202,6 +211,7 @@ func newServer(d serverDeps) *Server {
 		authz:          d.authorizer,
 		csrf:           csrf,
 		auth:           auth,
+		members:        members,
 		requestTimeout: d.requestTimeout,
 		registry:       d.registry,
 		metrics:        newHTTPMetrics(d.registry),

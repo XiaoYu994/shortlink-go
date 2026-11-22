@@ -15,6 +15,9 @@
 | console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（仅配置完整 `OIDC_*` 时注册） |
 | console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（仅配置完整 `OIDC_*` 时注册） |
 | console | `GET` | `/api/v1/me` | 返回当前登录用户信息与所属组织列表（仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/members` | 当前组织成员列表（仅配置完整 `OIDC_*` 时注册，需要 `members:read`） |
+| console | `PATCH` | `/api/v1/members/{user_id}` | 修改当前组织成员角色（仅配置完整 `OIDC_*` 时注册，需要 `members:write`） |
+| console | `DELETE` | `/api/v1/members/{user_id}` | 将成员移出当前组织（仅配置完整 `OIDC_*` 时注册，需要 `members:write`） |
 | console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
 | console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接（需要 `links:read`） |
@@ -311,6 +314,62 @@ curl -i -X POST -b cookies.txt -c cookies.txt localhost:8081/api/v1/auth/logout
 ```
 
 经过 `http.CrossOriginProtection` 检查，跨站 `POST` 返回 403 `{"error":"cross-origin request rejected"}`（不吊销会话也不清 Cookie）。同源或非浏览器请求在数据库里将当前会话标记为已吊销并清除 `sl_session` Cookie，返回 `204 No Content`。无 Cookie、Cookie 格式无效或已吊销时同样返回 204（幂等）。请求里有多份 `sl_session` 时返回 401，不吊销、也不清 Cookie。登出后，下一次 `/api/v1/me` 立刻返回 401。管理 API 在 `X-Org-ID` 合法时立刻返回 401；`X-Org-ID` 缺失或非法时仍返回 400，不因会话已失效而改成 401。
+
+## 成员管理
+
+配置完整 `OIDC_*` 后，console 同时注册以下成员管理接口（未配置时返回 404）。三个接口都走管理 API 鉴权链（要求 `sl_session` + `X-Org-ID`、受按租户限流和 `CrossOriginProtection` 保护，响应带 `Cache-Control: no-store`）。API Key 永远不包含 `members:read` / `members:write` scope，携带有效 API Key 访问这三个接口固定返回 403 `{"error":"forbidden"}`。
+
+### 列出成员
+
+```bash
+curl -s -b cookies.txt -H 'X-Org-ID: 1' localhost:8081/api/v1/members
+```
+
+需要 `members:read`（`owner`、`admin`、`member`、`viewer` 均可）。按 `user_id` 升序返回当前组织的全部成员：
+
+```json
+{
+  "items": [
+    {
+      "user_id": 1,
+      "email": "alice@example.com",
+      "name": "Alice",
+      "role": "owner",
+      "joined_at": "2026-11-22T04:00:00Z"
+    }
+  ]
+}
+```
+
+### 修改成员角色
+
+```bash
+curl -i -X PATCH -b cookies.txt -H 'X-Org-ID: 1' \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"member"}' \
+  localhost:8081/api/v1/members/2
+```
+
+需要 `members:write`（`owner`、`admin`）。成功后返回 `200 OK` 和更新后的单个成员对象；修改在数据库提交，目标成员原有会话的下一次请求立刻按新角色生效。
+
+资源级规则与错误码：
+
+- `owner` 可以修改任何成员的角色（含自我降级），但不能把组织最后一名 `owner` 降成非 `owner`（返回 409 `{"error":"organization must have at least one owner"}`）。
+- `admin` 不能修改 `owner`，也不能把任何人（包括不存在的目标）设为 `owner`，否则返回 403 `{"error":"forbidden"}`；可以修改 `admin`、`member`、`viewer`（含自我降级）。
+- `{user_id}` 非正整数、JSON 非法、包含未知字段或 `role` 非法时返回 400；目标用户不属于当前组织返回 404 `{"error":"member not found"}`。
+
+### 移出成员
+
+```bash
+curl -i -X DELETE -b cookies.txt -H 'X-Org-ID: 1' \
+  localhost:8081/api/v1/members/2
+```
+
+需要 `members:write`（`owner`、`admin`）。成功返回 `204 No Content`，无响应体。只删除当前组织的 `memberships` 行，不吊销该用户的会话：
+
+- 被移出成员的现有会话再带当前组织的 `X-Org-ID` 访问任何管理接口，下一次请求立刻返回 404 `{"error":"organization not found"}`，`GET /api/v1/me` 里也不再包含该组织。
+- 该用户在其他组织中的成员关系和会话访问不受影响。
+- `admin` 不能移出 `owner`（返回 403 `{"error":"forbidden"}`）；不能移出组织最后一名 `owner`（返回 409 `{"error":"organization must have at least one owner"}`）；目标不是当前组织成员返回 404 `{"error":"member not found"}`。
 
 ## 跳转
 

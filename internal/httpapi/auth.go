@@ -47,10 +47,14 @@ principal 取出鉴权中间件写进 context 的执行主体。
 返回 500，而不是把请求当成没有租户或放开访问。
 */
 func (s *Server) principal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
+	return principalOrInternalError(s.logger, w, r)
+}
+
+func principalOrInternalError(logger *slog.Logger, w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
 	p, ok := principalFrom(r.Context())
 	if !ok {
-		s.logger.ErrorContext(r.Context(), "missing principal in request context")
-		s.writeError(r.Context(), w, http.StatusInternalServerError, "internal error")
+		logger.ErrorContext(r.Context(), "missing principal in request context")
+		writeErrorResponse(logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return identity.Principal{}, false
 	}
 	return p, true
@@ -195,17 +199,27 @@ func parseOrgIDHeader(h http.Header) (int64, string, bool) {
 	if len(vals) > 1 {
 		return 0, "invalid X-Org-ID", false
 	}
-	raw := vals[0]
+	id, ok := parsePositiveInt64(vals[0])
+	if !ok {
+		return 0, "invalid X-Org-ID", false
+	}
+	return id, "", true
+}
+
+func parsePositiveInt64(raw string) (int64, bool) {
+	if raw == "" {
+		return 0, false
+	}
 	for i := range len(raw) {
 		if raw[i] < '0' || raw[i] > '9' {
-			return 0, "invalid X-Org-ID", false
+			return 0, false
 		}
 	}
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || id <= 0 {
-		return 0, "invalid X-Org-ID", false
+		return 0, false
 	}
-	return id, "", true
+	return id, true
 }
 
 /*

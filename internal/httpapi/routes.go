@@ -34,7 +34,7 @@ func (s *Server) RedirectRoutes() http.Handler {
 }
 
 /*
-ConsoleRoutes 返回管理进程的路由：可选 OIDC 登录、登出与 /me、短链增删改查、统计、存活检查、就绪检查和指标。
+ConsoleRoutes 返回管理进程的路由：可选 OIDC 登录、登出与 /me、成员管理、短链增删改查、统计、存活检查、就绪检查和指标。
 鉴权和限流只包管理 API。登录回调、登出、/me、公开跳转、存活检查、就绪检查和指标不经过管理鉴权与按租户限流。
 每个管理路由单独包：ServeMux 没有路由组，
 套在 /api/v1/ 前缀上的中间件不会被更具体的路由继承。
@@ -44,6 +44,11 @@ func (s *Server) ConsoleRoutes() http.Handler {
 	s.registerOperational(mux)
 	if s.auth != nil {
 		s.auth.registerRoutes(mux)
+	}
+	if s.members != nil {
+		mux.Handle("GET "+apiV1Prefix+"/members", s.consoleRoute(identity.PermMembersRead, s.members.handleList))
+		mux.Handle("PATCH "+apiV1Prefix+"/members/{user_id}", s.consoleRoute(identity.PermMembersWrite, s.members.handleUpdateRole))
+		mux.Handle("DELETE "+apiV1Prefix+"/members/{user_id}", s.consoleRoute(identity.PermMembersWrite, s.members.handleRemove))
 	}
 	mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
 	mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))

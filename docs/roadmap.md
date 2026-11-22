@@ -109,7 +109,7 @@
 - [x] 登录流程：login 跳转（state、PKCE、nonce）、callback 校验 ID Token、建会话
 - [x] 会话鉴权中间件、`X-Org-ID` 成员校验、`CrossOriginProtection`；logout 和 `GET /api/v1/me`
 - [x] 邀请：`console member invite`，首次登录按已验证邮箱兑现
-- [ ] 成员管理 API：列表、改角色、移出组织；立刻生效的集成测试
+- [x] 成员管理 API：列表、改角色、移出组织；立刻生效的集成测试
 - [ ] `make smoke` 走一次 Dex 登录；配置和文档同步
 - [ ] （可选）把 `Authorizer` 换成 Casbin 实现，验证策略模式接口边界
 - [ ] （可选）接入 GitHub 作为第二个身份提供方，对比纯 OAuth 2.0 和 OIDC

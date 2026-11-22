@@ -13,7 +13,7 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
-| `console` | `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`（配置 OIDC 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
+| `console` | `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`、`GET /api/v1/members`、`PATCH/DELETE /api/v1/members/{user_id}`（配置 OIDC 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
 
@@ -28,7 +28,7 @@ shortlink/
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
-│   ├── httpapi/         # handler、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、SessionStore
+│   ├── httpapi/         # handler（含独立 authHandler、memberHandler）、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、SessionStore、MemberStore
 │   ├── identity/        # 认证主体（Principal）、会话令牌、OIDC 客户端与固定角色权限表（MapAuthorizer）
 │   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
@@ -66,7 +66,7 @@ link           -> 标准库
 idgen          -> 标准库
 ```
 
-`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`OIDCClient` 和 `Authorizer` 也定义在 `httpapi`，分别由 `postgres.Store`、`identity.OIDCProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
+`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OIDCClient` 和 `Authorizer` 也定义在 `httpapi`，分别由 `postgres.Store`、`identity.OIDCProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
 
 ## 请求流程
 

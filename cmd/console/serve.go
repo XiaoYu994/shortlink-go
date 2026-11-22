@@ -74,12 +74,13 @@ func runServe() error {
 	})
 
 	/*
-		四个 OIDC_* 环境变量全空时不挂载登录路由，只支持 API Key（ADR 0018）。
-		变量类型保持为接口，只在启用时赋值，避免把带类型的 nil 指针放进 ConsoleOptions.OIDC。
+		四个 OIDC_* 环境变量全空时不挂载登录与成员管理路由，只支持 API Key（ADR 0018）。
+		变量类型保持为接口，只在启用时赋值，避免把带类型的 nil 指针放进 ConsoleOptions。
 	*/
 	var (
 		oidcClient httpapi.OIDCClient
 		sessions   httpapi.SessionStore
+		members    httpapi.MemberStore
 	)
 	if cfg.OIDC.Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -95,15 +96,17 @@ func runServe() error {
 		}
 		oidcClient = provider
 		sessions = pgStore
+		members = pgStore
 		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
 	}
 
-	// 鉴权和会话都直接用 pgStore，缓存不参与身份校验。
+	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
 	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, httpapi.ConsoleOptions{
 		Keys:       pgStore,
 		Authorizer: identity.NewMapAuthorizer(),
 		OIDC:       oidcClient,
 		Sessions:   sessions,
+		Members:    members,
 	})
 	/*
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。

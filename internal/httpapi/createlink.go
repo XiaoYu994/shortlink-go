@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -141,18 +142,22 @@ readSmallBody 读取创建和修改共用的请求体，并限制大小。
 不会只解析第一个 JSON 值就把没读的尾巴放过去。
 */
 func (s *Server) readSmallBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	return readSmallRequestBody(s.logger, w, r)
+}
+
+func readSmallRequestBody(logger *slog.Logger, w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBodyBytes))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		if s.clientGone(r) {
+		if isClientGone(logger, r) {
 			return nil, false
 		}
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			s.writeError(r.Context(), w, http.StatusRequestEntityTooLarge, "request body too large")
+			writeErrorResponse(logger, r.Context(), w, http.StatusRequestEntityTooLarge, "request body too large")
 			return nil, false
 		}
-		s.logger.ErrorContext(r.Context(), "read request body", "err", err)
-		s.writeError(r.Context(), w, http.StatusBadRequest, "read request body")
+		logger.ErrorContext(r.Context(), "read request body", "err", err)
+		writeErrorResponse(logger, r.Context(), w, http.StatusBadRequest, "read request body")
 		return nil, false
 	}
 	return body, true
