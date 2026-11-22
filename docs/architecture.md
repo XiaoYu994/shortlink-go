@@ -28,7 +28,9 @@ shortlink/
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
-│   ├── httpapi/         # handler（含独立 authHandler、memberHandler）、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、GitHubClient、SessionStore、MemberStore
+│   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、/healthz、/readyz、/debug/pprof/、ClientIP、优雅启停与 JSON/错误写出
+│   ├── redirector/      # 公开跳转进程 HTTP 层：GET /r/{code}、点击记录与只读 LinkStore、ClickRecorder 接口
+│   ├── console/         # 管理进程 HTTP 层：authHandler、memberHandler、按租户限流、短链 CRUD 与统计；定义 LinkCreator、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、GitHubClient、SessionStore、MemberStore
 │   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、OIDC 与 GitHub OAuth 2.0 客户端、权限表与成员规则
 │   │   ├── fakegithub/  # 仅测试用：内存版 GitHub OAuth 2.0 与 REST API 提供方（不进入生产二进制）
 │   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
@@ -52,11 +54,13 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/redirector -> httpapi, postgres, storemetrics, cache, click, config
-cmd/console    -> httpapi, identity, postgres, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令还要 cache
+cmd/redirector -> redirector, httpx, postgres, storemetrics, cache, click, config
+cmd/console    -> console, httpx, identity, link, postgres, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令还要 cache
 cmd/migrate    -> golang-migrate
-config         -> postgres
-httpapi        -> link, click, idgen, identity, tenant, golang.org/x/time/rate
+config         -> postgres, cache
+redirector     -> httpx, link, click, idgen, Prometheus
+console        -> httpx, link, click, idgen, identity, tenant, golang.org/x/time/rate, Prometheus
+httpx          -> 标准库、Prometheus
 identity       -> tenant, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
 postgres       -> link, click, idgen, identity, tenant
 memorystore    -> link, idgen
@@ -67,7 +71,7 @@ link           -> 标准库
 idgen          -> 标准库
 ```
 
-`LinkStore` 接口定义在 `httpapi`（使用方），内存版和 PostgreSQL 版都隐式实现它。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 也定义在 `httpapi`，分别由 `postgres.Store`、`identity.OIDCProvider`、`identity.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
+`redirector.LinkStore` 与 `console.Store` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`identity.OIDCProvider`、`identity.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
 
 ## 请求流程
 
@@ -153,7 +157,7 @@ GET /api/v1/links/{code}/stats
 
 ## 配置
 
-`config.LoadConfig` 在启动时读取并校验：
+`config.LoadRedirectorConfig` 与 `config.LoadConsoleConfig` 分别在启动时加载共用基础配置与各自进程的专属配置并校验：
 
 - `ADDR`：跳转进程的监听地址，默认 `:8080`
 - `CONSOLE_ADDR`：管理进程的监听地址，默认 `:8081`。不读 `ADDR`，避免和跳转进程抢同一个端口

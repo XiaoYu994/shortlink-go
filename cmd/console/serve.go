@@ -25,11 +25,10 @@ import (
 )
 
 func runServe() error {
-	cfg, err := config.LoadConfig()
+	cfg, err := config.LoadConsoleConfig()
 	if err != nil {
 		return err
 	}
-	cfg.Addr = config.ConsoleAddr()
 	logger := cfg.NewLogger(os.Stdout)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -111,7 +110,7 @@ func runServe() error {
 initAuthProviders 按配置初始化可选的 OIDC 与 GitHub 登录提供方。
 返回值保持接口类型，只在启用时赋值，避免把带类型的 nil 指针放进 console.Options。
 */
-func initAuthProviders(cfg config.Config, logger *slog.Logger) (console.OIDCClient, console.GitHubClient, error) {
+func initAuthProviders(cfg config.ConsoleConfig, logger *slog.Logger) (console.OIDCClient, console.GitHubClient, error) {
 	var (
 		oidcClient   console.OIDCClient
 		githubClient console.GitHubClient

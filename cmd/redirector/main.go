@@ -39,12 +39,9 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.LoadConfig()
+	cfg, err := config.LoadRedirectorConfig()
 	if err != nil {
 		return err
-	}
-	if cfg.VisitorSalt == "" {
-		return errors.New("VISITOR_SALT is required")
 	}
 	logger := cfg.NewLogger(os.Stdout)
 

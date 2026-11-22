@@ -10,27 +10,11 @@ import (
 	"shortlink/internal/postgres"
 )
 
-func TestConsoleAddr(t *testing.T) {
-	t.Run("prefers CONSOLE_ADDR", func(t *testing.T) {
-		t.Setenv("CONSOLE_ADDR", ":18081")
-		t.Setenv("ADDR", ":8080")
-		if got := ConsoleAddr(); got != ":18081" {
-			t.Fatalf("ConsoleAddr() = %q, want :18081", got)
-		}
-	})
-	t.Run("console default ignores ADDR", func(t *testing.T) {
-		t.Setenv("CONSOLE_ADDR", "")
-		t.Setenv("ADDR", ":8080")
-		if got := ConsoleAddr(); got != ":8081" {
-			t.Fatalf("ConsoleAddr() = %q, want :8081", got)
-		}
-	})
-}
-
-func TestLoadConfig(t *testing.T) {
-	// make test 会导出 .env。每个子测试都要把 LoadConfig 读取的变量设一遍，空字符串表示未配置。
-	base := map[string]string{
+func baseTestEnv() map[string]string {
+	// make test 会导出 .env。每个子测试都要把读取的变量设一遍，空字符串表示未配置。
+	return map[string]string{
 		"ADDR":                   "",
+		"CONSOLE_ADDR":           "",
 		"DATABASE_URL":           "postgres://localhost/shortlink",
 		"DB_MAX_OPEN_CONNS":      "",
 		"DB_MAX_IDLE_CONNS":      "",
@@ -42,7 +26,7 @@ func TestLoadConfig(t *testing.T) {
 		"CACHE_MISS_CONCURRENCY": "",
 		"CACHE_FETCH_TIMEOUT":    "",
 		"REDIS_URL":              "redis://localhost:6379/0",
-		"VISITOR_SALT":           "",
+		"VISITOR_SALT":           "test-salt",
 		"TRUST_PROXY_HEADERS":    "",
 		"LOG_LEVEL":              "",
 		"LOG_FORMAT":             "",
@@ -55,8 +39,11 @@ func TestLoadConfig(t *testing.T) {
 		"GITHUB_CLIENT_SECRET":   "",
 		"GITHUB_REDIRECT_URL":    "",
 	}
-	defaults := Config{
-		Addr:                 defaultAddr,
+}
+
+func defaultBaseConfig(addr string) BaseConfig {
+	return BaseConfig{
+		Addr:                 addr,
 		DatabaseURL:          "postgres://localhost/shortlink",
 		RedisURL:             "redis://localhost:6379/0",
 		Pool:                 postgres.DefaultPoolConfig(),
@@ -68,11 +55,19 @@ func TestLoadConfig(t *testing.T) {
 		CacheMissConcurrency: defaultCacheMissConcurrency,
 		CacheFetchTimeout:    defaultCacheFetchTimeout,
 	}
+}
+
+func TestLoadRedirectorConfig(t *testing.T) {
+	base := baseTestEnv()
+	defaults := RedirectorConfig{
+		BaseConfig:  defaultBaseConfig(defaultRedirectorAddr),
+		VisitorSalt: "test-salt",
+	}
 
 	tests := []struct {
 		name    string
 		env     map[string]string
-		want    Config
+		want    RedirectorConfig
 		wantErr string
 	}{
 		{name: "defaults", want: defaults},
@@ -91,28 +86,30 @@ func TestLoadConfig(t *testing.T) {
 				"CACHE_MISS_CONCURRENCY": "4",
 				"CACHE_FETCH_TIMEOUT":    "500ms",
 				"REDIS_URL":              "rediss://user:pass@redis:6380/1",
-				"VISITOR_SALT":           "test-salt",
+				"VISITOR_SALT":           "prod-salt",
 				"TRUST_PROXY_HEADERS":    "true",
 				"LOG_FORMAT":             "json",
 			},
-			want: Config{
-				Addr:        ":9090",
-				DatabaseURL: "postgres://user:pass@db:5432/shortlink?sslmode=disable",
-				RedisURL:    "rediss://user:pass@redis:6380/1",
-				Pool: postgres.PoolConfig{
-					MaxOpenConns:    20,
-					MaxIdleConns:    4,
-					ConnMaxLifetime: 90 * time.Minute,
-					ConnMaxIdleTime: 5 * time.Minute,
+			want: RedirectorConfig{
+				BaseConfig: BaseConfig{
+					Addr:        ":9090",
+					DatabaseURL: "postgres://user:pass@db:5432/shortlink?sslmode=disable",
+					RedisURL:    "rediss://user:pass@redis:6380/1",
+					Pool: postgres.PoolConfig{
+						MaxOpenConns:    20,
+						MaxIdleConns:    4,
+						ConnMaxLifetime: 90 * time.Minute,
+						ConnMaxIdleTime: 5 * time.Minute,
+					},
+					RequestTimeout:       2 * time.Second,
+					ShutdownTimeout:      15 * time.Second,
+					DrainDelay:           3 * time.Second,
+					LogFormat:            logFormatJSON,
+					CacheMissConcurrency: 4,
+					CacheFetchTimeout:    500 * time.Millisecond,
 				},
-				RequestTimeout:       2 * time.Second,
-				ShutdownTimeout:      15 * time.Second,
-				DrainDelay:           3 * time.Second,
-				LogFormat:            logFormatJSON,
-				CacheMissConcurrency: 4,
-				CacheFetchTimeout:    500 * time.Millisecond,
-				VisitorSalt:          "test-salt",
-				TrustProxyHeaders:    true,
+				VisitorSalt:       "prod-salt",
+				TrustProxyHeaders: true,
 			},
 		},
 		{
@@ -121,19 +118,12 @@ func TestLoadConfig(t *testing.T) {
 				"REDIS_URL": "rediss://redis.example.com:6380/2",
 				"LOG_LEVEL": "debug",
 			},
-			want: Config{
-				Addr:                 defaultAddr,
-				DatabaseURL:          "postgres://localhost/shortlink",
-				RedisURL:             "rediss://redis.example.com:6380/2",
-				Pool:                 postgres.DefaultPoolConfig(),
-				RequestTimeout:       defaultRequestTimeout,
-				ShutdownTimeout:      defaultShutdownTimeout,
-				DrainDelay:           defaultDrainDelay,
-				LogLevel:             slog.LevelDebug,
-				LogFormat:            logFormatText,
-				CacheMissConcurrency: defaultCacheMissConcurrency,
-				CacheFetchTimeout:    defaultCacheFetchTimeout,
-			},
+			want: func() RedirectorConfig {
+				c := defaults
+				c.RedisURL = "rediss://redis.example.com:6380/2"
+				c.LogLevel = slog.LevelDebug
+				return c
+			}(),
 		},
 		{
 			name: "idle conns equal open conns",
@@ -141,50 +131,44 @@ func TestLoadConfig(t *testing.T) {
 				"DB_MAX_OPEN_CONNS": "10",
 				"DB_MAX_IDLE_CONNS": "10",
 			},
-			want: Config{
-				Addr:        defaultAddr,
-				DatabaseURL: "postgres://localhost/shortlink",
-				RedisURL:    "redis://localhost:6379/0",
-				Pool: postgres.PoolConfig{
-					MaxOpenConns:    10,
-					MaxIdleConns:    10,
-					ConnMaxLifetime: defaults.Pool.ConnMaxLifetime,
-					ConnMaxIdleTime: defaults.Pool.ConnMaxIdleTime,
-				},
-				RequestTimeout:       defaultRequestTimeout,
-				ShutdownTimeout:      defaultShutdownTimeout,
-				DrainDelay:           defaultDrainDelay,
-				LogFormat:            logFormatText,
-				CacheMissConcurrency: defaultCacheMissConcurrency,
-				CacheFetchTimeout:    defaultCacheFetchTimeout,
-			},
+			want: func() RedirectorConfig {
+				c := defaults
+				c.Pool.MaxOpenConns = 10
+				c.Pool.MaxIdleConns = 10
+				return c
+			}(),
 		},
 		{
 			name: "zero drain delay",
 			env:  map[string]string{"DRAIN_DELAY": "0s"},
-			want: Config{
-				Addr:                 defaultAddr,
-				DatabaseURL:          "postgres://localhost/shortlink",
-				RedisURL:             "redis://localhost:6379/0",
-				Pool:                 postgres.DefaultPoolConfig(),
-				RequestTimeout:       defaultRequestTimeout,
-				ShutdownTimeout:      defaultShutdownTimeout,
-				DrainDelay:           0,
-				LogLevel:             slog.LevelInfo,
-				LogFormat:            logFormatText,
-				CacheMissConcurrency: defaultCacheMissConcurrency,
-				CacheFetchTimeout:    defaultCacheFetchTimeout,
+			want: func() RedirectorConfig {
+				c := defaults
+				c.DrainDelay = 0
+				return c
+			}(),
+		},
+		{
+			name: "ignores invalid console oauth env",
+			env: map[string]string{
+				"OIDC_ISSUER":      "not-a-url",
+				"GITHUB_CLIENT_ID": "partial-only",
 			},
+			want: defaults,
 		},
 		{
 			name: "pprof on loopback",
 			env:  map[string]string{"PPROF_ADDR": "127.0.0.1:6060"},
-			want: func() Config { c := defaults; c.PprofAddr = "127.0.0.1:6060"; return c }(),
+			want: func() RedirectorConfig { c := defaults; c.PprofAddr = "127.0.0.1:6060"; return c }(),
 		},
 		{
 			name: "pprof on localhost",
 			env:  map[string]string{"PPROF_ADDR": "localhost:6060"},
-			want: func() Config { c := defaults; c.PprofAddr = "localhost:6060"; return c }(),
+			want: func() RedirectorConfig { c := defaults; c.PprofAddr = "localhost:6060"; return c }(),
+		},
+		{
+			name:    "missing visitor salt",
+			env:     map[string]string{"VISITOR_SALT": ""},
+			wantErr: "VISITOR_SALT is required",
 		},
 		{
 			name:    "pprof on all interfaces",
@@ -307,6 +291,65 @@ func TestLoadConfig(t *testing.T) {
 			},
 			wantErr: "CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT",
 		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			applyEnv(t, base, tt.env)
+
+			got, err := LoadRedirectorConfig()
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("LoadRedirectorConfig() error = nil, want substring %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("LoadRedirectorConfig() error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadRedirectorConfig() returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("LoadRedirectorConfig() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConsoleConfig(t *testing.T) {
+	base := baseTestEnv()
+	base["VISITOR_SALT"] = ""
+	defaults := ConsoleConfig{
+		BaseConfig: defaultBaseConfig(defaultConsoleAddr),
+	}
+
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    ConsoleConfig
+		wantErr string
+	}{
+		{
+			name: "defaults ignore ADDR and do not require VISITOR_SALT",
+			env: map[string]string{
+				"ADDR":       ":8080",
+				"PPROF_ADDR": "0.0.0.0:6060",
+			},
+			want: defaults,
+		},
+		{
+			name: "prefers CONSOLE_ADDR",
+			env: map[string]string{
+				"CONSOLE_ADDR": ":18081",
+				"ADDR":         ":8080",
+			},
+			want: func() ConsoleConfig {
+				c := defaults
+				c.Addr = ":18081"
+				return c
+			}(),
+		},
 		{
 			name: "oidc all set",
 			env: map[string]string{
@@ -315,7 +358,7 @@ func TestLoadConfig(t *testing.T) {
 				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
 				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/callback",
 			},
-			want: func() Config {
+			want: func() ConsoleConfig {
 				c := defaults
 				c.OIDC = OIDCConfig{
 					Issuer:       "http://127.0.0.1:5556/dex",
@@ -371,7 +414,7 @@ func TestLoadConfig(t *testing.T) {
 				"GITHUB_CLIENT_SECRET": "gh-secret",
 				"GITHUB_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/github/callback",
 			},
-			want: func() Config {
+			want: func() ConsoleConfig {
 				c := defaults
 				c.GitHub = GitHubConfig{
 					ClientID:     "gh-client",
@@ -408,7 +451,7 @@ func TestLoadConfig(t *testing.T) {
 				"GITHUB_CLIENT_SECRET": "gh-secret",
 				"GITHUB_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/github/callback",
 			},
-			want: func() Config {
+			want: func() ConsoleConfig {
 				c := defaults
 				c.OIDC = OIDCConfig{
 					Issuer:       "http://127.0.0.1:5556/dex",
@@ -430,21 +473,21 @@ func TestLoadConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			applyEnv(t, base, tt.env)
 
-			got, err := LoadConfig()
+			got, err := LoadConsoleConfig()
 			if tt.wantErr != "" {
 				if err == nil {
-					t.Fatalf("LoadConfig() error = nil, want substring %q", tt.wantErr)
+					t.Fatalf("LoadConsoleConfig() error = nil, want substring %q", tt.wantErr)
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Errorf("LoadConfig() error = %q, want substring %q", err.Error(), tt.wantErr)
+					t.Errorf("LoadConsoleConfig() error = %q, want substring %q", err.Error(), tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("LoadConfig() returned error: %v", err)
+				t.Fatalf("LoadConsoleConfig() returned error: %v", err)
 			}
 			if got != tt.want {
-				t.Errorf("LoadConfig() = %+v, want %+v", got, tt.want)
+				t.Errorf("LoadConsoleConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -452,7 +495,7 @@ func TestLoadConfig(t *testing.T) {
 
 func TestNewLoggerFormat(t *testing.T) {
 	var buf bytes.Buffer
-	cfg := Config{LogLevel: slog.LevelInfo, LogFormat: logFormatJSON}
+	cfg := BaseConfig{LogLevel: slog.LevelInfo, LogFormat: logFormatJSON}
 	cfg.NewLogger(&buf).Info("listening", "addr", ":8080")
 	if !strings.Contains(buf.String(), `"msg":"listening"`) {
 		t.Fatalf("json log = %q", buf.String())

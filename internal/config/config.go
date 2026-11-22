@@ -1,9 +1,9 @@
 /*
 Package config 从环境变量加载进程配置，并在启动时校验。
 
-未设置的可选项使用默认值。缺少 DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、摘流等待、日志格式、回源保护参数、剖析地址、OIDC 或 GitHub OAuth 配置不合法时，LoadConfig 返回错误，
-由 main 终止启动。
+两个 HTTP 进程共用 BaseConfig（数据库、Redis、连接池、超时、日志与缓存回源保护），
+再分别通过 LoadRedirectorConfig 和 LoadConsoleConfig 读取并校验各自的专属配置。
+缺少必填项或任一参数不合法时直接返回错误，由 main 终止启动。
 */
 package config
 
@@ -23,14 +23,14 @@ import (
 )
 
 const (
-	defaultAddr        = ":8080"
-	defaultConsoleAddr = ":8081"
+	defaultRedirectorAddr = ":8080"
+	defaultConsoleAddr    = ":8081"
 	// defaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
 	defaultShutdownTimeout = 10 * time.Second
 	// defaultDrainDelay 与 docker-compose.yml 里健康检查的 interval 一致，盖住一个探测周期。
 	defaultDrainDelay = 5 * time.Second
 	/*
-		defaultRequestTimeout 是单个请求的处理时限。main 让读写超时比它宽松，
+		defaultRequestTimeout 是单个请求的处理时限。httpx.Serve 让读写超时比它宽松，
 		保证读完 body，并在超时后还有时间把 504 写回客户端。
 	*/
 	defaultRequestTimeout = 5 * time.Second
@@ -44,10 +44,10 @@ const (
 )
 
 /*
-Config 是进程启动需要的配置。
+BaseConfig 是 redirector 和 console 两个 HTTP 进程共用的启动配置。
 Pool 的默认值来自 postgres.DefaultPoolConfig，环境变量只覆盖显式设置的项。
 */
-type Config struct {
+type BaseConfig struct {
 	Addr            string // HTTP 监听地址，例如 :8080
 	DatabaseURL     string // PostgreSQL 连接串
 	RedisURL        string // Redis 连接串，支持密码、TLS（rediss://）和 DB 编号
@@ -67,10 +67,16 @@ type Config struct {
 	CacheMissConcurrency int
 	// CacheFetchTimeout 是单次回源超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
 	CacheFetchTimeout time.Duration
+}
+
+// RedirectorConfig 是公开跳转进程（cmd/redirector）的完整启动配置。
+type RedirectorConfig struct {
+	BaseConfig
 
 	/*
 		VisitorSalt 是按天访客哈希的 HMAC 密钥。redirector 启动时要求非空；
-		console 不用盐。盐不能提交到仓库，生产从密钥管理注入。
+		为空时不记访客会导致 UV 一直是 0，与其静默降级不如启动失败。
+		盐不能提交到仓库，生产从密钥管理注入。
 	*/
 	VisitorSalt string
 	/*
@@ -78,24 +84,25 @@ type Config struct {
 		最左一段在代理追加头时可以由客户端伪造。只能开在可信反向代理后面。
 	*/
 	TrustProxyHeaders bool
-
 	/*
 		PprofAddr 是剖析端点的监听地址，为空时不开（默认）。
 		只接受回环地址：剖析数据里有堆内容，端点也没有鉴权。见 ADR 0013。
 	*/
 	PprofAddr string
+}
+
+// ConsoleConfig 是管理进程 HTTP 模式（cmd/console serve）的完整启动配置。
+type ConsoleConfig struct {
+	BaseConfig
 
 	/*
 		OIDC 是管理进程的 OIDC 登录配置（阶段 11、ADR 0018）。
 		四个字段要么全配，要么全空；全空时不挂 OIDC 登录路由。
-		redirector 忽略这组配置。
 	*/
 	OIDC OIDCConfig
-
 	/*
 		GitHub 是管理进程的 GitHub OAuth 2.0 登录配置（阶段 11、ADR 0018）。
 		三个字段要么全配，要么全空；可与 OIDC 独立启用或同时启用。
-		redirector 忽略这组配置。
 	*/
 	GitHub GitHubConfig
 }
@@ -126,16 +133,74 @@ func (c GitHubConfig) Enabled() bool {
 }
 
 /*
-LoadConfig 从环境变量读取进程配置。
-未设置的可选项使用默认值；DATABASE_URL、REDIS_URL、数值或时长无法解析、
-连接池参数、请求超时、关机超时、摘流等待、日志格式、回源保护参数、剖析地址、OIDC 或 GitHub 配置不合法时返回错误。
-
-REDIS_URL 是完整的连接串：redis://localhost:6379/0，没有密码也可以；
-需要 TLS 用 rediss://，需要密码和 DB 编号就写进 URL。
+LoadRedirectorConfig 加载并校验跳转进程配置。
+监听地址只读 ADDR（默认 :8080）；VISITOR_SALT 必填；PPROF_ADDR 若设置必须是回环地址。
+不读取 OIDC_* 或 GITHUB_*。
 */
-func LoadConfig() (Config, error) {
-	cfg := Config{
-		Addr:                 defaultAddr,
+func LoadRedirectorConfig() (RedirectorConfig, error) {
+	base, err := loadBaseConfig(envString("ADDR", defaultRedirectorAddr))
+	if err != nil {
+		return RedirectorConfig{}, err
+	}
+
+	cfg := RedirectorConfig{
+		BaseConfig:  base,
+		VisitorSalt: os.Getenv("VISITOR_SALT"),
+		PprofAddr:   os.Getenv("PPROF_ADDR"),
+	}
+	if cfg.VisitorSalt == "" {
+		return RedirectorConfig{}, errors.New("VISITOR_SALT is required")
+	}
+	if raw := os.Getenv("TRUST_PROXY_HEADERS"); raw != "" {
+		trust, err := strconv.ParseBool(raw)
+		if err != nil {
+			return RedirectorConfig{}, fmt.Errorf("TRUST_PROXY_HEADERS: %w", err)
+		}
+		cfg.TrustProxyHeaders = trust
+	}
+	if cfg.PprofAddr != "" && !isLoopbackAddr(cfg.PprofAddr) {
+		return RedirectorConfig{}, errors.New("PPROF_ADDR must be a loopback address such as 127.0.0.1:6060")
+	}
+	return cfg, nil
+}
+
+/*
+LoadConsoleConfig 加载并校验管理进程 HTTP 模式配置。
+监听地址只读 CONSOLE_ADDR（默认 :8081），不读 ADDR，避免和跳转进程抢同一个端口。
+不要求 VISITOR_SALT，也不读取 PPROF_ADDR。
+*/
+func LoadConsoleConfig() (ConsoleConfig, error) {
+	base, err := loadBaseConfig(envString("CONSOLE_ADDR", defaultConsoleAddr))
+	if err != nil {
+		return ConsoleConfig{}, err
+	}
+
+	cfg := ConsoleConfig{
+		BaseConfig: base,
+		OIDC: OIDCConfig{
+			Issuer:       os.Getenv("OIDC_ISSUER"),
+			ClientID:     os.Getenv("OIDC_CLIENT_ID"),
+			ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
+			RedirectURL:  os.Getenv("OIDC_REDIRECT_URL"),
+		},
+		GitHub: GitHubConfig{
+			ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+			RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
+		},
+	}
+	if err := validateOIDC(cfg.OIDC); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if err := validateGitHub(cfg.GitHub); err != nil {
+		return ConsoleConfig{}, err
+	}
+	return cfg, nil
+}
+
+func loadBaseConfig(addr string) (BaseConfig, error) {
+	cfg := BaseConfig{
+		Addr:                 addr,
 		Pool:                 postgres.DefaultPoolConfig(),
 		RequestTimeout:       defaultRequestTimeout,
 		ShutdownTimeout:      defaultShutdownTimeout,
@@ -146,105 +211,65 @@ func LoadConfig() (Config, error) {
 		CacheFetchTimeout:    defaultCacheFetchTimeout,
 	}
 
-	if addr := os.Getenv("ADDR"); addr != "" {
-		cfg.Addr = addr
-	}
-
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
 	if cfg.DatabaseURL == "" {
-		return Config{}, errors.New("DATABASE_URL is required")
+		return BaseConfig{}, errors.New("DATABASE_URL is required")
 	}
 	cfg.RedisURL = os.Getenv("REDIS_URL")
 	if cfg.RedisURL == "" {
-		return Config{}, errors.New("REDIS_URL is required")
-	}
-	cfg.VisitorSalt = os.Getenv("VISITOR_SALT")
-	if raw := os.Getenv("TRUST_PROXY_HEADERS"); raw != "" {
-		trust, err := strconv.ParseBool(raw)
-		if err != nil {
-			return Config{}, fmt.Errorf("TRUST_PROXY_HEADERS: %w", err)
-		}
-		cfg.TrustProxyHeaders = trust
-	}
-	cfg.PprofAddr = os.Getenv("PPROF_ADDR")
-	cfg.OIDC = OIDCConfig{
-		Issuer:       os.Getenv("OIDC_ISSUER"),
-		ClientID:     os.Getenv("OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("OIDC_REDIRECT_URL"),
-	}
-	cfg.GitHub = GitHubConfig{
-		ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
-		ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
+		return BaseConfig{}, errors.New("REDIS_URL is required")
 	}
 	if level := os.Getenv("LOG_LEVEL"); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
-			return Config{}, fmt.Errorf("LOG_LEVEL: %w", err)
+			return BaseConfig{}, fmt.Errorf("LOG_LEVEL: %w", err)
 		}
 	}
 	format, err := parseLogFormat(os.Getenv("LOG_FORMAT"))
 	if err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	cfg.LogFormat = format
 
 	if cfg.Pool.MaxOpenConns, err = envInt("DB_MAX_OPEN_CONNS", cfg.Pool.MaxOpenConns); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.Pool.MaxIdleConns, err = envInt("DB_MAX_IDLE_CONNS", cfg.Pool.MaxIdleConns); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.Pool.ConnMaxLifetime, err = envDuration("DB_CONN_MAX_LIFETIME", cfg.Pool.ConnMaxLifetime); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.Pool.ConnMaxIdleTime, err = envDuration("DB_CONN_MAX_IDLE_TIME", cfg.Pool.ConnMaxIdleTime); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.RequestTimeout, err = envDuration("REQUEST_TIMEOUT", cfg.RequestTimeout); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.ShutdownTimeout, err = envDuration("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.DrainDelay, err = envDuration("DRAIN_DELAY", cfg.DrainDelay); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.CacheMissConcurrency, err = envInt("CACHE_MISS_CONCURRENCY", cfg.CacheMissConcurrency); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 	if cfg.CacheFetchTimeout, err = envDuration("CACHE_FETCH_TIMEOUT", cfg.CacheFetchTimeout); err != nil {
-		return Config{}, err
+		return BaseConfig{}, err
 	}
 
-	if err := validate(cfg); err != nil {
-		return Config{}, err
+	if err := validateBase(cfg); err != nil {
+		return BaseConfig{}, err
 	}
 	return cfg, nil
 }
 
 /*
-ConsoleAddr 是管理进程的监听地址。
-只认 CONSOLE_ADDR，没设时用 :8081，不读 ADDR。
-ADDR 是跳转进程的端口，管理进程再读它就会和跳转进程抢同一个端口。
-*/
-func ConsoleAddr() string {
-	return ownAddr("CONSOLE_ADDR", defaultConsoleAddr)
-}
-
-func ownAddr(name, fallback string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return fallback
-}
-
-/*
 NewLogger 按 LOG_FORMAT 构造日志。调用前格式已经校验过。
 text 方便在终端里读；json 给生产采集。这里只认 json，其余按 text，
-避免 LoadConfig 之外的调用方因为拼写把进程打成没日志。
+避免配置加载之外的调用方因为拼写把进程打成没日志。
 */
-func (cfg Config) NewLogger(w io.Writer) *slog.Logger {
+func (cfg BaseConfig) NewLogger(w io.Writer) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
 	var handler slog.Handler
 	if cfg.LogFormat == logFormatJSON {
@@ -266,7 +291,7 @@ func parseLogFormat(raw string) (string, error) {
 	}
 }
 
-func validate(cfg Config) error {
+func validateBase(cfg BaseConfig) error {
 	if cfg.Pool.MaxOpenConns <= 0 {
 		return errors.New("DB_MAX_OPEN_CONNS must be positive")
 	}
@@ -294,45 +319,25 @@ func validate(cfg Config) error {
 	if cfg.CacheFetchTimeout > cfg.RequestTimeout {
 		return errors.New("CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT")
 	}
-	if cfg.PprofAddr != "" && !isLoopbackAddr(cfg.PprofAddr) {
-		return errors.New("PPROF_ADDR must be a loopback address such as 127.0.0.1:6060")
-	}
-	if err := validateOIDC(cfg.OIDC); err != nil {
-		return err
-	}
-	if err := validateGitHub(cfg.GitHub); err != nil {
-		return err
-	}
 	return nil
 }
 
 func validateOIDC(c OIDCConfig) error {
-	set := 0
-	for _, v := range []string{c.Issuer, c.ClientID, c.ClientSecret, c.RedirectURL} {
-		if v != "" {
-			set++
-		}
-	}
+	set := countNonEmpty(c.Issuer, c.ClientID, c.ClientSecret, c.RedirectURL)
 	if set == 0 {
 		return nil
 	}
 	if set != 4 {
 		return errors.New("OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty")
 	}
-	issuer, err := url.Parse(c.Issuer)
-	if err != nil || (issuer.Scheme != "http" && issuer.Scheme != "https") || issuer.Host == "" || issuer.RawQuery != "" || issuer.Fragment != "" {
-		return fmt.Errorf("OIDC_ISSUER must be a valid http or https URL without query or fragment, got %q", c.Issuer)
+	if err := validateIssuerURL("OIDC_ISSUER", c.Issuer); err != nil {
+		return err
 	}
 	return validateRedirectURL("OIDC_REDIRECT_URL", c.RedirectURL)
 }
 
 func validateGitHub(c GitHubConfig) error {
-	set := 0
-	for _, v := range []string{c.ClientID, c.ClientSecret, c.RedirectURL} {
-		if v != "" {
-			set++
-		}
-	}
+	set := countNonEmpty(c.ClientID, c.ClientSecret, c.RedirectURL)
 	if set == 0 {
 		return nil
 	}
@@ -342,12 +347,37 @@ func validateGitHub(c GitHubConfig) error {
 	return validateRedirectURL("GITHUB_REDIRECT_URL", c.RedirectURL)
 }
 
+func countNonEmpty(values ...string) int {
+	n := 0
+	for _, v := range values {
+		if v != "" {
+			n++
+		}
+	}
+	return n
+}
+
+func validateIssuerURL(envName, raw string) error {
+	u, err := parseHTTPURL(raw)
+	if err != nil || u.RawQuery != "" {
+		return fmt.Errorf("%s must be a valid http or https URL without query or fragment, got %q", envName, raw)
+	}
+	return nil
+}
+
 func validateRedirectURL(envName, raw string) error {
-	redirect, err := url.Parse(raw)
-	if err != nil || (redirect.Scheme != "http" && redirect.Scheme != "https") || redirect.Host == "" || redirect.Fragment != "" {
+	if _, err := parseHTTPURL(raw); err != nil {
 		return fmt.Errorf("%s must be a valid http or https URL, got %q", envName, raw)
 	}
 	return nil
+}
+
+func parseHTTPURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
+		return nil, errors.New("invalid http url")
+	}
+	return u, nil
 }
 
 /*
@@ -365,6 +395,13 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func envString(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // envInt 读取整数环境变量。变量未设置时返回 def，调用方可以先放上默认值再覆盖。
