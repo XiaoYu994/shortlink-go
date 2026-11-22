@@ -39,7 +39,7 @@ func (allowKey) Authenticate(_ context.Context, token string) (identity.Principa
 			Scopes:    identity.AllAPIKeyScopes(),
 		}, nil
 	}
-	return identity.Principal{}, tenant.ErrUnauthenticated
+	return identity.Principal{}, identity.ErrUnauthenticated
 }
 
 func authorize(req *http.Request) {

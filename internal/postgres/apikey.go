@@ -93,7 +93,7 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 		return IssuedAPIKey{}, err
 	}
 
-	plaintext, hash, err := tenant.GenerateAPIKey()
+	plaintext, hash, err := identity.APIKeyToken.Generate()
 	if err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}

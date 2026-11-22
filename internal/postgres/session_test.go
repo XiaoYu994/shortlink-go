@@ -27,7 +27,7 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first CreateSessionForOIDC: %v", err)
 	}
-	if !identity.ValidSessionToken(first.Token) {
+	if !identity.SessionToken.Valid(first.Token) {
 		t.Fatalf("first token %q is not a valid session token", first.Token)
 	}
 	if first.User.ID <= 0 || first.User.Email != "alice@example.com" || first.User.Name != "Alice" {
@@ -46,7 +46,7 @@ func TestCreateSessionForOIDCFirstAndRepeatLogin(t *testing.T) {
 	).Scan(&storedHash); err != nil {
 		t.Fatalf("select session hash: %v", err)
 	}
-	if !bytes.Equal(storedHash, identity.HashSessionToken(first.Token)) {
+	if !bytes.Equal(storedHash, identity.HashToken(first.Token)) {
 		t.Fatal("stored token_hash does not match SHA-256 of plaintext token")
 	}
 
@@ -332,9 +332,9 @@ func TestAuthenticateSessionForOrg(t *testing.T) {
 	); err != nil {
 		t.Fatalf("re-insert membership: %v", err)
 	}
-	unknownToken, _, err := identity.GenerateSessionToken()
+	unknownToken, _, err := identity.SessionToken.Generate()
 	if err != nil {
-		t.Fatalf("GenerateSessionToken: %v", err)
+		t.Fatalf("SessionToken.Generate: %v", err)
 	}
 	for _, badToken := range []string{"", "not-a-token", unknownToken} {
 		if _, err := store.AuthenticateSessionForOrg(ctx, badToken, tenantID); !errors.Is(err, identity.ErrUnauthenticated) {

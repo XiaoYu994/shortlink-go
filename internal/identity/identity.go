@@ -1,5 +1,6 @@
 /*
-Package identity 定义管理请求的认证主体（Principal）、会话令牌、OIDC 客户端与权限授权实现（阶段 11、ADR 0018）。
+Package identity 定义管理请求的认证主体（Principal）、API Key 与会话令牌格式/哈希、
+OIDC 客户端、权限授权实现与组织成员管理规则（阶段 11、ADR 0018/0019）。
 
 人与 API Key 是两种凭证，鉴权后统一写成 context 里的 Principal，
 handler 只读 Principal 并通过 Authorizer 检查权限。
@@ -19,6 +20,8 @@ import (
 )
 
 var (
+	// ErrUnauthenticated 表示 API Key 或会话令牌格式非法、不存在、已过期或已吊销。HTTP 层映射成 401。
+	ErrUnauthenticated = errors.New("unauthenticated")
 	// ErrInvalidAPIKeyScope 表示 API Key 的 scope 列表为空，或包含不允许的权限值。
 	ErrInvalidAPIKeyScope = errors.New("invalid api key scope")
 	// ErrInvalidRole 表示组织角色不是系统允许的枚举值。

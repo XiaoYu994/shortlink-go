@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"shortlink/internal/identity"
-	"shortlink/internal/tenant"
 )
 
 func TestIssueAPIKeyRejectsBadParams(t *testing.T) {
@@ -93,7 +92,7 @@ func TestIssueListRevokeAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueAPIKey: %v", err)
 	}
-	if !tenant.ValidToken(issued.Plaintext) {
+	if !identity.APIKeyToken.Valid(issued.Plaintext) {
 		t.Fatalf("plaintext %q is not a valid token", issued.Plaintext)
 	}
 	if issued.Tenant.ExternalID != "platform-1" {
@@ -167,14 +166,14 @@ func TestIssueListRevokeAPIKey(t *testing.T) {
 		`UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = $1`, issued.Key.ID); err != nil {
 		t.Fatalf("expire key: %v", err)
 	}
-	if _, err := store.Authenticate(ctx, issued.Plaintext); !errors.Is(err, tenant.ErrUnauthenticated) {
+	if _, err := store.Authenticate(ctx, issued.Plaintext); !errors.Is(err, identity.ErrUnauthenticated) {
 		t.Fatalf("expired Authenticate error = %v, want ErrUnauthenticated", err)
 	}
 
 	if err := store.RevokeAPIKey(ctx, second.Key.ID); err != nil {
 		t.Fatalf("RevokeAPIKey: %v", err)
 	}
-	if _, err := store.Authenticate(ctx, second.Plaintext); !errors.Is(err, tenant.ErrUnauthenticated) {
+	if _, err := store.Authenticate(ctx, second.Plaintext); !errors.Is(err, identity.ErrUnauthenticated) {
 		t.Fatalf("revoked Authenticate error = %v, want ErrUnauthenticated", err)
 	}
 	if err := store.RevokeAPIKey(ctx, second.Key.ID); !errors.Is(err, ErrAPIKeyRevoked) {

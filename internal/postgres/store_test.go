@@ -14,7 +14,6 @@ import (
 	"shortlink/internal/identity"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
-	"shortlink/internal/tenant"
 )
 
 /*
@@ -228,9 +227,9 @@ func TestAuthenticate(t *testing.T) {
 	store, tenantID := newTestStore(t)
 	ctx := context.Background()
 
-	plaintext, hash, err := tenant.GenerateAPIKey()
+	plaintext, hash, err := identity.APIKeyToken.Generate()
 	if err != nil {
-		t.Fatalf("GenerateAPIKey: %v", err)
+		t.Fatalf("APIKeyToken.Generate: %v", err)
 	}
 	var keyID int64
 	if err := store.db.QueryRowContext(ctx,
@@ -250,14 +249,14 @@ func TestAuthenticate(t *testing.T) {
 		t.Errorf("Authenticate scopes = %v, want %v", got.Scopes, identity.AllAPIKeyScopes())
 	}
 
-	other, _, err := tenant.GenerateAPIKey()
+	other, _, err := identity.APIKeyToken.Generate()
 	if err != nil {
-		t.Fatalf("GenerateAPIKey: %v", err)
+		t.Fatalf("APIKeyToken.Generate: %v", err)
 	}
-	if _, err := store.Authenticate(ctx, other); !errors.Is(err, tenant.ErrUnauthenticated) {
+	if _, err := store.Authenticate(ctx, other); !errors.Is(err, identity.ErrUnauthenticated) {
 		t.Errorf("unknown key error = %v, want ErrUnauthenticated", err)
 	}
-	if _, err := store.Authenticate(ctx, "not-a-key"); !errors.Is(err, tenant.ErrUnauthenticated) {
+	if _, err := store.Authenticate(ctx, "not-a-key"); !errors.Is(err, identity.ErrUnauthenticated) {
 		t.Errorf("malformed key error = %v, want ErrUnauthenticated", err)
 	}
 }

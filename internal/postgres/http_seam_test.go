@@ -227,11 +227,11 @@ func TestHTTPOIDCLoginPersistsSession(t *testing.T) {
 	var storedUserID int64
 	if err := store.db.QueryRowContext(ctx,
 		`SELECT user_id, token_hash FROM sessions WHERE token_hash = $1`,
-		identity.HashSessionToken(firstToken),
+		identity.HashToken(firstToken),
 	).Scan(&storedUserID, &storedHash); err != nil {
 		t.Fatalf("lookup first session by hash: %v", err)
 	}
-	if storedUserID != firstUserID || !bytes.Equal(storedHash, identity.HashSessionToken(firstToken)) {
+	if storedUserID != firstUserID || !bytes.Equal(storedHash, identity.HashToken(firstToken)) {
 		t.Fatalf("stored session mismatch: user=%d", storedUserID)
 	}
 

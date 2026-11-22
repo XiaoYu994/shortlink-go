@@ -198,7 +198,7 @@ type principalKey map[string]identity.Principal
 func (k principalKey) Authenticate(_ context.Context, token string) (identity.Principal, error) {
 	p, ok := k[token]
 	if !ok {
-		return identity.Principal{}, tenant.ErrUnauthenticated
+		return identity.Principal{}, identity.ErrUnauthenticated
 	}
 	return p, nil
 }

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"shortlink/internal/identity"
-	"shortlink/internal/tenant"
 )
 
 const orgIDHeader = "X-Org-ID"
@@ -94,7 +93,7 @@ func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request, next
 		return
 	}
 	p, err := s.keys.Authenticate(r.Context(), token)
-	if errors.Is(err, tenant.ErrUnauthenticated) {
+	if errors.Is(err, identity.ErrUnauthenticated) {
 		s.writeUnauthorized(r, w)
 		return
 	}
@@ -142,7 +141,7 @@ func (s *Server) authenticateSession(w http.ResponseWriter, r *http.Request, nex
 		父域上的另一份子域可以种下 Domain 版 sl_session，浏览器会把两份都带上，
 		静默选中先出现的那份会把请求算进别人的组织。
 	*/
-	if len(cookies) != 1 || !identity.ValidSessionToken(cookies[0].Value) {
+	if len(cookies) != 1 || !identity.SessionToken.Valid(cookies[0].Value) {
 		s.writeSessionUnauthorized(r, w)
 		return
 	}
@@ -287,7 +286,7 @@ func bearerToken(header string) (string, bool) {
 		return "", false
 	}
 	token := header[len(scheme):]
-	if !tenant.ValidToken(token) {
+	if !identity.APIKeyToken.Valid(token) {
 		return "", false
 	}
 	return token, true

@@ -44,7 +44,7 @@ func (s *Store) CreateSessionForOIDC(ctx context.Context, id identity.OIDCIdenti
 		return identity.IssuedSession{}, err
 	}
 
-	token, hash, err := identity.GenerateSessionToken()
+	token, hash, err := identity.SessionToken.Generate()
 	if err != nil {
 		return identity.IssuedSession{}, fmt.Errorf("create session for oidc: generate token: %w", err)
 	}
@@ -216,7 +216,7 @@ func (s *Store) AuthenticateSessionForOrg(ctx context.Context, token string, org
 	if err := ctx.Err(); err != nil {
 		return identity.Principal{}, err
 	}
-	if !identity.ValidSessionToken(token) {
+	if !identity.SessionToken.Valid(token) {
 		return identity.Principal{}, identity.ErrUnauthenticated
 	}
 
@@ -238,7 +238,7 @@ LEFT JOIN tenants t ON t.id = m.tenant_id
 WHERE s.token_hash = $1
   AND s.revoked_at IS NULL
   AND s.expires_at > now()`,
-		identity.HashSessionToken(token), orgID,
+		identity.HashToken(token), orgID,
 	).Scan(&userID, &tenantID, &externalID, &rateLimit, &roleStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Principal{}, identity.ErrUnauthenticated
@@ -278,7 +278,7 @@ func (s *Store) GetSessionInfo(ctx context.Context, token string) (identity.Sess
 	if err := ctx.Err(); err != nil {
 		return identity.SessionInfo{}, err
 	}
-	if !identity.ValidSessionToken(token) {
+	if !identity.SessionToken.Valid(token) {
 		return identity.SessionInfo{}, identity.ErrUnauthenticated
 	}
 
@@ -302,7 +302,7 @@ JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1
   AND s.revoked_at IS NULL
   AND s.expires_at > now()`,
-		identity.HashSessionToken(token),
+		identity.HashToken(token),
 	).Scan(&info.User.ID, &info.User.Email, &info.User.Name, &info.User.CreatedAt, &info.ExpiresAt, &orgsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.SessionInfo{}, identity.ErrUnauthenticated
@@ -343,7 +343,7 @@ func (s *Store) RevokeSession(ctx context.Context, token string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !identity.ValidSessionToken(token) {
+	if !identity.SessionToken.Valid(token) {
 		return nil
 	}
 	if _, err := s.db.ExecContext(ctx, `
@@ -351,7 +351,7 @@ UPDATE sessions
 SET revoked_at = now()
 WHERE token_hash = $1
   AND revoked_at IS NULL`,
-		identity.HashSessionToken(token),
+		identity.HashToken(token),
 	); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}

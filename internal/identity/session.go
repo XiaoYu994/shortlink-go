@@ -1,9 +1,6 @@
 package identity
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,9 +10,6 @@ import (
 const (
 	// DefaultSessionTTL 是 OIDC 登录签发服务端会话的默认有效期。
 	DefaultSessionTTL = 7 * 24 * time.Hour
-
-	sessionTokenPrefix = "sls_"
-	sessionTokenBytes  = 32
 
 	maxIssuerBytes  = 512
 	maxSubjectBytes = 255
@@ -28,8 +22,6 @@ var (
 	ErrInvalidOIDCIdentity = errors.New("invalid oidc identity")
 	// ErrInvalidSessionTTL 表示会话有效期不是正时长（至少 1 微秒）。
 	ErrInvalidSessionTTL = errors.New("session ttl must be at least 1 microsecond")
-	// ErrUnauthenticated 表示会话令牌格式非法、不存在、已过期或已吊销。
-	ErrUnauthenticated = errors.New("unauthenticated")
 	// ErrOrgNotFound 表示用户会话有效，但目标组织不存在或当前用户不是其成员。
 	ErrOrgNotFound = errors.New("organization not found")
 )
@@ -119,42 +111,4 @@ func (id OIDCIdentity) Normalize() (OIDCIdentity, error) {
 		EmailVerified: id.EmailVerified && email != "",
 		Name:          name,
 	}, nil
-}
-
-// ValidSessionToken 检查会话令牌是不是 sls_ 加 64 位小写十六进制。
-func ValidSessionToken(token string) bool {
-	if len(token) != len(sessionTokenPrefix)+sessionTokenBytes*2 {
-		return false
-	}
-	if token[:len(sessionTokenPrefix)] != sessionTokenPrefix {
-		return false
-	}
-	for _, c := range token[len(sessionTokenPrefix):] {
-		switch {
-		case c >= '0' && c <= '9':
-		case c >= 'a' && c <= 'f':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// HashSessionToken 计算写入 sessions.token_hash 的 32 字节 SHA-256 哈希。
-func HashSessionToken(token string) []byte {
-	sum := sha256.Sum256([]byte(token))
-	return sum[:]
-}
-
-/*
-GenerateSessionToken 用 crypto/rand 生成一条新的服务端会话令牌。
-plaintext 写入 HttpOnly Cookie；hash 写入 sessions.token_hash。
-*/
-func GenerateSessionToken() (plaintext string, hash []byte, err error) {
-	var buf [sessionTokenBytes]byte
-	if _, err = rand.Read(buf[:]); err != nil {
-		return "", nil, err
-	}
-	plaintext = sessionTokenPrefix + hex.EncodeToString(buf[:])
-	return plaintext, HashSessionToken(plaintext), nil
 }

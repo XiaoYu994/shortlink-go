@@ -29,10 +29,10 @@ shortlink/
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
 │   ├── httpapi/         # handler（含独立 authHandler、memberHandler）、路由、中间件、按租户限流；定义 LinkStore、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、SessionStore、MemberStore
-│   ├── identity/        # 认证主体（Principal）、会话令牌、OIDC 客户端与固定角色权限表（MapAuthorizer）
+│   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、OIDC 客户端、权限表与成员规则
 │   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
-│   ├── tenant/          # 租户和 API Key 的明文格式、哈希
+│   ├── tenant/          # 租户（组织）领域模型
 │   ├── idgen/           # 随机短码生成
 │   ├── memorystore/     # 内存存储，仅测试和本地开发；只实现跳转和创建
 │   ├── postgres/        # PostgreSQL 存储：链接、管理查询、点击日聚合、统计、会话与成员邀请

@@ -50,7 +50,7 @@ func (s *stubSessionStore) CreateSessionForOIDC(_ context.Context, id identity.O
 		return identity.IssuedSession{}, s.err
 	}
 	s.nextSess++
-	token, _, err := identity.GenerateSessionToken()
+	token, _, err := identity.SessionToken.Generate()
 	if err != nil {
 		return identity.IssuedSession{}, err
 	}
@@ -301,7 +301,7 @@ func TestOIDCCallbackSuccessCreatesSessionAndClearsFlowCookie(t *testing.T) {
 	if sessCookie == nil {
 		t.Fatal("missing session cookie")
 	}
-	if !identity.ValidSessionToken(sessCookie.Value) {
+	if !identity.SessionToken.Valid(sessCookie.Value) {
 		t.Errorf("session cookie value %q is not a valid session token", sessCookie.Value)
 	}
 	wantMaxAge := int((24 * time.Hour) / time.Second)

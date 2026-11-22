@@ -212,7 +212,7 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 
 /*
 Authenticate 用 API Key 的哈希查找租户、密钥编号、权限范围和限流配置，返回对应的 Principal。
-格式不对、查无此密钥、已过期、已吊销都是 ErrUnauthenticated。
+格式不对、查无此密钥、已过期、已吊销都返回 identity.ErrUnauthenticated。
 这几种情况共用一个错误，调用方返回同一个 401，不透露密钥是否存在过。
 其他错误原样往上送，避免把数据库故障说成密钥无效。
 到期时刻本身算过期，界限和链接一样是 expires_at > now()。
@@ -221,8 +221,8 @@ func (s *Store) Authenticate(ctx context.Context, token string) (identity.Princi
 	if err := ctx.Err(); err != nil {
 		return identity.Principal{}, err
 	}
-	if !tenant.ValidToken(token) {
-		return identity.Principal{}, tenant.ErrUnauthenticated
+	if !identity.APIKeyToken.Valid(token) {
+		return identity.Principal{}, identity.ErrUnauthenticated
 	}
 	var (
 		keyID      int64
@@ -236,11 +236,11 @@ FROM api_keys k
 JOIN tenants t ON t.id = k.tenant_id
 WHERE k.key_hash = $1
   AND k.revoked_at IS NULL
-  AND (k.expires_at IS NULL OR k.expires_at > now())`, tenant.HashAPIKey(token)).Scan(
+  AND (k.expires_at IS NULL OR k.expires_at > now())`, identity.HashToken(token)).Scan(
 		&keyID, &rawScopes, &tn.ID, &externalID, &tn.RateLimit,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return identity.Principal{}, tenant.ErrUnauthenticated
+		return identity.Principal{}, identity.ErrUnauthenticated
 	}
 	if err != nil {
 		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)

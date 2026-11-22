@@ -1,74 +1,18 @@
 /*
-Package tenant 表示短链的租户，以及 API Key 的令牌格式、生成和哈希（阶段 6）。
+Package tenant 表示短链的租户（组织）。
 
-密钥的权限范围（scope）和鉴权后的身份在 identity 包，签发和吊销在 postgres 包。
-
-明文密钥只在生成时交给调用方。库存 SHA-256。
-格式不对的密钥不会去查数据库。
+API Key 与会话凭证的格式、生成与哈希定义在 identity 包，密钥的签发和吊销在 postgres 包（ADR 0019）。
 */
 package tenant
 
-import (
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
-)
-
-// ErrUnauthenticated 表示没有可用的 API Key。HTTP 层映射成 401。
-var ErrUnauthenticated = errors.New("unauthenticated")
-
 /*
-Tenant 是鉴权通过后放进 context 的身份。
-ID 是本地主键。ExternalID 留给以后的平台租户，没有时为空。
-RateLimit 是管理 API 的每秒请求数，和租户在同一行读出，限流中间件据此
-调整进程内的令牌桶，改库后下一次请求就生效；0 表示不限制。
+Tenant 是组织（租户）的基本信息与策略快照，鉴权后随 identity.Principal 放进 context。
+ID 是本地主键；ExternalID 留给外部平台租户编号，没有时为空。
+RateLimit 是管理 API 的每秒请求数，限流中间件据此调整进程内的令牌桶，
+改库后下一次请求生效；0 表示不限制。
 */
 type Tenant struct {
 	ID         int64
 	ExternalID string
 	RateLimit  int
-}
-
-const (
-	apiKeyPrefix = "slk_"
-	apiKeyBytes  = 32
-)
-
-// ValidToken 检查密钥是不是 slk_ 加 64 位小写十六进制。
-func ValidToken(token string) bool {
-	if len(token) != len(apiKeyPrefix)+apiKeyBytes*2 {
-		return false
-	}
-	if token[:len(apiKeyPrefix)] != apiKeyPrefix {
-		return false
-	}
-	for _, c := range token[len(apiKeyPrefix):] {
-		switch {
-		case c >= '0' && c <= '9':
-		case c >= 'a' && c <= 'f':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// HashAPIKey 计算库存的哈希。调用方先过 ValidToken。
-func HashAPIKey(token string) []byte {
-	sum := sha256.Sum256([]byte(token))
-	return sum[:]
-}
-
-/*
-GenerateAPIKey 生成一把新密钥。
-plaintext 只给创建者看一次；hash 写入 api_keys.key_hash。
-*/
-func GenerateAPIKey() (plaintext string, hash []byte, err error) {
-	var buf [apiKeyBytes]byte
-	if _, err = rand.Read(buf[:]); err != nil {
-		return "", nil, err
-	}
-	plaintext = apiKeyPrefix + hex.EncodeToString(buf[:])
-	return plaintext, HashAPIKey(plaintext), nil
 }

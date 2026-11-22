@@ -28,7 +28,7 @@ type tenantKey map[string]tenant.Tenant
 func (k tenantKey) Authenticate(_ context.Context, token string) (identity.Principal, error) {
 	tn, ok := k[token]
 	if !ok {
-		return identity.Principal{}, tenant.ErrUnauthenticated
+		return identity.Principal{}, identity.ErrUnauthenticated
 	}
 	return identity.Principal{
 		Tenant:    tn,

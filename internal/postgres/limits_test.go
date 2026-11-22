@@ -10,7 +10,6 @@ import (
 
 	"shortlink/internal/identity"
 	"shortlink/internal/link"
-	"shortlink/internal/tenant"
 )
 
 // setTenantQuota 直接改测试租户的配额，模拟运维用 console tenant set 之后的库状态。
@@ -262,9 +261,9 @@ func TestAuthenticateReturnsRateLimit(t *testing.T) {
 		t.Fatalf("set rate limit: %v", err)
 	}
 
-	plaintext, hash, err := tenant.GenerateAPIKey()
+	plaintext, hash, err := identity.APIKeyToken.Generate()
 	if err != nil {
-		t.Fatalf("GenerateAPIKey: %v", err)
+		t.Fatalf("APIKeyToken.Generate: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
 		`INSERT INTO api_keys (tenant_id, key_hash, scopes) VALUES ($1, $2, $3::text[])`,

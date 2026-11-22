@@ -302,7 +302,7 @@ func (h *authHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if len(cookies) == 1 && identity.ValidSessionToken(cookies[0].Value) {
+	if len(cookies) == 1 && identity.SessionToken.Valid(cookies[0].Value) {
 		if err := h.sessions.RevokeSession(r.Context(), cookies[0].Value); err != nil {
 			handleStoreErr(h.logger, w, r, "revoke session", err)
 			return
@@ -339,7 +339,7 @@ func (h *authHandler) handleMe(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "no-store")
 	cookies := sessionCookies(r)
-	if len(cookies) != 1 || !identity.ValidSessionToken(cookies[0].Value) {
+	if len(cookies) != 1 || !identity.SessionToken.Valid(cookies[0].Value) {
 		writeErrorResponse(h.logger, r.Context(), w, http.StatusUnauthorized, "unauthorized")
 		return
 	}

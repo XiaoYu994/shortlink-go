@@ -15,7 +15,6 @@ import (
 
 	"shortlink/internal/identity"
 	"shortlink/internal/postgres"
-	"shortlink/internal/tenant"
 )
 
 /*
@@ -41,7 +40,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 		t.Fatalf("default scopes = %q, want links:read,links:write,stats:read", gotScopes)
 	}
 	plaintext := parseField(t, stdout.String(), "api_key")
-	if !tenant.ValidToken(plaintext) {
+	if !identity.APIKeyToken.Valid(plaintext) {
 		t.Fatalf("api_key is not a valid token")
 	}
 
@@ -49,7 +48,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT key_hash FROM api_keys WHERE id = $1`, keyID).Scan(&gotHash); err != nil {
 		t.Fatalf("select key hash: %v", err)
 	}
-	if !bytes.Equal(gotHash, tenant.HashAPIKey(plaintext)) {
+	if !bytes.Equal(gotHash, identity.HashToken(plaintext)) {
 		t.Fatal("stored hash does not match the printed api_key")
 	}
 
@@ -98,7 +97,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 	if stdout.String() != "revoked: "+strconv.FormatInt(keyID, 10)+"\n" {
 		t.Fatalf("revoke stdout = %q", stdout.String())
 	}
-	if _, err := postgres.NewStore(db).Authenticate(ctx, plaintext); !errors.Is(err, tenant.ErrUnauthenticated) {
+	if _, err := postgres.NewStore(db).Authenticate(ctx, plaintext); !errors.Is(err, identity.ErrUnauthenticated) {
 		t.Fatalf("Authenticate after revoke error = %v, want ErrUnauthenticated", err)
 	}
 }
