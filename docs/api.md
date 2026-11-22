@@ -256,7 +256,7 @@ Cookie: sl_oidc_flow=...
 2. 常量时间比对回调 `state` 与流程 Cookie 中的 `state`。不符同样返回 400，不删除 Cookie，也不联系身份提供方。
 3. `state` 相符后立即删除一次性流程 Cookie。上游返回 `error` 参数（如 `access_denied`）返回 401 `{"error":"authentication failed"}`；缺少 `code` 返回 400 `{"error":"missing authorization code"}`。
 4. 用 `code` 和 PKCE `code_verifier` 向令牌端点换令牌，用 `go-oidc` 校验 ID Token 的签名（JWKS）、`iss`、`aud`、`exp`，再与流程 Cookie 中的 `nonce` 做常量时间比对。ID Token 只在回调里消费一次，不持久化。
-5. 按 `(issuer, subject)` 在 PostgreSQL 里查找或创建用户（不按邮箱自动关联不同提供方）。再次登录只在新声明非空时覆盖邮箱和昵称；邮箱缺失时保留原来的 `email_verified`，同一邮箱已经验证过的不会被后来的 `false` 降回去。每次登录都用 `crypto/rand` 签发全新的服务端会话令牌（`sls_` 加 64 位小写十六进制，库里只存 SHA-256，默认有效期 7 天）。
+5. 按 `(issuer, subject)` 在 PostgreSQL 里查找或创建用户（不按邮箱自动关联不同提供方）。再次登录只在新声明非空时覆盖邮箱和昵称；邮箱缺失时保留原来的 `email_verified`，同一邮箱已经验证过的不会被后来的 `false` 降回去。如果本次已校验的 ID Token 同时满足 `email_verified` 为 `true` 且邮箱非空，会在同一事务里把该邮箱名下尚未过期、未撤销的待兑现组织邀请全部兑现成 `memberships`（已经是组织成员时保留原有角色）。每次登录都用 `crypto/rand` 签发全新的服务端会话令牌（`sls_` 加 64 位小写十六进制，库里只存 SHA-256，默认有效期 7 天）。
 6. 写入会话 Cookie `sl_session`（`HttpOnly`、`SameSite=Lax`、`Path=/api/`、`Max-Age` 取数据库时钟下 `expires_at - now()`，`OIDC_REDIRECT_URL` 为 `https://` 时带 `Secure`），返回 `200 OK` 和用户摘要：
 
 ```json

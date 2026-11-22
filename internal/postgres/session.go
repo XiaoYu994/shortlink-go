@@ -23,6 +23,8 @@ var errIdentityConflict = errors.New("oidc identity unique conflict")
 
 /*
 CreateSessionForOIDC 按 (issuer, subject) 找到或创建用户，并在同一事务里签发一条新的服务端会话（阶段 11、ADR 0018）。
+当本次已校验的 ID Token 携带了已验证邮箱（email_verified=true）时，也在同一事务里按该邮箱兑现
+尚未过期且未撤销的组织邀请；未验证邮箱绝不兑现，防止借未核实邮箱冒领邀请。
 再次登录只在新声明非空时覆盖邮箱和昵称；邮箱声明缺失时不改 email_verified。
 同一邮箱上已经验证过的标记不会被后来的 false 降回去。邮箱本身变了，则采用新声明里的验证结果。
 
@@ -67,6 +69,11 @@ func (s *Store) createSessionForOIDCTx(ctx context.Context, id identity.OIDCIden
 	user, err := upsertOIDCUserTx(ctx, tx, id)
 	if err != nil {
 		return identity.IssuedSession{}, err
+	}
+	if id.EmailVerified && id.Email != "" {
+		if err := redeemInvitationsTx(ctx, tx, user.ID, id.Email); err != nil {
+			return identity.IssuedSession{}, err
+		}
 	}
 
 	/*
@@ -157,9 +164,46 @@ VALUES ($1, $2, $3, $4, $5)`,
 	}
 }
 
+func redeemInvitationsTx(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
+	// 按 id 排序加行锁避免多邀请并发兑现死锁；已是组织成员时 ON CONFLICT 保留原角色，同时关闭待兑现邀请。
+	if _, err := tx.ExecContext(ctx, `
+WITH locked AS (
+    SELECT i.id
+    FROM invitations i
+    WHERE i.email = $2
+      AND i.accepted_at IS NULL
+      AND i.revoked_at IS NULL
+      AND (i.expires_at IS NULL OR i.expires_at > now())
+      AND EXISTS (SELECT 1 FROM tenants t WHERE t.id = i.tenant_id)
+    ORDER BY i.id
+    FOR UPDATE OF i
+),
+redeemed AS (
+    UPDATE invitations i
+    SET accepted_at = now(),
+        accepted_by = $1
+    FROM locked l
+    WHERE i.id = l.id
+    RETURNING i.tenant_id, i.role
+)
+INSERT INTO memberships (user_id, tenant_id, role)
+SELECT $1, r.tenant_id, r.role
+FROM redeemed r
+ON CONFLICT (user_id, tenant_id) DO NOTHING`,
+		userID, email,
+	); err != nil {
+		return fmt.Errorf("create session for oidc: redeem invitations: %w", err)
+	}
+	return nil
+}
+
 func isUniqueConstraintViolation(err error, constraint string) bool {
+	return isConstraintViolation(err, "23505", constraint)
+}
+
+func isConstraintViolation(err error, code, constraint string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
+	return errors.As(err, &pgErr) && pgErr.Code == code && pgErr.ConstraintName == constraint
 }
 
 /*

@@ -1,11 +1,12 @@
 /*
-Command console 是管理进程，也是租户、API Key 和链接下架的运维入口。
+Command console 是管理进程，也是租户、API Key、成员邀请和链接下架的运维入口。
 
 console serve 提供短链增删改查、点击统计、/healthz、/readyz 和 /metrics；
 console key issue/list/revoke 签发密钥、列出状态和吊销，明文只写到标准输出，不进日志；
 console tenant show/set 查看和调整租户的链接配额与管理 API 限流；
+console member invite 预先登记组织成员邀请，用户携带已验证的同一邮箱通过 OIDC 登录时自动兑现；
 console link ban/unban 封禁和解封短链，先写 PostgreSQL 再写 Redis。
-key 和 tenant 命令只连 PostgreSQL；link 命令还需要 Redis。进程拆分见 ADR 0009。
+key、tenant 和 member 命令只连 PostgreSQL；link 命令还需要 Redis。进程拆分见 ADR 0009。
 */
 package main
 

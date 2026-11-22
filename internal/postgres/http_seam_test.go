@@ -209,104 +209,16 @@ func TestHTTPOIDCLoginPersistsSession(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 
-	const (
-		clientID     = "shortlink-console"
-		clientSecret = "shortlink-console-secret"
-		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
-	)
-	fake := fakeoidc.Start(t, clientID, clientSecret)
-	provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
-		Issuer:       fake.URL(),
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectURL,
-		HTTPClient:   fake.Client(),
-	})
-	if err != nil {
-		t.Fatalf("NewOIDCProvider: %v", err)
+	_, handler := newOIDCSeamHandler(t, ctx, store)
+	firstCookie, firstUserID, firstEmail := loginViaFakeOIDC(t, handler)
+	secondCookie, secondUserID, secondEmail := loginViaFakeOIDC(t, handler)
+	if firstEmail != "alice@example.com" || secondEmail != "alice@example.com" {
+		t.Errorf("emails = (%q, %q), want alice@example.com", firstEmail, secondEmail)
 	}
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
-		Keys:       store,
-		Authorizer: identity.NewMapAuthorizer(),
-		OIDC:       provider,
-		Sessions:   store,
-	})
-	handler := srv.ConsoleRoutes()
-
-	completeLogin := func() (token string, userID int64) {
-		t.Helper()
-		loginRec := httptest.NewRecorder()
-		handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil))
-		if loginRec.Code != http.StatusFound {
-			t.Fatalf("login status = %d, want 302", loginRec.Code)
-		}
-		var flowCookie *http.Cookie
-		for _, c := range loginRec.Result().Cookies() {
-			if c.Name == httpapi.OIDCFlowCookieName {
-				flowCookie = c
-			}
-		}
-		if flowCookie == nil {
-			t.Fatal("missing flow cookie")
-		}
-
-		noRedirect := &http.Client{
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		authResp, err := noRedirect.Get(loginRec.Header().Get("Location"))
-		if err != nil {
-			t.Fatalf("GET fake authorize: %v", err)
-		}
-		defer func() { _ = authResp.Body.Close() }()
-		if authResp.StatusCode != http.StatusFound {
-			t.Fatalf("fake authorize status = %d, want 302", authResp.StatusCode)
-		}
-		cbURL, err := url.Parse(authResp.Header.Get("Location"))
-		if err != nil {
-			t.Fatalf("parse callback url: %v", err)
-		}
-
-		cbReq := httptest.NewRequest(http.MethodGet, cbURL.RequestURI(), nil)
-		cbReq.AddCookie(flowCookie)
-		cbRec := httptest.NewRecorder()
-		handler.ServeHTTP(cbRec, cbReq)
-		if cbRec.Code != http.StatusOK {
-			t.Fatalf("callback status = %d, want 200, body = %s", cbRec.Code, cbRec.Body.String())
-		}
-
-		var sessCookie *http.Cookie
-		for _, c := range cbRec.Result().Cookies() {
-			if c.Name == httpapi.SessionCookieName {
-				sessCookie = c
-			}
-		}
-		if sessCookie == nil {
-			t.Fatal("missing session cookie")
-		}
-		var resp struct {
-			User struct {
-				ID    int64  `json:"id"`
-				Email string `json:"email"`
-			} `json:"user"`
-		}
-		if err := json.Unmarshal(cbRec.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode callback response: %v", err)
-		}
-		if resp.User.Email != "alice@example.com" {
-			t.Errorf("email = %q, want alice@example.com", resp.User.Email)
-		}
-		return sessCookie.Value, resp.User.ID
-	}
-
-	firstToken, firstUserID := completeLogin()
-	secondToken, secondUserID := completeLogin()
 	if firstUserID != secondUserID {
 		t.Fatalf("second login user id = %d, want %d", secondUserID, firstUserID)
 	}
+	firstToken, secondToken := firstCookie.Value, secondCookie.Value
 	if firstToken == secondToken {
 		t.Fatal("second login reused the same session token")
 	}
@@ -356,80 +268,10 @@ func TestHTTPSessionAuthOrgSwitchAndLogoutImmediateEffect(t *testing.T) {
 		t.Fatalf("disable tenant1 rate limit: %v", err)
 	}
 
-	const (
-		clientID     = "shortlink-console"
-		clientSecret = "shortlink-console-secret"
-		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
-	)
-	fake := fakeoidc.Start(t, clientID, clientSecret)
-	provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
-		Issuer:       fake.URL(),
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectURL,
-		HTTPClient:   fake.Client(),
-	})
-	if err != nil {
-		t.Fatalf("NewOIDCProvider: %v", err)
-	}
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
-		Keys:       store,
-		Authorizer: identity.NewMapAuthorizer(),
-		OIDC:       provider,
-		Sessions:   store,
-	})
-	handler := srv.ConsoleRoutes()
+	_, handler := newOIDCSeamHandler(t, ctx, store)
 
 	// 1. 走完 OIDC 登录拿到会话 Cookie。
-	loginRec := httptest.NewRecorder()
-	handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil))
-	var flowCookie *http.Cookie
-	for _, c := range loginRec.Result().Cookies() {
-		if c.Name == httpapi.OIDCFlowCookieName {
-			flowCookie = c
-		}
-	}
-	noRedirect := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	authResp, err := noRedirect.Get(loginRec.Header().Get("Location"))
-	if err != nil {
-		t.Fatalf("GET fake authorize: %v", err)
-	}
-	defer func() { _ = authResp.Body.Close() }()
-	cbURL, err := url.Parse(authResp.Header.Get("Location"))
-	if err != nil {
-		t.Fatalf("parse callback url: %v", err)
-	}
-	cbReq := httptest.NewRequest(http.MethodGet, cbURL.RequestURI(), nil)
-	cbReq.AddCookie(flowCookie)
-	cbRec := httptest.NewRecorder()
-	handler.ServeHTTP(cbRec, cbReq)
-	if cbRec.Code != http.StatusOK {
-		t.Fatalf("callback status = %d, body = %s", cbRec.Code, cbRec.Body.String())
-	}
-	var sessCookie *http.Cookie
-	for _, c := range cbRec.Result().Cookies() {
-		if c.Name == httpapi.SessionCookieName {
-			sessCookie = c
-		}
-	}
-	if sessCookie == nil {
-		t.Fatal("missing session cookie")
-	}
-	var loginBody struct {
-		User struct {
-			ID int64 `json:"id"`
-		} `json:"user"`
-	}
-	if err := json.Unmarshal(cbRec.Body.Bytes(), &loginBody); err != nil {
-		t.Fatalf("decode callback body: %v", err)
-	}
-	userID := loginBody.User.ID
+	sessCookie, userID, _ := loginViaFakeOIDC(t, handler)
 
 	doWithSession := func(method, path string, orgID int64, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -516,6 +358,210 @@ func TestHTTPSessionAuthOrgSwitchAndLogoutImmediateEffect(t *testing.T) {
 	if rec := doWithSession(http.MethodGet, "/api/v1/links", tenant2, ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("list after logout = %d, want 401", rec.Code)
 	}
+}
+
+/*
+TestHTTPOIDCLoginRedeemsVerifiedInvitationOnly 端到端验证 Step 5：
+通过 fakeoidc 完成 OIDC 登录时，未验证邮箱不兑现待处理邀请；
+一旦以 email_verified=true 完成登录，同一事务内兑现多个租户的待兑现邀请，
+紧接着 /me 和带 X-Org-ID 的管理接口立刻生效。
+*/
+func TestHTTPOIDCLoginRedeemsVerifiedInvitationOnly(t *testing.T) {
+	store, tenant1 := newTestStore(t)
+	ctx := context.Background()
+
+	var tenant2 int64
+	if err := store.db.QueryRowContext(ctx,
+		`INSERT INTO tenants (name, rate_limit_per_second) VALUES ('org-invite-two', 0) RETURNING id`,
+	).Scan(&tenant2); err != nil {
+		t.Fatalf("insert second tenant: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tenants SET rate_limit_per_second = 0 WHERE id = $1`, tenant1); err != nil {
+		t.Fatalf("disable tenant1 rate limit: %v", err)
+	}
+
+	inv1, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenant1,
+		Email:    "alice@example.com",
+		Role:     identity.RoleOwner,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvitation tenant1: %v", err)
+	}
+	inv2, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenant2,
+		Email:    "alice@example.com",
+		Role:     identity.RoleMember,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvitation tenant2: %v", err)
+	}
+
+	fake, handler := newOIDCSeamHandler(t, ctx, store)
+
+	loginAs := func(u fakeoidc.User) (*http.Cookie, int64) {
+		t.Helper()
+		fake.SetUser(u)
+		sessCookie, userID, _ := loginViaFakeOIDC(t, handler)
+		return sessCookie, userID
+	}
+
+	// 1. email_verified=false 登录不兑现邀请。
+	unverifiedCookie, userID := loginAs(fakeoidc.User{
+		Subject:       "sub-alice",
+		Email:         "alice@example.com",
+		EmailVerified: false,
+		Name:          "Alice",
+	})
+	meReq := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	meReq.AddCookie(unverifiedCookie)
+	meRec := httptest.NewRecorder()
+	handler.ServeHTTP(meRec, meReq)
+	if meRec.Code != http.StatusOK || !strings.Contains(meRec.Body.String(), `"organizations":[]`) {
+		t.Fatalf("/me unverified = %d, body = %s", meRec.Code, meRec.Body.String())
+	}
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/links", nil)
+	listReq.AddCookie(unverifiedCookie)
+	listReq.Header.Set("X-Org-ID", strconv.FormatInt(tenant1, 10))
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusNotFound {
+		t.Fatalf("list unverified = %d, want 404", listRec.Code)
+	}
+
+	// 2. email_verified=true（含大写）登录立刻兑现两家组织的邀请。
+	verifiedCookie, verifiedUserID := loginAs(fakeoidc.User{
+		Subject:       "sub-alice",
+		Email:         "Alice@Example.COM",
+		EmailVerified: true,
+		Name:          "Alice",
+	})
+	if verifiedUserID != userID {
+		t.Fatalf("user id changed from %d to %d", userID, verifiedUserID)
+	}
+	meReq2 := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	meReq2.AddCookie(verifiedCookie)
+	meRec2 := httptest.NewRecorder()
+	handler.ServeHTTP(meRec2, meReq2)
+	if meRec2.Code != http.StatusOK ||
+		!strings.Contains(meRec2.Body.String(), `"role":"owner"`) ||
+		!strings.Contains(meRec2.Body.String(), `"role":"member"`) {
+		t.Fatalf("/me verified = %d, body = %s", meRec2.Code, meRec2.Body.String())
+	}
+
+	for _, orgID := range []int64{tenant1, tenant2} {
+		createReq := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/invited"}`))
+		createReq.AddCookie(verifiedCookie)
+		createReq.Header.Set("X-Org-ID", strconv.FormatInt(orgID, 10))
+		createRec := httptest.NewRecorder()
+		handler.ServeHTTP(createRec, createReq)
+		if createRec.Code != http.StatusCreated {
+			t.Fatalf("create in org %d after redeem = %d, want 201, body = %s", orgID, createRec.Code, createRec.Body.String())
+		}
+	}
+
+	for _, invID := range []int64{inv1.ID, inv2.ID} {
+		var acceptedBy *int64
+		if err := store.db.QueryRowContext(ctx, `SELECT accepted_by FROM invitations WHERE id = $1`, invID).Scan(&acceptedBy); err != nil {
+			t.Fatalf("select invitation %d: %v", invID, err)
+		}
+		if acceptedBy == nil || *acceptedBy != userID {
+			t.Errorf("invitation %d accepted_by = %v, want %d", invID, acceptedBy, userID)
+		}
+	}
+}
+
+func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeoidc.Server, http.Handler) {
+	t.Helper()
+	const (
+		clientID     = "shortlink-console"
+		clientSecret = "shortlink-console-secret"
+		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
+	)
+	fake := fakeoidc.Start(t, clientID, clientSecret)
+	provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+		Issuer:       fake.URL(),
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		HTTPClient:   fake.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+		Keys:       store,
+		Authorizer: identity.NewMapAuthorizer(),
+		OIDC:       provider,
+		Sessions:   store,
+	})
+	return fake, srv.ConsoleRoutes()
+}
+
+func loginViaFakeOIDC(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
+	t.Helper()
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil))
+	if loginRec.Code != http.StatusFound {
+		t.Fatalf("login status = %d, want 302", loginRec.Code)
+	}
+	var flowCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == httpapi.OIDCFlowCookieName {
+			flowCookie = c
+		}
+	}
+	if flowCookie == nil {
+		t.Fatal("missing flow cookie")
+	}
+
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	authResp, err := noRedirect.Get(loginRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("GET fake authorize: %v", err)
+	}
+	defer func() { _ = authResp.Body.Close() }()
+	if authResp.StatusCode != http.StatusFound {
+		t.Fatalf("fake authorize status = %d, want 302", authResp.StatusCode)
+	}
+	cbURL, err := url.Parse(authResp.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback url: %v", err)
+	}
+
+	cbReq := httptest.NewRequest(http.MethodGet, cbURL.RequestURI(), nil)
+	cbReq.AddCookie(flowCookie)
+	cbRec := httptest.NewRecorder()
+	handler.ServeHTTP(cbRec, cbReq)
+	if cbRec.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want 200, body = %s", cbRec.Code, cbRec.Body.String())
+	}
+
+	var sessCookie *http.Cookie
+	for _, c := range cbRec.Result().Cookies() {
+		if c.Name == httpapi.SessionCookieName {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("missing session cookie")
+	}
+	var resp struct {
+		User struct {
+			ID    int64  `json:"id"`
+			Email string `json:"email"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(cbRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode callback response: %v", err)
+	}
+	return sessCookie, resp.User.ID, resp.User.Email
 }
 
 func newConsoleHandler(store *Store) http.Handler {

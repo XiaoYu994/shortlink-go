@@ -10,13 +10,22 @@ package identity
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"slices"
+	"strings"
+	"unicode"
 
 	"shortlink/internal/tenant"
 )
 
-// ErrInvalidAPIKeyScope 表示 API Key 的 scope 列表为空，或包含不允许的权限值。
-var ErrInvalidAPIKeyScope = errors.New("invalid api key scope")
+var (
+	// ErrInvalidAPIKeyScope 表示 API Key 的 scope 列表为空，或包含不允许的权限值。
+	ErrInvalidAPIKeyScope = errors.New("invalid api key scope")
+	// ErrInvalidRole 表示组织角色不是系统允许的枚举值。
+	ErrInvalidRole = errors.New("invalid role")
+	// ErrInvalidEmail 表示邮箱格式不合法或超出数据库约束长度。
+	ErrInvalidEmail = errors.New("invalid email")
+)
 
 // ActorKind 区分管理请求的执行者类型：人（用户会话）或机器（API Key）。
 type ActorKind string
@@ -44,6 +53,32 @@ func ValidRole(r Role) bool {
 	default:
 		return false
 	}
+}
+
+/*
+NormalizeEmail 规范化并校验邮箱地址：去首尾空白、转小写、限制长度在 3..320 字节，
+只接受裸 addr-spec（拒绝显示名和尖括号），且域名必须包含非首尾的点号。
+*/
+func NormalizeEmail(raw string) (string, error) {
+	email := strings.ToLower(strings.TrimSpace(raw))
+	if len(email) < 3 || len(email) > maxEmailBytes {
+		return "", fmt.Errorf("%w: invalid length", ErrInvalidEmail)
+	}
+	if strings.ContainsFunc(email, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return "", fmt.Errorf("%w: contains whitespace or control character", ErrInvalidEmail)
+	}
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email {
+		return "", fmt.Errorf("%w: %q", ErrInvalidEmail, raw)
+	}
+	local, domain, ok := strings.Cut(email, "@")
+	if !ok || local == "" || domain == "" || strings.Contains(domain, "@") {
+		return "", fmt.Errorf("%w: %q", ErrInvalidEmail, raw)
+	}
+	if !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || strings.Contains(domain, "..") {
+		return "", fmt.Errorf("%w: %q", ErrInvalidEmail, raw)
+	}
+	return email, nil
 }
 
 // Perm 表示具体操作权限，由路由或 handler 检查。

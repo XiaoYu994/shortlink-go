@@ -3,6 +3,7 @@ package identity
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"shortlink/internal/tenant"
@@ -187,6 +188,47 @@ func TestNormalizeAPIKeyScopes(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("NormalizeAPIKeyScopes(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeEmail(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "lowercase and trim", in: "  Alice@Example.COM ", want: "alice@example.com"},
+		{name: "plus tag preserved", in: "alice+ops@sub.example.com", want: "alice+ops@sub.example.com"},
+		{name: "empty", in: "", wantErr: true},
+		{name: "whitespace only", in: "   ", wantErr: true},
+		{name: "missing at", in: "alice.example.com", wantErr: true},
+		{name: "missing dot in domain", in: "alice@localhost", wantErr: true},
+		{name: "leading dot domain", in: "alice@.example.com", wantErr: true},
+		{name: "trailing dot domain", in: "alice@example.com.", wantErr: true},
+		{name: "consecutive dots domain", in: "alice@example..com", wantErr: true},
+		{name: "display name rejected", in: "Alice <alice@example.com>", wantErr: true},
+		{name: "angle brackets rejected", in: "<alice@example.com>", wantErr: true},
+		{name: "internal space rejected", in: "alice smith@example.com", wantErr: true},
+		{name: "control char rejected", in: "alice\n@example.com", wantErr: true},
+		{name: "too long", in: strings.Repeat("a", 310) + "@example.com", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeEmail(tt.in)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidEmail) {
+					t.Fatalf("NormalizeEmail(%q) err = %v, want ErrInvalidEmail", tt.in, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeEmail(%q) err = %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("NormalizeEmail(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

@@ -86,7 +86,7 @@ make run-redirector   # 公开跳转，ADDR，默认 :8080
 make run-console      # 管理 API，CONSOLE_ADDR，默认 :8081
 ```
 
-看到 `connected to postgres`、`connected to redis` 和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥和租户命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 需要 Redis。
+看到 `connected to postgres`、`connected to redis` 和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥、租户和成员命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 需要 Redis。
 
 检查：
 
@@ -697,6 +697,22 @@ make console ARGS="key revoke --id 1"
 `key issue` 把明文打印到标准输出，只此一次。终端滚动记录里会留下这把密钥。`--expires` 省略表示不过期；到期时刻本身算过期。`--scope` 省略表示授予全部密钥权限（`links:read`、`links:write`、`stats:read`），可重复传入或用逗号分隔；存量密钥通过迁移 007 自动回填为全量权限，迁移 008 随后去掉了 `scopes` 的 DEFAULT：直接写 SQL 插入密钥必须显式给出 `scopes`。鉴权读到不认识的 scope 时直接忽略（权限只会变少，不会报 500），所以以后新增 scope 的发布顺序是：先发布认识新 scope 的代码，再放宽数据库 CHECK，最后才能签发带新 scope 的密钥。`key list` 显示编号、时间和 `scopes`，不显示明文或哈希。吊销使用签发时打印的 `key_id`。
 
 已有租户再发一把密钥时用 `--tenant`。`--name` 每次都新建租户，名称不必唯一。`--external-id` 只在新建时写入，并且不能重复。
+
+## 邀请组织成员
+
+组织本身在平台早期仍由运维命令通过 `console key issue --name` 创建，随后用 `console member invite` 预先登记受邀人的邮箱和角色；命令只连 PostgreSQL，不连接 Redis：
+
+```bash
+make console ARGS="member invite --tenant 1 --email alice@example.com --role owner"
+make console ARGS="member invite --tenant 1 --email bob@example.com --role member --expires 2026-12-01T00:00:00Z"
+```
+
+规则：
+
+- `--role` 必填，取 `owner`、`admin`、`member`、`viewer`；`--expires` 省略表示永不过期。
+- 邮箱会转小写并去除首尾空白。同一租户对同一邮箱同时只能有一条待兑现邀请；上一条已兑现、已撤销或已过期时，可以再次邀请。
+- 不会发邮件，也不存在“按邮箱自动合并不同提供方账号”。当受邀人通过 OIDC 登录且本次 ID Token 里的 `email` 与邀请一致、并且 `email_verified` 为 `true` 时，会在同一次登录事务里自动把该用户加进对应组织并记入 `accepted_at` / `accepted_by`。
+- 如果用户已经是该组织的成员，再次登录兑现新邀请时会关闭待兑现邀请，但保留原有角色不变。
 
 ## 查看和调整租户配额与限流
 

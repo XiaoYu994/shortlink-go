@@ -13,7 +13,7 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
-| `console` | `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`（配置 OIDC 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC 身份提供方；`key`、`tenant` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
+| `console` | `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`（配置 OIDC 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令还需要 Redis |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
 
@@ -24,7 +24,7 @@
 ```txt
 shortlink/
 ├── cmd/redirector/      # 公开跳转进程：GET /r/{code}、/healthz、/readyz、/metrics
-├── cmd/console/         # 管理进程：短链增删改查和统计；另有租户和 API Key 运维命令
+├── cmd/console/         # 管理进程：短链增删改查和统计；另有租户、API Key 和成员邀请运维命令
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
@@ -35,7 +35,7 @@ shortlink/
 │   ├── tenant/          # 租户和 API Key 的明文格式、哈希
 │   ├── idgen/           # 随机短码生成
 │   ├── memorystore/     # 内存存储，仅测试和本地开发；只实现跳转和创建
-│   ├── postgres/        # PostgreSQL 存储：链接、管理查询、点击日聚合和统计
+│   ├── postgres/        # PostgreSQL 存储：链接、管理查询、点击日聚合、统计、会话与成员邀请
 │   ├── storemetrics/    # 存储的指标装饰器，透传完整存储能力
 │   ├── cache/           # Redis 客户端和读缓存（CachedStore）
 │   ├── click/           # 点击元数据分类和异步批量记录（ClickRecorder）
@@ -52,7 +52,7 @@ shortlink/
 
 ```txt
 cmd/redirector -> httpapi, postgres, storemetrics, cache, click, config
-cmd/console    -> httpapi, identity, postgres, storemetrics, cache, config；key/tenant 命令只用 postgres，link 命令还要 cache
+cmd/console    -> httpapi, identity, postgres, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令还要 cache
 cmd/migrate    -> golang-migrate
 config         -> postgres
 httpapi        -> link, click, idgen, identity, tenant, golang.org/x/time/rate

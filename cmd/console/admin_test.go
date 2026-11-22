@@ -55,6 +55,13 @@ func TestConsoleUsageDoesNotOpenStore(t *testing.T) {
 		{name: "tenant set missing tenant", args: []string{"tenant", "set"}, want: errUsage},
 		{name: "tenant set no options", args: []string{"tenant", "set", "--tenant", "1"}, want: errUsage},
 		{name: "tenant set negative", args: []string{"tenant", "set", "--tenant", "1", "--link-quota", "-1"}, want: errUsage},
+		{name: "member only", args: []string{"member"}, want: errUsage},
+		{name: "bad member subcommand", args: []string{"member", "list"}, want: errUsage},
+		{name: "invite missing tenant", args: []string{"member", "invite", "--email", "a@example.com", "--role", "member"}, want: errUsage},
+		{name: "invite missing email", args: []string{"member", "invite", "--tenant", "1", "--role", "member"}, want: errUsage},
+		{name: "invite missing role", args: []string{"member", "invite", "--tenant", "1", "--email", "a@example.com"}, want: errUsage},
+		{name: "invite invalid role", args: []string{"member", "invite", "--tenant", "1", "--email", "a@example.com", "--role", "guest"}, want: errUsage},
+		{name: "invite extra arg", args: []string{"member", "invite", "--tenant", "1", "--email", "a@example.com", "--role", "member", "extra"}, want: errUsage},
 		{name: "link only", args: []string{"link"}, want: errUsage},
 		{name: "bad link subcommand", args: []string{"link", "delete"}, want: errUsage},
 		{name: "ban missing code", args: []string{"link", "ban", "--reason", "phishing"}, want: errUsage},
@@ -65,6 +72,7 @@ func TestConsoleUsageDoesNotOpenStore(t *testing.T) {
 		{name: "unban extra arg", args: []string{"link", "unban", "--code", "abc12345", "extra"}, want: errUsage},
 		{name: "help", args: []string{"help"}},
 		{name: "issue help", args: []string{"key", "issue", "-h"}},
+		{name: "member invite help", args: []string{"member", "invite", "-h"}},
 		{name: "link help", args: []string{"link", "help"}},
 	}
 	for _, tt := range tests {
@@ -437,7 +445,10 @@ func TestConsoleLinkCacheNotUpdated(t *testing.T) {
 // TestConsoleKeyAndTenantDoNotOpenLinkStore 锁住 ADR 0009：只有 link 命令需要 Redis。
 func TestConsoleKeyAndTenantDoNotOpenLinkStore(t *testing.T) {
 	t.Setenv("REDIS_URL", "")
-	store := &fakeAdmin{limits: postgres.TenantLimits{ID: 1, Name: "acme"}}
+	store := &fakeAdmin{
+		limits:     postgres.TenantLimits{ID: 1, Name: "acme"},
+		invitation: identity.Invitation{ID: 1, TenantID: 1, Email: "alice@example.com", Role: identity.RoleOwner, CreatedAt: time.Unix(0, 0).UTC()},
+	}
 	open := func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
 	}
@@ -451,18 +462,124 @@ func TestConsoleKeyAndTenantDoNotOpenLinkStore(t *testing.T) {
 	if err := run([]string{"key", "revoke", "--id", "9"}, &stdout, &stderr, open, openLink); err != nil {
 		t.Fatalf("key revoke: %v", err)
 	}
+	stdout.Reset()
+	if err := run([]string{"member", "invite", "--tenant", "1", "--email", "alice@example.com", "--role", "owner"}, &stdout, &stderr, open, openLink); err != nil {
+		t.Fatalf("member invite: %v", err)
+	}
+}
+
+func TestConsoleMemberInviteRejectsBadEmailAndExpiryWithoutOpeningStore(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "invalid email",
+			args:    []string{"member", "invite", "--tenant", "1", "--email", "not-an-email", "--role", "member"},
+			wantErr: "parse email",
+		},
+		{
+			name:    "invalid expires",
+			args:    []string{"member", "invite", "--tenant", "1", "--email", "alice@example.com", "--role", "member", "--expires", "tomorrow"},
+			wantErr: "parse expires",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := run(tt.args, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
+				t.Fatal("admin store opened")
+				return nil, nil, nil
+			}, failLinkOpen(t))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("run error = %v, want containing %q", err, tt.wantErr)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestConsoleMemberInvite(t *testing.T) {
+	created := time.Date(2026, 11, 22, 4, 0, 0, 0, time.UTC)
+	expires := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("without expires", func(t *testing.T) {
+		store := &fakeAdmin{
+			invitation: identity.Invitation{
+				ID:        12,
+				TenantID:  7,
+				Email:     "alice@example.com",
+				Role:      identity.RoleOwner,
+				CreatedAt: created,
+			},
+		}
+		var stdout, stderr bytes.Buffer
+		err := run([]string{"member", "invite", "--tenant", "7", "--email", "  Alice@Example.COM ", "--role", "owner"},
+			&stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
+				return store, io.NopCloser(nil), nil
+			}, failLinkOpen(t))
+		if err != nil {
+			t.Fatalf("member invite: %v", err)
+		}
+		if store.inviteParams.TenantID != 7 || store.inviteParams.Email != "alice@example.com" || store.inviteParams.Role != identity.RoleOwner || store.inviteParams.ExpiresAt != nil {
+			t.Fatalf("inviteParams = %+v", store.inviteParams)
+		}
+		want := "id\ttenant_id\temail\trole\tcreated_at\texpires_at\n" +
+			"12\t7\talice@example.com\towner\t2026-11-22T04:00:00Z\t-\n"
+		if stdout.String() != want {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+	})
+
+	t.Run("with expires", func(t *testing.T) {
+		store := &fakeAdmin{
+			invitation: identity.Invitation{
+				ID:        13,
+				TenantID:  7,
+				Email:     "bob@example.com",
+				Role:      identity.RoleViewer,
+				CreatedAt: created,
+				ExpiresAt: &expires,
+			},
+		}
+		var stdout, stderr bytes.Buffer
+		err := run([]string{"member", "invite", "--tenant", "7", "--email", "bob@example.com", "--role", "viewer", "--expires", "2026-12-01T00:00:00Z"},
+			&stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
+				return store, io.NopCloser(nil), nil
+			}, failLinkOpen(t))
+		if err != nil {
+			t.Fatalf("member invite with expires: %v", err)
+		}
+		if store.inviteParams.ExpiresAt == nil || !store.inviteParams.ExpiresAt.Equal(expires) {
+			t.Fatalf("ExpiresAt = %v, want %v", store.inviteParams.ExpiresAt, expires)
+		}
+		want := "id\ttenant_id\temail\trole\tcreated_at\texpires_at\n" +
+			"13\t7\tbob@example.com\tviewer\t2026-11-22T04:00:00Z\t2026-12-01T00:00:00Z\n"
+		if stdout.String() != want {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
+	})
 }
 
 type fakeAdmin struct {
-	params    postgres.IssueAPIKeyParams
-	issued    postgres.IssuedAPIKey
-	keys      []postgres.APIKey
-	listed    int64
-	revoked   int64
-	limits    postgres.TenantLimits
-	shown     int64
-	setTenant int64
-	setParams postgres.SetTenantLimitsParams
+	params       postgres.IssueAPIKeyParams
+	issued       postgres.IssuedAPIKey
+	keys         []postgres.APIKey
+	listed       int64
+	revoked      int64
+	limits       postgres.TenantLimits
+	shown        int64
+	setTenant    int64
+	setParams    postgres.SetTenantLimitsParams
+	inviteParams postgres.CreateInvitationParams
+	invitation   identity.Invitation
+	inviteErr    error
 }
 
 func (f *fakeAdmin) IssueAPIKey(_ context.Context, p postgres.IssueAPIKeyParams) (postgres.IssuedAPIKey, error) {
@@ -489,4 +606,9 @@ func (f *fakeAdmin) SetTenantLimits(_ context.Context, tenantID int64, p postgre
 	f.setTenant = tenantID
 	f.setParams = p
 	return f.limits, nil
+}
+
+func (f *fakeAdmin) CreateInvitation(_ context.Context, p postgres.CreateInvitationParams) (identity.Invitation, error) {
+	f.inviteParams = p
+	return f.invitation, f.inviteErr
 }

@@ -26,6 +26,7 @@ const usageText = `用法:
   console key revoke --id ID
   console tenant show --tenant ID
   console tenant set --tenant ID [--link-quota N] [--rate-limit N]
+  console member invite --tenant ID --email EMAIL --role ROLE [--expires RFC3339]
   console link ban --code CODE --reason REASON
   console link unban --code CODE
 
@@ -33,7 +34,9 @@ serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL �
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；
 --scope 省略表示拥有全部密钥权限（links:read、links:write、stats:read），
 可重复传入或用逗号分隔。
---name 会新建租户；已有租户用 --tenant。密钥和租户命令只读 DATABASE_URL，不连接 Redis。
+--name 会新建租户；已有租户用 --tenant。密钥、租户和成员命令只读 DATABASE_URL，不连接 Redis。
+member invite 预先登记组织邀请，--role 取 owner、admin、member、viewer；
+用户使用已验证的同一邮箱通过 OIDC 登录时自动兑现。
 link ban/unban 封禁和解封短链，需要 DATABASE_URL 和 REDIS_URL，先写数据库再写缓存；
 --reason 取 phishing、malware、adult、gambling、drugs、spam、other。
 tenant show 看本月用量、配额和限流；set 至少给一个选项。--link-quota 是每个 UTC
@@ -52,6 +55,7 @@ type adminStore interface {
 	RevokeAPIKey(ctx context.Context, keyID int64) error
 	GetTenantLimits(ctx context.Context, tenantID int64) (postgres.TenantLimits, error)
 	SetTenantLimits(ctx context.Context, tenantID int64, p postgres.SetTenantLimitsParams) (postgres.TenantLimits, error)
+	CreateInvitation(ctx context.Context, p postgres.CreateInvitationParams) (identity.Invitation, error)
 }
 
 /*
@@ -96,6 +100,11 @@ func parseCommand(args []string, stderr io.Writer) (command, error) {
 			return parseTenantShow(args[2:], stderr)
 		case "set":
 			return parseTenantSet(args[2:], stderr)
+		}
+	case "member":
+		switch args[1] {
+		case "invite":
+			return parseMemberInvite(args[2:], stderr)
 		}
 	}
 	writeUsage(stderr)
@@ -403,6 +412,64 @@ func parseTenantSet(args []string, stderr io.Writer) (command, error) {
 		}
 		return printTenantLimits(stdout, limits)
 	}, nil
+}
+
+func parseMemberInvite(args []string, stderr io.Writer) (command, error) {
+	fs := newFlagSet("member invite", stderr)
+	tenantID := fs.Int64("tenant", 0, "租户 ID")
+	email := fs.String("email", "", "受邀人邮箱")
+	roleStr := fs.String("role", "", "成员角色（owner、admin、member、viewer）")
+	expires := fs.String("expires", "", "RFC3339 到期时间，省略表示不过期")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, nil
+		}
+		return nil, errUsage
+	}
+	if fs.NArg() != 0 || *tenantID <= 0 || strings.TrimSpace(*email) == "" || *roleStr == "" {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	role := identity.Role(*roleStr)
+	if !identity.ValidRole(role) {
+		writeUsage(stderr)
+		return nil, errUsage
+	}
+	normalizedEmail, err := identity.NormalizeEmail(*email)
+	if err != nil {
+		return nil, fmt.Errorf("parse email: %w", err)
+	}
+	params := postgres.CreateInvitationParams{
+		TenantID: *tenantID,
+		Email:    normalizedEmail,
+		Role:     role,
+	}
+	if *expires != "" {
+		t, err := time.Parse(time.RFC3339, *expires)
+		if err != nil {
+			return nil, fmt.Errorf("parse expires: %w", err)
+		}
+		params.ExpiresAt = &t
+	}
+	return func(ctx context.Context, store adminStore, stdout io.Writer) error {
+		inv, err := store.CreateInvitation(ctx, params)
+		if err != nil {
+			return err
+		}
+		return printInvitation(stdout, inv)
+	}, nil
+}
+
+func printInvitation(w io.Writer, inv identity.Invitation) error {
+	if _, err := fmt.Fprint(w, "id\ttenant_id\temail\trole\tcreated_at\texpires_at\n"); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\n",
+		inv.ID, inv.TenantID, inv.Email, inv.Role,
+		inv.CreatedAt.UTC().Format(time.RFC3339),
+		formatOptional(inv.ExpiresAt),
+	)
+	return err
 }
 
 func printTenantLimits(w io.Writer, limits postgres.TenantLimits) error {
