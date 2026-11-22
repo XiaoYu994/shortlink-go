@@ -1,0 +1,562 @@
+package console
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"shortlink/internal/identity"
+	"shortlink/internal/link"
+	"shortlink/internal/memorystore"
+)
+
+/*
+stubAdmin 是管理 handler 的存储替身。
+handler 测试只关心参数解析、租户传递和响应映射；排序和游标的 SQL 行为
+在 postgres 集成测试里验证，这里按调用方给的 Limit 返回预设结果。
+*/
+type stubAdmin struct {
+	listFn  func(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error)
+	getFn   func(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error)
+	updFn   func(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
+	delFn   func(ctx context.Context, tenantID int64, code string) error
+	statsFn func(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error)
+}
+
+func (s *stubAdmin) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
+	if s.listFn != nil {
+		return s.listFn(ctx, opts)
+	}
+	return nil, nil
+}
+
+func (s *stubAdmin) GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error) {
+	if s.getFn != nil {
+		return s.getFn(ctx, tenantID, code)
+	}
+	return nil, link.ErrNotFound
+}
+
+func (s *stubAdmin) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
+	if s.updFn != nil {
+		return s.updFn(ctx, tenantID, code, u)
+	}
+	return nil, link.ErrNotFound
+}
+
+func (s *stubAdmin) Delete(ctx context.Context, tenantID int64, code string) error {
+	if s.delFn != nil {
+		return s.delFn(ctx, tenantID, code)
+	}
+	return nil
+}
+
+func (s *stubAdmin) Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error) {
+	if s.statsFn != nil {
+		return s.statsFn(ctx, tenantID, code, from, to)
+	}
+	return nil, link.ErrNotFound
+}
+
+// newAdminTestServer 组装带管理路由的 Server；基础 LinkStore 用内存存储。
+func newAdminTestServer(admin *stubAdmin) *Server {
+	return newServer(serverDeps{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:          memorystore.New(),
+		admin:          admin,
+		stats:          admin,
+		requestTimeout: 5 * time.Second,
+		registry:       newTestRegistry(),
+		keys:           allowKey{},
+		authorizer:     identity.NewMapAuthorizer(),
+	})
+}
+
+func doAdminRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	authorize(req)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestListLinks(t *testing.T) {
+	var gotOpts link.ListOptions
+	created := time.Now().UTC().Truncate(time.Second)
+	admin := &stubAdmin{listFn: func(_ context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
+		gotOpts = opts
+		return []link.AdminLink{
+			{Link: link.Link{ID: 3, Code: "AbC123xy", URL: "https://example.com/3", CreatedAt: created}, Clicks: 9, ClicksToday: 2},
+			{Link: link.Link{ID: 2, Code: "AbC123xz", URL: "https://example.com/2", CreatedAt: created}, Clicks: 7, ClicksToday: 1},
+			// 第三条是多要的那一条，只用来判断有下一页。
+			{Link: link.Link{ID: 1, Code: "AbC123xw", URL: "https://example.com/1", CreatedAt: created}},
+		}, nil
+	}}
+	handler := newAdminTestServer(admin).Routes()
+
+	rec := doAdminRequest(t, handler, http.MethodGet, "/api/v1/links?limit=2&sort=clicks&cursor=8:3", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if gotOpts.TenantID != 1 || gotOpts.Limit != 3 || gotOpts.Sort != link.SortClicks {
+		t.Errorf("opts = %+v, want tenant 1 limit 3 sort clicks", gotOpts)
+	}
+	if gotOpts.Cursor == nil || gotOpts.Cursor.ID != 3 || gotOpts.Cursor.Clicks != 8 {
+		t.Errorf("cursor = %+v, want clicks 8 id 3", gotOpts.Cursor)
+	}
+
+	var resp listLinksResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(resp.Items))
+	}
+	if resp.Items[0].Clicks != 9 || resp.Items[0].ClicksToday != 2 || resp.Items[0].CreatedAt.IsZero() {
+		t.Errorf("first item = %+v, want counts", resp.Items[0])
+	}
+	if got, want := resp.NextCursor, "7:2"; got != want {
+		t.Errorf("next_cursor = %q, want %q", got, want)
+	}
+}
+
+func TestListLinksWithoutNextPage(t *testing.T) {
+	admin := &stubAdmin{listFn: func(context.Context, link.ListOptions) ([]link.AdminLink, error) {
+		return []link.AdminLink{{Link: link.Link{ID: 1, Code: "AbC123xy", URL: "https://example.com"}}}, nil
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodGet, "/api/v1/links", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "next_cursor") {
+		t.Errorf("body = %s, want no next_cursor", rec.Body.String())
+	}
+}
+
+func TestListLinksBadQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"limit zero", "?limit=0"},
+		{"limit too large", "?limit=101"},
+		{"limit not a number", "?limit=abc"},
+		{"invalid sort", "?sort=url"},
+		{"cursor for id sort", "?cursor=1:2"},
+		{"cursor missing id", "?sort=clicks&cursor=5"},
+		{"cursor negative", "?sort=clicks&cursor=-1:5"},
+		{"cursor zero id", "?sort=clicks&cursor=1:0"},
+		{"cursor text", "?sort=id&cursor=abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doAdminRequest(t, newAdminTestServer(&stubAdmin{}).Routes(), http.MethodGet, "/api/v1/links"+tt.query, "")
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestGetLink(t *testing.T) {
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	admin := &stubAdmin{getFn: func(_ context.Context, tenantID int64, code string) (*link.AdminLink, error) {
+		if tenantID != 1 {
+			t.Errorf("tenant = %d, want 1", tenantID)
+		}
+		if code != "AbC123xy" {
+			return nil, link.ErrNotFound
+		}
+		return &link.AdminLink{
+			Link:        link.Link{ID: 7, Code: code, URL: "https://example.com/7", ExpiresAt: &expires},
+			Clicks:      12,
+			ClicksToday: 3,
+		}, nil
+	}}
+	handler := newAdminTestServer(admin).Routes()
+
+	rec := doAdminRequest(t, handler, http.MethodGet, "/api/v1/links/AbC123xy", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp linkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "AbC123xy" || resp.Clicks != 12 || resp.ClicksToday != 3 || resp.ExpiresAt == nil {
+		t.Errorf("response = %+v, want full admin link", resp)
+	}
+
+	rec = doAdminRequest(t, handler, http.MethodGet, "/api/v1/links/missing1", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("missing status = %d, want 404", rec.Code)
+	}
+}
+
+func TestGetLinkRejectsInvalidCode(t *testing.T) {
+	admin := &stubAdmin{getFn: func(context.Context, int64, string) (*link.AdminLink, error) {
+		t.Fatal("store was called for an invalid code")
+		return nil, nil
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodGet, "/api/v1/links/short", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestUpdateLink(t *testing.T) {
+	future := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	var gotCode string
+	var gotUpdate link.Update
+	admin := &stubAdmin{updFn: func(_ context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
+		if tenantID != 1 {
+			t.Errorf("tenant = %d, want 1", tenantID)
+		}
+		gotCode = code
+		gotUpdate = u
+		result := link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: "https://example.com/new"}}
+		if u.URL != nil {
+			result.URL = *u.URL
+		}
+		if u.ExpiresAt != nil {
+			result.ExpiresAt = u.ExpiresAt
+		}
+		return &result, nil
+	}}
+	handler := newAdminTestServer(admin).Routes()
+
+	rec := doAdminRequest(t, handler, http.MethodPatch, "/api/v1/links/AbC123xy",
+		`{"url":"https://example.com/new","expires_at":"`+future.Format(time.RFC3339)+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if gotCode != "AbC123xy" {
+		t.Errorf("code = %q, want AbC123xy", gotCode)
+	}
+	if gotUpdate.URL == nil || *gotUpdate.URL != "https://example.com/new" {
+		t.Errorf("update URL = %v, want new URL", gotUpdate.URL)
+	}
+	if gotUpdate.ExpiresAt == nil || !gotUpdate.ExpiresAt.Equal(future) {
+		t.Errorf("update ExpiresAt = %v, want %v", gotUpdate.ExpiresAt, future)
+	}
+	if gotUpdate.ClearExpiresAt {
+		t.Error("ClearExpiresAt = true, want false")
+	}
+
+	var resp linkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.URL != "https://example.com/new" {
+		t.Errorf("response URL = %q, want new URL", resp.URL)
+	}
+}
+
+func TestUpdateLinkClearExpiresAt(t *testing.T) {
+	var got link.Update
+	admin := &stubAdmin{updFn: func(_ context.Context, _ int64, code string, u link.Update) (*link.AdminLink, error) {
+		got = u
+		return &link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: "https://example.com"}}, nil
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodPatch,
+		"/api/v1/links/AbC123xy", `{"expires_at": null}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if !got.ClearExpiresAt || got.ExpiresAt != nil || got.URL != nil {
+		t.Errorf("update = %+v, want only ClearExpiresAt", got)
+	}
+}
+
+func TestUpdateLinkBadRequest(t *testing.T) {
+	admin := &stubAdmin{updFn: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+		t.Fatal("store was called for an invalid update")
+		return nil, nil
+	}}
+	handler := newAdminTestServer(admin).Routes()
+
+	tests := []struct {
+		name   string
+		body   string
+		errSub string
+	}{
+		{"empty body", "", "invalid JSON body"},
+		{"empty object", `{}`, "at least one of url, expires_at or disabled"},
+		{"unknown field", `{"code":"AbC123xy"}`, "unknown field"},
+		{"url not a string", `{"url":1}`, "invalid url"},
+		{"url null", `{"url":null}`, "invalid url"},
+		{"url invalid", `{"url":"ftp://example.com"}`, "only http and https"},
+		{"expires_at number", `{"expires_at":1}`, "invalid expires_at"},
+		{"expires_at not a time", `{"expires_at":"tomorrow"}`, "invalid expires_at"},
+		{"expires_at in the past", `{"expires_at":"2000-01-01T00:00:00Z"}`, "must be in the future"},
+		{"disabled null", `{"disabled":null}`, "invalid disabled"},
+		{"disabled number", `{"disabled":1}`, "invalid disabled"},
+		{"disabled string", `{"disabled":"true"}`, "invalid disabled"},
+		{"second value", `{"url":"https://example.com"}{"url":"https://example.com"}`, "invalid JSON body"},
+		{"too large", `{"url":"https://example.com","x":"` + strings.Repeat("a", maxBodyBytes) + `"}`, "request body too large"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doAdminRequest(t, handler, http.MethodPatch, "/api/v1/links/AbC123xy", tt.body)
+			if rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 400/413, body = %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tt.errSub) {
+				t.Errorf("body = %s, want substring %q", rec.Body.String(), tt.errSub)
+			}
+		})
+	}
+}
+
+func TestUpdateLinkNotFound(t *testing.T) {
+	admin := &stubAdmin{updFn: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+		return nil, link.ErrNotFound
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodPatch,
+		"/api/v1/links/AbC123xy", `{"url":"https://example.com"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestUpdateLinkDisabled(t *testing.T) {
+	disabledAt := time.Now().UTC().Truncate(time.Second)
+	tests := []struct {
+		name           string
+		body           string
+		disabled       bool
+		wantStatus     link.Status
+		wantDisabledAt bool
+	}{
+		{"disable", `{"disabled":true}`, true, link.StatusDisabled, true},
+		{"enable", `{"disabled":false}`, false, link.StatusActive, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got link.Update
+			admin := &stubAdmin{updFn: func(_ context.Context, _ int64, code string, u link.Update) (*link.AdminLink, error) {
+				got = u
+				result := link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: "https://example.com"}}
+				if tt.disabled {
+					result.DisabledAt = &disabledAt
+				}
+				return &result, nil
+			}}
+			rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodPatch,
+				"/api/v1/links/AbC123xy", tt.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+			}
+			if got.Disabled == nil || *got.Disabled != tt.disabled {
+				t.Errorf("update Disabled = %v, want %v", got.Disabled, tt.disabled)
+			}
+
+			var resp linkResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Status != tt.wantStatus {
+				t.Errorf("status = %q, want %q", resp.Status, tt.wantStatus)
+			}
+			if (resp.DisabledAt != nil) != tt.wantDisabledAt {
+				t.Errorf("disabled_at = %v, want present=%v", resp.DisabledAt, tt.wantDisabledAt)
+			}
+		})
+	}
+}
+
+func TestUpdateLinkDisabledWithOtherFields(t *testing.T) {
+	var got link.Update
+	admin := &stubAdmin{updFn: func(_ context.Context, _ int64, code string, u link.Update) (*link.AdminLink, error) {
+		got = u
+		return &link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: *u.URL}}, nil
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodPatch,
+		"/api/v1/links/AbC123xy", `{"url":"https://example.com/new","disabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if got.URL == nil || *got.URL != "https://example.com/new" {
+		t.Errorf("update URL = %v, want new URL", got.URL)
+	}
+	if got.Disabled == nil || !*got.Disabled {
+		t.Errorf("update Disabled = %v, want true", got.Disabled)
+	}
+}
+
+func TestBannedLinkForbidden(t *testing.T) {
+	admin := &stubAdmin{
+		updFn: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
+			return nil, link.ErrBanned
+		},
+		delFn: func(context.Context, int64, string) error { return link.ErrBanned },
+	}
+	handler := newAdminTestServer(admin).Routes()
+
+	tests := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{"PATCH", http.MethodPatch, `{"url":"https://example.com/new"}`},
+		{"DELETE", http.MethodDelete, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doAdminRequest(t, handler, tt.method, "/api/v1/links/AbC123xy", tt.body)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403, body = %s", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Error != "link is banned" {
+				t.Errorf("error = %q, want %q", resp.Error, "link is banned")
+			}
+		})
+	}
+}
+
+/*
+TestLinkResponseStates 验证管理响应里的 status 和三个可选字段：
+status 总是有，disabled_at、banned_at、ban_reason 为空时省略，ban_source 从不出现。
+*/
+func TestLinkResponseStates(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Minute)
+	banAt := now.Add(-time.Hour)
+	tests := []struct {
+		name           string
+		link           link.Link
+		wantStatus     link.Status
+		wantDisabledAt bool
+		wantBannedAt   bool
+		wantBanReason  bool
+	}{
+		{"active", link.Link{URL: "https://example.com"}, link.StatusActive, false, false, false},
+		{"expired", link.Link{URL: "https://example.com", ExpiresAt: &past}, link.StatusExpired, false, false, false},
+		{"disabled", link.Link{URL: "https://example.com", DisabledAt: &past}, link.StatusDisabled, true, false, false},
+		{"banned", link.Link{URL: "https://example.com", Ban: &link.Ban{
+			At: banAt, Reason: link.BanReasonPhishing, Source: link.BanSourceOperator,
+		}}, link.StatusBanned, false, true, true},
+		{"banned, disabled and expired", link.Link{
+			URL:        "https://example.com",
+			ExpiresAt:  &past,
+			DisabledAt: &past,
+			Ban:        &link.Ban{At: banAt, Reason: link.BanReasonSpam, Source: link.BanSourceRisk},
+		}, link.StatusBanned, true, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			admin := &stubAdmin{getFn: func(_ context.Context, _ int64, code string) (*link.AdminLink, error) {
+				l := tt.link
+				l.ID = 7
+				l.Code = code
+				return &link.AdminLink{Link: l}, nil
+			}}
+			rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodGet,
+				"/api/v1/links/AbC123xy", "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+			}
+
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			var status link.Status
+			if err := json.Unmarshal(raw["status"], &status); err != nil {
+				t.Fatalf("decode status: %v", err)
+			}
+			if status != tt.wantStatus {
+				t.Errorf("status = %q, want %q", status, tt.wantStatus)
+			}
+			if _, ok := raw["disabled_at"]; ok != tt.wantDisabledAt {
+				t.Errorf("disabled_at present = %v, want %v", ok, tt.wantDisabledAt)
+			}
+			if _, ok := raw["banned_at"]; ok != tt.wantBannedAt {
+				t.Errorf("banned_at present = %v, want %v", ok, tt.wantBannedAt)
+			}
+			if _, ok := raw["ban_reason"]; ok != tt.wantBanReason {
+				t.Errorf("ban_reason present = %v, want %v", ok, tt.wantBanReason)
+			}
+			if _, ok := raw["ban_source"]; ok {
+				t.Error("ban_source must not be exposed")
+			}
+		})
+	}
+}
+
+func TestDeleteLink(t *testing.T) {
+	var gotCode string
+	admin := &stubAdmin{delFn: func(_ context.Context, tenantID int64, code string) error {
+		if tenantID != 1 {
+			t.Errorf("tenant = %d, want 1", tenantID)
+		}
+		gotCode = code
+		return nil
+	}}
+	handler := newAdminTestServer(admin).Routes()
+
+	rec := doAdminRequest(t, handler, http.MethodDelete, "/api/v1/links/AbC123xy", "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if gotCode != "AbC123xy" {
+		t.Errorf("code = %q, want AbC123xy", gotCode)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+}
+
+func TestDeleteLinkNotFound(t *testing.T) {
+	admin := &stubAdmin{delFn: func(context.Context, int64, string) error { return link.ErrNotFound }}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodDelete, "/api/v1/links/AbC123xy", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestAdminRoutesRequireAPIKey(t *testing.T) {
+	admin := &stubAdmin{}
+	handler := newAdminTestServer(admin).Routes()
+
+	tests := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/links"},
+		{http.MethodGet, "/api/v1/links/AbC123xy"},
+		{http.MethodPatch, "/api/v1/links/AbC123xy"},
+		{http.MethodDelete, "/api/v1/links/AbC123xy"},
+		{http.MethodGet, "/api/v1/links/AbC123xy/stats"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{}`)))
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", rec.Code)
+			}
+		})
+	}
+}
+
+func TestAdminStoreErrorIs500(t *testing.T) {
+	admin := &stubAdmin{getFn: func(context.Context, int64, string) (*link.AdminLink, error) {
+		return nil, errors.New("db down")
+	}}
+	rec := doAdminRequest(t, newAdminTestServer(admin).Routes(), http.MethodGet, "/api/v1/links/AbC123xy", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+}

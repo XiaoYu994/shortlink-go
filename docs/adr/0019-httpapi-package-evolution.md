@@ -27,12 +27,14 @@
 ### 2. `httpapi` 的三步演进路线
 
 - **第 1 步（当前）**：保持 `internal/httpapi` 单包不动，避免在阶段 11 刚起步时做大规模机械搬迁。新增强相关的端点放进同一文件（如 OIDC 登录、回调、登出、`/me`），不再为几十行的小函数单独建文件。
-- **第 2 步（阶段 11 写登录和成员管理 API 时）**：**先拆结构体，暂不拆包**。
+- **第 2 步（阶段 11 写登录和成员管理 API 时，已完成）**：**先拆结构体，暂不拆包**。
   在 `httpapi` 包内按业务模块拆出独立的小结构体（例如 `authHandler` 只持 OIDC 和会话依赖，`memberHandler` 只持成员存储依赖），继续复用包内私有的 `writeJSON`、`writeError`、`principal`，最后由 `routes.go` 挂到同一个 `ServeMux` 上。这样既避免 `Server` 膨胀成上帝对象，又零导出污染、零循环依赖（对照 Java：拆分多个 Controller，但 Go 里不必为此各建子包）。
 - **凭证代码归位（已完成）**：API Key 令牌格式、生成、哈希及 `ErrUnauthenticated` 已并入 `identity`（与会话令牌统一使用 `TokenFormat` 和 `HashToken`），`tenant` 只保留 `Tenant` 领域模型；`postgres` 继续负责密钥签发、列表与吊销。
-- **第 3 步（阶段 12–13 审计/Webhook 进入、或依赖分叉明显时）**：按"零业务依赖底座 + 进程/业务边界"顺势拆包：
-  - `internal/httpx`：零业务依赖的通用 HTTP 底座（`chain`、`requestid`、`logging`、`metrics`、`recoverer`、`timeout`、`healthz`/`readyz`/`pprof`、`clientip`、JSON 响应与错误写出）。不 import `link`、`tenant`、`identity` 等任何业务包，杜绝循环依赖。
-  - 按进程/领域拆分 handler（`redirector` 的跳转路径与 `console` 的管理路径分离），让 `cmd/redirector` 不再引入 `identity`、OIDC、成员管理等 console 专用代码，使代码结构与 [ADR 0009](0009-process-split-and-credentials.md) 的进程边界一致。
+- **第 3 步（阶段 12 前，已完成）**：按"零业务依赖底座 + 进程/业务边界"完成拆包，并移除 `internal/httpapi`：
+  - `internal/httpx`：零业务依赖的通用 HTTP 底座（`chain`、`requestid`、`logging`、`metrics`、`recoverer`、`timeout`、`healthz`/`readyz`/`pprof`、`clientip`、JSON 响应与错误写出）。不 import `link`、`tenant`、`identity`、`click`、`idgen` 等任何业务包，杜绝循环依赖。
+  - `internal/redirector`：公开短链跳转 HTTP 层（`GET /r/{code}` + `LinkStore` / `ClickRecorder` 最小接口），复用 `httpx`；不引入 `identity`、`tenant`、限流、`oauth2` 或 `console`。
+  - `internal/console`：管理进程 HTTP 层（`authHandler`、`memberHandler`、按租户限流及 `shortlink_rate_limited_total` 指标、短链 CRUD 与统计），复用 `httpx`。
+  - 使 HTTP 层代码结构与 [ADR 0009](0009-process-split-and-credentials.md) 的进程边界一致（注：存储层目前仍同处单包 `internal/postgres`，因此 `cmd/redirector` 的传递依赖仍会经由 `postgres` 触及 `identity`；存储包按领域拆包属独立议题，不在本 ADR 范围）。
 
 ## 不做什么
 
@@ -43,10 +45,11 @@
 
 本次仅记录架构约定，不改代码。后续执行第 2、3 步时按以下标准验收：
 
-- 第 2 步完成时：新增的登录、成员 handler 各自只持有自己需要的依赖，不继续往 `Server` 塞无关字段；`make verify` 与 `make selfcheck` 全部通过。
-- 第 3 步拆包完成时：用 `go list -f '{{.Imports}}' ./internal/httpx ./cmd/redirector` 验证：
+- 第 2 步完成时：新增的登录、成员 handler 各自只持有自己需要的依赖，不继续往 `Server` 塞无关字段；`make verify` 与 `make selfcheck` 全部通过（已完成）。
+- 第 3 步拆包完成时：用 `go list -f '{{.ImportPath}} -> {{.Imports}}' ./internal/httpx ./internal/redirector ./cmd/redirector` 验证：
   - `internal/httpx` 不依赖任何业务领域包（`link`、`tenant`、`identity`、`click`）；
-  - `cmd/redirector` 不依赖 `identity` 或 console 专属的管理包。
+  - `internal/redirector` 与 `cmd/redirector` 不直接依赖 `identity` 或 `console` 管理包。
+  - `make verify` 与 `make selfcheck` 全部通过（已完成）。
 
 ## 后果
 

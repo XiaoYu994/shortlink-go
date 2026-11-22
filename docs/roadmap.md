@@ -117,7 +117,7 @@
 
 ## 阶段 12：审计日志（待立 ADR）
 
-开工前先立 ADR，定事件口径、写入事务边界和查询接口；同步评估是否按 [ADR 0019](adr/0019-httpapi-package-evolution.md) 拆出 `internal/httpx` 并分离 redirector/console HTTP 包。
+开工前先立 ADR，定事件口径、写入事务边界和查询接口；[ADR 0019](adr/0019-httpapi-package-evolution.md) 第 3 步（`internal/httpx`、`internal/redirector`、`internal/console` 拆包）已完成。
 
 - [ ] 审计表和查询接口：记录操作人、动作、目标、时间和请求编号；与业务写在同一事务里提交
 

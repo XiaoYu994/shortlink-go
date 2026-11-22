@@ -1,0 +1,52 @@
+package console
+
+import (
+	"net/http"
+
+	"shortlink/internal/identity"
+)
+
+const (
+	// apiV1Prefix 是管理 API 的版本前缀。
+	apiV1Prefix = "/api/v1"
+	// redirectPrefix 用于创建响应里的 Location 拼装（/r/{code}）。
+	redirectPrefix = "/r/"
+)
+
+/*
+Routes 返回管理进程的路由：可选 OIDC 与 GitHub OAuth 2.0 登录、登出与 /me、成员管理、
+短链增删改查、统计、存活检查、就绪检查和指标。
+鉴权和限流只包管理 API。登录回调、登出、/me、存活检查、就绪检查和指标不经过管理鉴权与按租户限流。
+每个管理路由单独包：ServeMux 没有路由组，
+套在 /api/v1/ 前缀上的中间件不会被更具体的路由继承。
+*/
+func (s *Server) Routes() http.Handler {
+	return s.base.Handler(func(mux *http.ServeMux) {
+		if s.auth != nil {
+			s.auth.registerRoutes(mux)
+		}
+		if s.members != nil {
+			mux.Handle("GET "+apiV1Prefix+"/members", s.consoleRoute(identity.PermMembersRead, s.members.handleList))
+			mux.Handle("PATCH "+apiV1Prefix+"/members/{user_id}", s.consoleRoute(identity.PermMembersWrite, s.members.handleUpdateRole))
+			mux.Handle("DELETE "+apiV1Prefix+"/members/{user_id}", s.consoleRoute(identity.PermMembersWrite, s.members.handleRemove))
+		}
+		mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
+		mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))
+		mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksRead, s.handleGet))
+		mux.Handle("PATCH "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksWrite, s.handleUpdate))
+		mux.Handle("DELETE "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksWrite, s.handleDelete))
+		mux.Handle("GET "+apiV1Prefix+"/links/{code}/stats", s.consoleRoute(identity.PermStatsRead, s.handleStats))
+	})
+}
+
+/*
+consoleRoute 给管理 handler 套上鉴权、按租户限流和权限校验。
+顺序不能反：
+1. authenticate 先确定租户和执行者身份；
+2. rateLimit 放在 requirePerm 外面，避免低权限密钥疯狂刷写接口时绕过限流（也保护以后更重的 Authorizer 实现）；
+3. requirePerm 最后按动作校验权限。
+超限或无权限的请求都不会进入 handler，也不会查库或更新缓存。
+*/
+func (s *Server) consoleRoute(perm identity.Perm, h http.HandlerFunc) http.Handler {
+	return s.authenticate(s.rateLimit(s.requirePerm(perm, h)))
+}

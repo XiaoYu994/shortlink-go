@@ -1,19 +1,15 @@
 /*
-serve 是 console 的 HTTP 模式：提供可选的 OIDC 登录、短链增删改查、统计、/healthz、/readyz 和 /metrics。
+serve 是 console 的 HTTP 模式：提供可选的 OIDC / GitHub OAuth 2.0 登录、短链增删改查、统计、/healthz、/readyz 和 /metrics。
 创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
-密钥命令仍然走 admin.go 的路径，不加载 Redis。
+密钥、租户和成员命令仍然走 admin.go 的路径，不加载 Redis。
 */
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,7 +17,8 @@ import (
 
 	"shortlink/internal/cache"
 	"shortlink/internal/config"
-	"shortlink/internal/httpapi"
+	"shortlink/internal/console"
+	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
 	"shortlink/internal/postgres"
 	"shortlink/internal/storemetrics"
@@ -73,50 +70,21 @@ func runServe() error {
 		Logger:          logger,
 	})
 
-	/*
-		OIDC_* 与 GITHUB_* 各自独立启用；全空时不挂载登录、会话与成员管理路由，只支持 API Key（ADR 0018）。
-		变量类型保持为接口，只在启用时赋值，避免把带类型的 nil 指针放进 ConsoleOptions。
-	*/
+	oidcClient, githubClient, err := initAuthProviders(cfg, logger)
+	if err != nil {
+		return err
+	}
 	var (
-		oidcClient   httpapi.OIDCClient
-		githubClient httpapi.GitHubClient
-		sessions     httpapi.SessionStore
-		members      httpapi.MemberStore
+		sessions console.SessionStore
+		members  console.MemberStore
 	)
-	if cfg.OIDC.Enabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
-			Issuer:       cfg.OIDC.Issuer,
-			ClientID:     cfg.OIDC.ClientID,
-			ClientSecret: cfg.OIDC.ClientSecret,
-			RedirectURL:  cfg.OIDC.RedirectURL,
-		})
-		cancel()
-		if err != nil {
-			return fmt.Errorf("init oidc provider: %w", err)
-		}
-		oidcClient = provider
-		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
-	}
-	if cfg.GitHub.Enabled() {
-		provider, err := identity.NewGitHubProvider(identity.GitHubConfig{
-			ClientID:     cfg.GitHub.ClientID,
-			ClientSecret: cfg.GitHub.ClientSecret,
-			RedirectURL:  cfg.GitHub.RedirectURL,
-		})
-		if err != nil {
-			return fmt.Errorf("init github provider: %w", err)
-		}
-		githubClient = provider
-		logger.Info("initialized github oauth provider")
-	}
 	if oidcClient != nil || githubClient != nil {
 		sessions = pgStore
 		members = pgStore
 	}
 
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
-	srv := httpapi.NewConsole(logger, store, cfg.RequestTimeout, registry, httpapi.ConsoleOptions{
+	srv := console.New(logger, store, cfg.RequestTimeout, registry, console.Options{
 		Keys:       pgStore,
 		Authorizer: identity.NewMapAuthorizer(),
 		OIDC:       oidcClient,
@@ -128,60 +96,52 @@ func runServe() error {
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。
 		Redis 不探：写缓存失败只记日志，管理请求照常成功（ADR 0006 的 fail-open）。
 	*/
-	srv.SetReadiness(httpapi.ReadyCheck{Name: "postgres", Ping: db.PingContext})
+	srv.SetReadiness(httpx.ReadyCheck{Name: "postgres", Ping: db.PingContext})
 
-	readWriteTimeout := cfg.RequestTimeout + 5*time.Second
-	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           srv.ConsoleRoutes(),
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       readWriteTimeout,
-		WriteTimeout:      readWriteTimeout,
-		IdleTimeout:       60 * time.Second,
-	}
+	return httpx.ListenAndServe(srv.Routes(), logger, httpx.ServeConfig{
+		Addr:            cfg.Addr,
+		RequestTimeout:  cfg.RequestTimeout,
+		DrainDelay:      cfg.DrainDelay,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		OnShutdown:      srv.SetDraining,
+	})
+}
 
-	logger.Info("listening", "addr", cfg.Addr)
-
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- httpSrv.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
+/*
+initAuthProviders 按配置初始化可选的 OIDC 与 GitHub 登录提供方。
+返回值保持接口类型，只在启用时赋值，避免把带类型的 nil 指针放进 console.Options。
+*/
+func initAuthProviders(cfg config.Config, logger *slog.Logger) (console.OIDCClient, console.GitHubClient, error) {
+	var (
+		oidcClient   console.OIDCClient
+		githubClient console.GitHubClient
+	)
+	if cfg.OIDC.Enabled() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+		})
+		cancel()
+		if err != nil {
+			return nil, nil, fmt.Errorf("init oidc provider: %w", err)
 		}
-		return nil
-	case <-signalCtx.Done():
-		logger.Info("shutting down", "cause", context.Cause(signalCtx))
+		oidcClient = provider
+		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
 	}
-
-	stop()
-
-	/*
-		先把 /readyz 打成 503，等 DRAIN_DELAY，再关监听。
-		监听还开着，这段时间进来的请求照常处理。
-		/healthz 仍然是 200，避免把正在退出的进程当成需要重启。
-		第二次信号会立刻退出，不等这段延迟。
-	*/
-	srv.SetDraining()
-	logger.Info("draining", "delay", cfg.DrainDelay)
-	if cfg.DrainDelay > 0 {
-		time.Sleep(cfg.DrainDelay)
+	if cfg.GitHub.Enabled() {
+		provider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+			ClientID:     cfg.GitHub.ClientID,
+			ClientSecret: cfg.GitHub.ClientSecret,
+			RedirectURL:  cfg.GitHub.RedirectURL,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("init github provider: %w", err)
+		}
+		githubClient = provider
+		logger.Info("initialized github oauth provider")
 	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer shutdownCancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
-	}
-	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+	return oidcClient, githubClient, nil
 }

@@ -15,9 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,8 +24,9 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/click"
 	"shortlink/internal/config"
-	"shortlink/internal/httpapi"
+	"shortlink/internal/httpx"
 	"shortlink/internal/postgres"
+	"shortlink/internal/redirector"
 	"shortlink/internal/storemetrics"
 )
 
@@ -44,10 +43,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	/*
-		盐是访客哈希的密钥。为空时不记访客，UV 会一直是 0；
-		与其静默降级，不如启动失败，让部署方把 VISITOR_SALT 配上。
-	*/
 	if cfg.VisitorSalt == "" {
 		return errors.New("VISITOR_SALT is required")
 	}
@@ -108,7 +103,7 @@ func run() error {
 		FetchTimeout:    cfg.CacheFetchTimeout,
 		Logger:          logger,
 	})
-	srv := httpapi.NewRedirector(logger, store, cfg.RequestTimeout, registry, httpapi.RedirectOptions{
+	srv := redirector.New(logger, store, cfg.RequestTimeout, registry, redirector.Options{
 		Clicks:            clicks,
 		VisitorSalt:       []byte(cfg.VisitorSalt),
 		TrustProxyHeaders: cfg.TrustProxyHeaders,
@@ -121,22 +116,6 @@ func run() error {
 	*/
 	srv.SetReadiness()
 
-	/*
-		读写超时都比 REQUEST_TIMEOUT 多 5 秒，两边跟着请求时限一起变。
-		ReadTimeout 从开始读请求算起，跳转没有请求体，但保持和 console 一致的规则。
-		WriteTimeout 从读完请求头算起，多出来的时间用来把 504 写回客户端。
-	*/
-	readWriteTimeout := cfg.RequestTimeout + 5*time.Second
-	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           srv.RedirectRoutes(),
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       readWriteTimeout,
-		WriteTimeout:      readWriteTimeout,
-		IdleTimeout:       60 * time.Second,
-	}
-
 	if cfg.PprofAddr != "" {
 		stopPprof, err := servePprof(cfg.PprofAddr, logger)
 		if err != nil {
@@ -145,55 +124,17 @@ func run() error {
 		defer stopPprof()
 	}
 
-	logger.Info("listening", "addr", cfg.Addr)
-
 	/*
-		收到 SIGINT（Ctrl+C）或 SIGTERM（容器停止）后，先把 /readyz 打成 503 并等 DRAIN_DELAY，
-		再关闭监听。监听还开着时，这段时间进来的请求照常处理。
-		/healthz 仍然是 200，避免把正在退出的进程当成需要重启。
-		Shutdown 等待这些请求结束，上限是 SHUTDOWN_TIMEOUT。
-		它们有自己的 REQUEST_TIMEOUT 兜底，慢查询不会把退出拖满。
-		收到信号后马上 stop，第二次信号恢复默认行为，摘流等待和 Shutdown 都会被立刻打断。
-		Shutdown 使用新的超时 context：信号 context 此时已经取消。
-		Shutdown 返回、run 退出后，defer 先排空点击缓冲，再关闭 Redis 和数据库。
-		排空另有一份 SHUTDOWN_TIMEOUT。进程在这之前被杀掉的话，缓冲区里的点击会丢掉。
+		ListenAndServe 收到信号后先摘流等待再 Shutdown；返回后 run 退出，
+		defer 依次关停 pprof、排空点击缓冲，最后关闭 Redis 和数据库。
 	*/
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// ListenAndServe 在 Shutdown 关掉监听后返回 ErrServerClosed，这条 goroutine 随之退出。
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- httpSrv.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		return nil
-	case <-signalCtx.Done():
-		logger.Info("shutting down", "cause", context.Cause(signalCtx))
-	}
-
-	stop()
-
-	srv.SetDraining()
-	logger.Info("draining", "delay", cfg.DrainDelay)
-	if cfg.DrainDelay > 0 {
-		time.Sleep(cfg.DrainDelay)
-	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer shutdownCancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
-	}
-	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+	return httpx.ListenAndServe(srv.Routes(), logger, httpx.ServeConfig{
+		Addr:            cfg.Addr,
+		RequestTimeout:  cfg.RequestTimeout,
+		DrainDelay:      cfg.DrainDelay,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		OnShutdown:      srv.SetDraining,
+	})
 }
 
 const (
@@ -224,7 +165,7 @@ func servePprof(addr string, logger *slog.Logger) (func(), error) {
 	runtime.SetMutexProfileFraction(mutexProfileFraction)
 
 	srv := &http.Server{
-		Handler:           httpapi.PprofHandler(),
+		Handler:           httpx.PprofHandler(),
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

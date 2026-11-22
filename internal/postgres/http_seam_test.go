@@ -16,7 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"shortlink/internal/httpapi"
+	"shortlink/internal/console"
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/fakegithub"
 	"shortlink/internal/identity/fakeoidc"
@@ -24,7 +24,7 @@ import (
 
 /*
 TestHTTPListCursorRoundTrip 把列表游标从 HTTP 响应送回下一次查询。
-编码在 httpapi，排序在 SQL。两边分开测时，游标格式对不上也会全绿。
+编码在 console，排序在 SQL。两边分开测时，游标格式对不上也会全绿。
 */
 func TestHTTPListCursorRoundTrip(t *testing.T) {
 	store, tenantID := newTestStore(t)
@@ -204,7 +204,7 @@ func TestHTTPAPIKeyScopesEnforced(t *testing.T) {
 
 /*
 TestHTTPOIDCLoginPersistsSession 端到端串联 fakeoidc、identity.OIDCProvider、
-httpapi 登录/回调路由和真实 PostgreSQL 存储，验证首次与重复登录落库和会话 Cookie 哈希一致。
+console 登录/回调路由和真实 PostgreSQL 存储，验证首次与重复登录落库和会话 Cookie 哈希一致。
 */
 func TestHTTPOIDCLoginPersistsSession(t *testing.T) {
 	store, _ := newTestStore(t)
@@ -686,24 +686,24 @@ func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeo
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+	srv := console.New(logger, store, 5*time.Second, prometheus.NewRegistry(), console.Options{
 		Keys:       store,
 		Authorizer: identity.NewMapAuthorizer(),
 		OIDC:       provider,
 		Sessions:   store,
 		Members:    store,
 	})
-	return fake, srv.ConsoleRoutes()
+	return fake, srv.Routes()
 }
 
 func loginViaFakeOIDC(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
 	t.Helper()
-	return loginViaProvider(t, handler, "/api/v1/auth/login", httpapi.OIDCFlowCookieName)
+	return loginViaProvider(t, handler, "/api/v1/auth/login", console.OIDCFlowCookieName)
 }
 
 func loginViaFakeGitHub(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
 	t.Helper()
-	return loginViaProvider(t, handler, "/api/v1/auth/github/login", httpapi.GitHubFlowCookieName)
+	return loginViaProvider(t, handler, "/api/v1/auth/github/login", console.GitHubFlowCookieName)
 }
 
 func loginViaProvider(t *testing.T, handler http.Handler, loginPath, flowCookieName string) (*http.Cookie, int64, string) {
@@ -751,7 +751,7 @@ func loginViaProvider(t *testing.T, handler http.Handler, loginPath, flowCookieN
 
 	var sessCookie *http.Cookie
 	for _, c := range cbRec.Result().Cookies() {
-		if c.Name == httpapi.SessionCookieName {
+		if c.Name == console.SessionCookieName {
 			sessCookie = c
 		}
 	}
@@ -772,11 +772,11 @@ func loginViaProvider(t *testing.T, handler http.Handler, loginPath, flowCookieN
 
 func newConsoleHandler(store *Store) http.Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+	srv := console.New(logger, store, 5*time.Second, prometheus.NewRegistry(), console.Options{
 		Keys:       store,
 		Authorizer: identity.NewMapAuthorizer(),
 	})
-	return srv.ConsoleRoutes()
+	return srv.Routes()
 }
 
 func postCreate(handler http.Handler, token string) *httptest.ResponseRecorder {
@@ -846,14 +846,14 @@ func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := httpapi.NewConsole(logger, store, 5*time.Second, prometheus.NewRegistry(), httpapi.ConsoleOptions{
+	handler := console.New(logger, store, 5*time.Second, prometheus.NewRegistry(), console.Options{
 		Keys:       store,
 		Authorizer: identity.NewMapAuthorizer(),
 		OIDC:       oidcProvider,
 		GitHub:     ghProvider,
 		Sessions:   store,
 		Members:    store,
-	}).ConsoleRoutes()
+	}).Routes()
 
 	// 1. OIDC 与 GitHub 同一邮箱登录，各自建独立用户。
 	fakeOIDC.SetUser(fakeoidc.User{
