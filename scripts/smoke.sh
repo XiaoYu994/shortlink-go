@@ -1,7 +1,8 @@
 #!/bin/sh
 # 冒烟测试：启动 redirector 和 console 两个真实进程，按 docs/api.md 的契约走一遍
 # 健康检查、创建、跳转、HEAD、停用和启用、封禁和解封、404、非法参数、过期、路由隔离、
-# 访客去重、配额、限流和指标，最后检查 SIGTERM 优雅退出。
+# 访客去重、配额、限流、Dex OIDC 登录（邀请兑现、/me、成员列表、会话创建、CSRF 与登出失效）
+# 和指标，最后检查 SIGTERM 优雅退出。
 #
 # 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/redirector、bin/console
 # 已构建、测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
@@ -190,6 +191,17 @@ export LOG_LEVEL=error
 VISITOR_SALT=${VISITOR_SALT:-smoke-visitor-salt}
 export VISITOR_SALT
 
+# 冒烟只让 console 连接本地 Dex 测试提供方；不依赖宿主机 .env 里的 OIDC_*（那里的回调端口可能是 8081）。
+SMOKE_OIDC_ISSUER=${SMOKE_OIDC_ISSUER:-http://127.0.0.1:5556/dex}
+SMOKE_OIDC_CLIENT_ID=${SMOKE_OIDC_CLIENT_ID:-shortlink-console}
+SMOKE_OIDC_CLIENT_SECRET=${SMOKE_OIDC_CLIENT_SECRET:-shortlink-console-secret}
+SMOKE_OIDC_REDIRECT_URL=${SMOKE_OIDC_REDIRECT_URL:-$CONSOLE_BASE/api/v1/auth/callback}
+SMOKE_OIDC_USER_EMAIL=${SMOKE_OIDC_USER_EMAIL:-alice@example.com}
+SMOKE_OIDC_USER_PASSWORD=${SMOKE_OIDC_USER_PASSWORD:-password}
+
+curl -fsS --max-time 5 "$SMOKE_OIDC_ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 \
+	|| fail "OIDC 服务不可达: $SMOKE_OIDC_ISSUER（使用项目自带 compose 时先运行 make deps-up）"
+
 # 64 位小写十六进制。只存在于测试库，和开发库无关。
 SMOKE_API_KEY=slk_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 SMOKE_OTHER_KEY=slk_ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
@@ -201,10 +213,15 @@ psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
 	"UPDATE tenants SET rate_limit_per_second = 100 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
 	|| fail '调高冒烟租户限流失败'
 
-# 前缀赋值只影响这一条命令，盖过 .env 里的监听地址。
+# 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
 ADDR=$redirector_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
-CONSOLE_ADDR=$console_addr ./bin/console serve >"$CONSOLE_LOG" 2>&1 &
+CONSOLE_ADDR=$console_addr \
+OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
+OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
+OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
+OIDC_REDIRECT_URL=$SMOKE_OIDC_REDIRECT_URL \
+	./bin/console serve >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
 wait_ready "$REDIRECTOR_BASE" "$REDIRECTOR_PID" redirector
@@ -460,6 +477,97 @@ psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
 	|| fail '恢复冒烟租户限流失败'
 status=$(request "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/rate-limit-restored"}')
 assert_eq "$status" 201 '限流改回后立即生效'
+
+echo 'smoke: oidc login and session'
+./bin/console member invite --tenant "$smoke_tenant_id" --email "$SMOKE_OIDC_USER_EMAIL" --role owner >/dev/null \
+	|| fail 'console member invite 失败'
+
+oidc_cookies=$TMP/oidc_cookies.txt
+login_meta=$(curl -sS --max-time 10 -L \
+	-c "$oidc_cookies" -b "$oidc_cookies" \
+	-o "$TMP/dex_login.html" -w '%{http_code} %{url_effective}' \
+	"$CONSOLE_BASE/api/v1/auth/login") || fail '访问 /api/v1/auth/login 失败'
+dex_status=${login_meta%% *}
+dex_login_url=${login_meta#* }
+assert_eq "$dex_status" 200 'GET /api/v1/auth/login 跳转 Dex 登录页状态码'
+case "$dex_login_url" in
+	"$SMOKE_OIDC_ISSUER"/*) ;;
+	*) fail "未跳转到 Dex 登录页: $dex_login_url" ;;
+esac
+
+status=$(curl -sS --max-time 10 -L \
+	-c "$oidc_cookies" -b "$oidc_cookies" \
+	-o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	--data-urlencode "login=$SMOKE_OIDC_USER_EMAIL" \
+	--data-urlencode "password=$SMOKE_OIDC_USER_PASSWORD" \
+	"$dex_login_url") || fail '提交 Dex 登录表单失败'
+assert_eq "$status" 200 'OIDC callback 登录状态码'
+grep -Fq "\"email\":\"$SMOKE_OIDC_USER_EMAIL\"" "$TMP/body" || fail "OIDC callback 响应体缺少邮箱: $(cat "$TMP/body")"
+grep -q 'sl_session' "$oidc_cookies" || fail 'OIDC callback 未写入 sl_session Cookie'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/me")
+assert_eq "$status" 200 'GET /api/v1/me 状态码'
+assert_eq "$(header Cache-Control)" 'no-store' 'GET /api/v1/me Cache-Control'
+grep -Fq "\"email\":\"$SMOKE_OIDC_USER_EMAIL\"" "$TMP/body" || fail "GET /api/v1/me 缺少用户邮箱: $(cat "$TMP/body")"
+grep -Fq "\"id\":$smoke_tenant_id,\"name\":\"smoke\",\"role\":\"owner\"" "$TMP/body" \
+	|| fail "GET /api/v1/me 缺少已兑现组织成员关系: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/members")
+assert_eq "$status" 200 'GET /api/v1/members 状态码'
+grep -Fq "\"email\":\"$SMOKE_OIDC_USER_EMAIL\"" "$TMP/body" || fail "成员列表缺少已登录用户: $(cat "$TMP/body")"
+grep -q '"role":"owner"' "$TMP/body" || fail "成员列表缺少 owner 角色: $(cat "$TMP/body")"
+
+oidc_url="https://example.com/smoke-oidc-$$-$(date +%s)"
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$oidc_cookies" \
+	-d "{\"url\":\"$oidc_url\"}" \
+	"$CONSOLE_BASE/api/v1/links")
+assert_eq "$status" 201 '会话 Cookie 创建短链状态码'
+oidc_location=$(header Location)
+case "$oidc_location" in
+	/r/*) ;;
+	*) fail "会话创建短链 Location 格式不对: $oidc_location" ;;
+esac
+oidc_code=${oidc_location#/r/}
+grep -q "\"code\":\"$oidc_code\"" "$TMP/body" || fail '会话创建短链响应体里没有 code'
+status=$(curl -sS --max-time 10 -I -o /dev/null -w '%{http_code}' "$REDIRECTOR_BASE/r/$oidc_code")
+assert_eq "$status" 302 '会话创建短链后 HEAD 跳转状态码'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-H 'Sec-Fetch-Site: cross-site' \
+	-b "$oidc_cookies" \
+	-d '{"url":"https://example.com/smoke-csrf"}' \
+	"$CONSOLE_BASE/api/v1/links")
+assert_eq "$status" 403 '跨站携带会话 Cookie 创建短链应被拒绝'
+grep -q '"cross-origin request rejected"' "$TMP/body" || fail "跨站拒绝响应体不对: $(cat "$TMP/body")"
+
+# 保存登出前的 Cookie 再调登出，用旧 Cookie 重放才能证明服务端已吊销会话。
+cp "$oidc_cookies" "$TMP/oidc_cookies_before_logout.txt"
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -b "$oidc_cookies" -c "$oidc_cookies" \
+	"$CONSOLE_BASE/api/v1/auth/logout")
+assert_eq "$status" 204 'POST /api/v1/auth/logout 状态码'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-b "$TMP/oidc_cookies_before_logout.txt" "$CONSOLE_BASE/api/v1/me")
+assert_eq "$status" 401 '登出后重放会话访问 /api/v1/me'
+grep -q '"unauthorized"' "$TMP/body" || fail "登出后 /me 响应体不是 unauthorized: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$TMP/oidc_cookies_before_logout.txt" \
+	-d '{"url":"https://example.com/after-logout"}' \
+	"$CONSOLE_BASE/api/v1/links")
+assert_eq "$status" 401 '登出后重放会话创建短链'
+grep -q '"unauthorized"' "$TMP/body" || fail "登出后创建短链响应体不是 unauthorized: $(cat "$TMP/body")"
 
 echo 'smoke: metrics'
 status=$(request "$REDIRECTOR_BASE" GET /metrics)

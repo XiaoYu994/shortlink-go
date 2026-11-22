@@ -170,7 +170,7 @@ GET /api/v1/links/{code}/stats
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
-- `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由，只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
+- `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载登录、登出、/me 与成员管理路由，只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
 
 ## 退出
 
@@ -185,4 +185,4 @@ redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007]
 ## 尚未实现
 
 - OpenTelemetry 追踪，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)
-- 用户、登录和短链管理页面，见 [ADR 0009](adr/0009-process-split-and-credentials.md)
+- 前端页面（登录、短链与成员管理界面）；目前仅提供 JSON API 和 OIDC 登录跳转，见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)

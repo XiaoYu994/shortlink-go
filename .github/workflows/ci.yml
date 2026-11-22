@@ -44,7 +44,7 @@ jobs:
           cache: true
       # 测试和冒烟都从 .env 读连接串，CI 里从 .env.example 生成一份。
       - run: cp .env.example .env
-      # CI 没有外部依赖，用 compose 起 PostgreSQL/Redis；本机已有实例时不要执行。
+      # CI 没有外部依赖，用 compose 起 PostgreSQL/Redis/Dex；本机已有实例时不要执行。
       - run: make deps-up
       # test-integration 会重建测试库；smoke 再启动真实进程验证 HTTP 行为。
       - run: make test-integration smoke

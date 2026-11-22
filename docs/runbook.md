@@ -15,7 +15,7 @@ VISITOR_SALT=dev-only-visitor-salt
 
 `.env` 已被 gitignore，不会提交。
 
-- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`link_clicks_daily`、`link_dimension_daily` 和 `link_visitors_daily`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
+- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`、`users`、`user_identities`、`memberships`、`sessions` 和 `invitations`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
 
 如果使用项目自带的 `docker-compose.yml`：
 
@@ -714,6 +714,54 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
 - 不会发邮件，也不存在“按邮箱自动合并不同提供方账号”。当受邀人通过 OIDC 登录且本次 ID Token 里的 `email` 与邀请一致、并且 `email_verified` 为 `true` 时，会在同一次登录事务里自动把该用户加进对应组织并记入 `accepted_at` / `accepted_by`。
 - 如果用户已经是该组织的成员，再次登录兑现新邀请时会关闭待兑现邀请，但保留原有角色不变。
 
+## 本地 OIDC 登录与成员管理（Dex）
+
+默认 `.env.example` 把四个 `OIDC_*` 注释掉了，只开 API Key 路径。本地联调登录、会话、`/me` 和成员管理时：
+
+1. 启动 PostgreSQL、Redis 和本地 Dex（`127.0.0.1:5556`）：
+
+   ```bash
+   make deps-up
+   ```
+
+2. 取消 `.env` 末尾 `OIDC_*` 四行的注释（保持全开，只配一部分 `console serve` 会拒绝启动）：
+
+   ```txt
+   OIDC_ISSUER=http://127.0.0.1:5556/dex
+   OIDC_CLIENT_ID=shortlink-console
+   OIDC_CLIENT_SECRET=shortlink-console-secret
+   OIDC_REDIRECT_URL=http://127.0.0.1:8081/api/v1/auth/callback
+   ```
+
+3. 预先把至少一个租户和静态账号的邀请写入库（`--tenant` 填 `key issue` 输出的 `tenant_id`，空库首次签发为 `1`），然后启动 `make run-console`（另一终端可同时启动 `make run-redirector`）：
+
+   ```bash
+   make console ARGS="key issue --name acme"
+   make console ARGS="member invite --tenant 1 --email alice@example.com --role owner"
+   make run-console
+   ```
+
+4. 完成 OIDC 登录（测试账号 `alice@example.com` / `bob@example.com`，密码均为 `password`）：
+   - 浏览器打开 `http://127.0.0.1:8081/api/v1/auth/login` 登录后，回调返回 `200`；`sl_session` 是 `HttpOnly` Cookie，可在浏览器 DevTools 的 Cookie 面板复制其值并在 `curl` 里传 `-H 'Cookie: sl_session=...'`。
+   - 或直接用 `curl` 走完 Dex 表单登录把会话存进 `cookies.txt`：
+
+   ```bash
+   DEX_LOGIN_URL=$(curl -sS -L -c cookies.txt -b cookies.txt -o /dev/null -w '%{url_effective}' http://127.0.0.1:8081/api/v1/auth/login)
+   curl -sS -L -c cookies.txt -b cookies.txt --data-urlencode 'login=alice@example.com' --data-urlencode 'password=password' "$DEX_LOGIN_URL"
+   ```
+
+   拿到 `cookies.txt` 后，用会话 Cookie 和 `X-Org-ID` 调用接口（写请求带 `X-Org-ID`，跨站来源会被 `CrossOriginProtection` 拒绝）：
+
+   ```bash
+   curl -s -b cookies.txt http://127.0.0.1:8081/api/v1/me
+   curl -s -b cookies.txt -H 'X-Org-ID: 1' http://127.0.0.1:8081/api/v1/members
+   curl -i -X POST -b cookies.txt -H 'X-Org-ID: 1' \
+     -H 'Content-Type: application/json' \
+     -d '{"url":"https://example.com"}' \
+     http://127.0.0.1:8081/api/v1/links
+   curl -i -X POST -b cookies.txt -c cookies.txt http://127.0.0.1:8081/api/v1/auth/logout
+   ```
+
 ## 查看和调整租户配额与限流
 
 租户行上有几个值：`link_usage`（本月，即 UTC 自然月，已创建的链接数，删除不减）、`link_usage_month`（这个用量属于哪个月）、`link_quota`（每月创建上限，默认 1000）、`rate_limit_per_second`（管理 API 每秒请求数，默认 10）。用运维命令查看和修改，不给管理 API 加写接口。命令只连 PostgreSQL，不连接 Redis。
@@ -865,10 +913,11 @@ make selfcheck        # test-db + verify + test-integration + smoke
 使用自己的 PostgreSQL/Redis 时跳过它，确保 `.env` 指向已有实例即可。
 
 `make smoke` 会启动两个真实进程：redirector 默认 `127.0.0.1:18080`，console 默认 `127.0.0.1:18081`，
-可分别用 `SMOKE_REDIRECTOR_ADDR`、`SMOKE_CONSOLE_ADDR` 覆盖。它使用测试库和测试 Redis，
-验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、列表和三种排序、
-修改后缓存写穿、停用和启用、封禁和解封、删除、统计、租户隔离、路由隔离和指标，最后用 SIGTERM 检查两个进程的优雅退出。
-脚本会自己设置一个 `VISITOR_SALT`（如果环境里没有）；同样会重建测试库，不碰开发库。
+可分别用 `SMOKE_REDIRECTOR_ADDR`、`SMOKE_CONSOLE_ADDR` 覆盖（若更换 `SMOKE_CONSOLE_ADDR`，需同步在 `deploy/dex.yaml` 登记对应回调地址或覆盖 `SMOKE_OIDC_*`）。它使用测试库和测试 Redis，
+先用 API Key 验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、列表和三种排序、
+修改后缓存写穿、停用和启用、封禁和解封、删除、统计、配额、限流、API Key scope、租户隔离和路由隔离，
+再邀请本地 Dex 测试用户并用 curl 走完 OIDC 授权码登录、`/api/v1/me`、`/api/v1/members`、会话 Cookie 加 `X-Org-ID` 创建并跳转、跨站写拒绝（403）和登出后重放返回 401，最后检查指标和 SIGTERM 优雅退出。
+脚本会自己设置一个 `VISITOR_SALT`（如果环境里没有），并在启动 `console serve` 时注入指向 `127.0.0.1:5556/dex`（可用 `SMOKE_OIDC_*` 覆盖）与 `$SMOKE_CONSOLE_ADDR` 回调地址的 `OIDC_*` 环境变量；同样会重建测试库，不碰开发库。
 
 测试配置在 `.env` 里：
 
@@ -907,6 +956,8 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
 | `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
 | `VISITOR_SALT is required` | `.env` 里没有配置访客哈希的盐；从 `.env.example` 补一行开发占位值 |
+| `OIDC 服务不可达` | 冒烟或启动开启 `OIDC_*` 的 console 前没起 Dex；使用项目自带 compose 时先跑 `make deps-up` |
+| `OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `OIDC_*`；要么四个全配（参考上面的 Dex 示例），要么全部留空只用 API Key |
 | 统计里 `unique_visitors` 一直是 0 | 检查 redirector 是否配置了 `VISITOR_SALT`；代理后面还需要 `TRUST_PROXY_HEADERS=true`，否则所有请求的 IP 都一样 |
 | `PATCH` 成功后仍跳旧地址 | 看 console 的 `shortlink_cache_writes_total{result="error"}`；Redis 写失败时旧值最多保留到 TTL（1 小时） |
 | 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `CACHE_MISS_CONCURRENCY` |
