@@ -39,8 +39,8 @@ func TestNewLink(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := NewLink(tt.rawURL, nil)
 			if tt.wantErr != "" {
-				var verr *ValidationError
-				if !errors.As(err, &verr) {
+				verr, ok := errors.AsType[*ValidationError](err)
+				if !ok {
 					t.Fatalf("NewLink(%q) error = %v, want *ValidationError", tt.rawURL, err)
 				}
 				if verr.Field != "url" {
@@ -82,8 +82,8 @@ func TestNewLinkExpiresAt(t *testing.T) {
 			at := tt.at
 			got, err := NewLink("https://example.com", &at)
 			if tt.wantErr != "" {
-				var verr *ValidationError
-				if !errors.As(err, &verr) {
+				verr, ok := errors.AsType[*ValidationError](err)
+				if !ok {
 					t.Fatalf("NewLink error = %v, want *ValidationError", err)
 				}
 				if verr.Field != "expires_at" {
@@ -263,8 +263,7 @@ func FuzzValidateURL(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		got, err := ValidateURL(raw)
 		if err != nil {
-			var verr *ValidationError
-			if !errors.As(err, &verr) {
+			if _, ok := errors.AsType[*ValidationError](err); !ok {
 				t.Fatalf("ValidateURL(%q) error = %v, want *ValidationError", raw, err)
 			}
 			return

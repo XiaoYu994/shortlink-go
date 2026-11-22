@@ -355,8 +355,8 @@ func TestBanCheckConstraints(t *testing.T) {
 			_, err := store.db.ExecContext(ctx, `
 UPDATE links SET banned_at = $2, ban_reason = $3, ban_source = $4 WHERE id = $1`,
 				l.ID, tt.bannedAt, tt.reason, tt.source)
-			var pgErr *pgconn.PgError
-			if !errors.As(err, &pgErr) {
+			pgErr, ok := errors.AsType[*pgconn.PgError](err)
+			if !ok {
 				t.Fatalf("error = %v, want *pgconn.PgError", err)
 			}
 			if pgErr.Code != "23514" {
