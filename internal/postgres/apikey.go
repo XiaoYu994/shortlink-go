@@ -12,6 +12,35 @@ import (
 	"shortlink/internal/tenant"
 )
 
+const (
+	insertAPIKeySQL = `INSERT INTO api_keys (tenant_id, key_hash, expires_at, scopes)
+VALUES ($1, $2, $3, $4::text[])
+RETURNING id, created_at, expires_at`
+
+	selectTenantForIssueSQL = `SELECT id, external_id FROM tenants WHERE id = $1`
+
+	insertTenantForIssueSQL = `INSERT INTO tenants (name, external_id) VALUES ($1, $2) RETURNING id`
+
+	listAPIKeysSQL = `SELECT id, tenant_id, scopes, created_at, expires_at, revoked_at
+FROM api_keys
+WHERE tenant_id = $1
+ORDER BY id`
+
+	revokeAPIKeySQL = `UPDATE api_keys
+SET revoked_at = now()
+WHERE id = $1 AND revoked_at IS NULL
+RETURNING id`
+
+	checkAPIKeyRevokedSQL = `SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1`
+
+	authenticateAPIKeySQL = `SELECT k.id, k.scopes, t.id, t.external_id, t.rate_limit_per_second
+FROM api_keys k
+JOIN tenants t ON t.id = k.tenant_id
+WHERE k.key_hash = $1
+  AND k.revoked_at IS NULL
+  AND (k.expires_at IS NULL OR k.expires_at > now())`
+)
+
 var (
 	// ErrIssueTarget 表示没有唯一确定把密钥发给哪个租户。
 	ErrIssueTarget = errors.New("issue api key: provide either tenant id or a new tenant name")
@@ -105,16 +134,14 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 	}
 	key := APIKey{TenantID: tn.ID, Scopes: scopes, ExpiresAt: expires}
 	var scannedExpires sql.NullTime
-	err = tx.QueryRowContext(ctx, `
-INSERT INTO api_keys (tenant_id, key_hash, expires_at, scopes)
-VALUES ($1, $2, $3, $4::text[])
-RETURNING id, created_at, expires_at`, tn.ID, hash, expires, permsToStrings(scopes)).Scan(&key.ID, &key.CreatedAt, &scannedExpires)
+	err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, expires, permsToStrings(scopes)).Scan(
+		&key.ID, &key.CreatedAt, &scannedExpires,
+	)
 	if err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
 	if scannedExpires.Valid {
-		t := scannedExpires.Time.UTC()
-		key.ExpiresAt = &t
+		key.ExpiresAt = nullTimeUTC(scannedExpires)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -174,8 +201,7 @@ func tenantForIssue(ctx context.Context, tx *sql.Tx, p IssueAPIKeyParams) (tenan
 	var tn tenant.Tenant
 	if p.TenantID != 0 {
 		var externalID sql.NullString
-		err := tx.QueryRowContext(ctx, `
-SELECT id, external_id FROM tenants WHERE id = $1`, p.TenantID).Scan(&tn.ID, &externalID)
+		err := tx.QueryRowContext(ctx, selectTenantForIssueSQL, p.TenantID).Scan(&tn.ID, &externalID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return tenant.Tenant{}, ErrTenantNotFound
 		}
@@ -192,9 +218,7 @@ SELECT id, external_id FROM tenants WHERE id = $1`, p.TenantID).Scan(&tn.ID, &ex
 	if p.ExternalID != "" {
 		external = p.ExternalID
 	}
-	err := tx.QueryRowContext(ctx, `
-INSERT INTO tenants (name, external_id) VALUES ($1, $2) RETURNING id`, p.Name, external).Scan(&tn.ID)
-	if err != nil {
+	if err := tx.QueryRowContext(ctx, insertTenantForIssueSQL, p.Name, external).Scan(&tn.ID); err != nil {
 		return tenant.Tenant{}, fmt.Errorf("issue api key: %w", err)
 	}
 	tn.ExternalID = p.ExternalID
@@ -214,19 +238,14 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID int64) ([]APIKey, erro
 	}
 
 	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`, tenantID).Scan(&exists)
-	if err != nil {
+	if err := s.db.QueryRowContext(ctx, tenantExistsSQL, tenantID).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("list api keys: %w", err)
 	}
 	if !exists {
 		return nil, ErrTenantNotFound
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, tenant_id, scopes, created_at, expires_at, revoked_at
-FROM api_keys
-WHERE tenant_id = $1
-ORDER BY id`, tenantID)
+	rows, err := s.db.QueryContext(ctx, listAPIKeysSQL, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list api keys: %w", err)
 	}
@@ -234,27 +253,9 @@ ORDER BY id`, tenantID)
 
 	var keys []APIKey
 	for rows.Next() {
-		var (
-			key       APIKey
-			rawScopes []string
-			expiresAt sql.NullTime
-			revokedAt sql.NullTime
-		)
-		if err := rows.Scan(&key.ID, &key.TenantID, &rawScopes, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
-			return nil, fmt.Errorf("list api keys: %w", err)
-		}
-		scopes, err := parseAPIKeyScopes(rawScopes)
+		key, err := scanAPIKey(rows)
 		if err != nil {
 			return nil, fmt.Errorf("list api keys: %w", err)
-		}
-		key.Scopes = scopes
-		if expiresAt.Valid {
-			t := expiresAt.Time.UTC()
-			key.ExpiresAt = &t
-		}
-		if revokedAt.Valid {
-			t := revokedAt.Time.UTC()
-			key.RevokedAt = &t
 		}
 		keys = append(keys, key)
 	}
@@ -262,6 +263,26 @@ ORDER BY id`, tenantID)
 		return nil, fmt.Errorf("list api keys: %w", err)
 	}
 	return keys, nil
+}
+
+func scanAPIKey(scanner rowScanner) (APIKey, error) {
+	var (
+		key       APIKey
+		rawScopes []string
+		expiresAt sql.NullTime
+		revokedAt sql.NullTime
+	)
+	if err := scanner.Scan(&key.ID, &key.TenantID, &rawScopes, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
+		return APIKey{}, err
+	}
+	scopes, err := parseAPIKeyScopes(rawScopes)
+	if err != nil {
+		return APIKey{}, err
+	}
+	key.Scopes = scopes
+	key.ExpiresAt = nullTimeUTC(expiresAt)
+	key.RevokedAt = nullTimeUTC(revokedAt)
+	return key, nil
 }
 
 /*
@@ -278,11 +299,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID int64) error {
 	}
 
 	var id int64
-	err := s.db.QueryRowContext(ctx, `
-UPDATE api_keys
-SET revoked_at = now()
-WHERE id = $1 AND revoked_at IS NULL
-RETURNING id`, keyID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, revokeAPIKeySQL, keyID).Scan(&id)
 	if err == nil {
 		return nil
 	}
@@ -291,8 +308,7 @@ RETURNING id`, keyID).Scan(&id)
 	}
 
 	var revoked bool
-	err = s.db.QueryRowContext(ctx, `
-SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1`, keyID).Scan(&revoked)
+	err = s.db.QueryRowContext(ctx, checkAPIKeyRevokedSQL, keyID).Scan(&revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrAPIKeyNotFound
 	}
@@ -303,4 +319,44 @@ SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1`, keyID).Scan(&revoked
 		return fmt.Errorf("revoke api key: row %d was not updated", keyID)
 	}
 	return ErrAPIKeyRevoked
+}
+
+/*
+Authenticate 用 API Key 的哈希查找租户、密钥编号、权限范围和限流配置，返回对应的 Principal。
+格式不对、查无此密钥、已过期、已吊销都返回 identity.ErrUnauthenticated。
+这几种情况共用一个错误，调用方返回同一个 401，不透露密钥是否存在过。
+其他错误原样往上送，避免把数据库故障说成密钥无效。
+到期时刻本身算过期，界限和链接一样是 expires_at > now()。
+*/
+func (s *Store) Authenticate(ctx context.Context, token string) (identity.Principal, error) {
+	if err := ctx.Err(); err != nil {
+		return identity.Principal{}, err
+	}
+	if !identity.APIKeyToken.Valid(token) {
+		return identity.Principal{}, identity.ErrUnauthenticated
+	}
+	var (
+		keyID      int64
+		rawScopes  []string
+		tn         tenant.Tenant
+		externalID sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, authenticateAPIKeySQL, identity.HashToken(token)).Scan(
+		&keyID, &rawScopes, &tn.ID, &externalID, &tn.RateLimit,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return identity.Principal{}, identity.ErrUnauthenticated
+	}
+	if err != nil {
+		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)
+	}
+	if externalID.Valid {
+		tn.ExternalID = externalID.String
+	}
+	return identity.Principal{
+		Tenant:    tn,
+		ActorKind: identity.ActorAPIKey,
+		ActorID:   keyID,
+		Scopes:    authScopes(rawScopes),
+	}, nil
 }

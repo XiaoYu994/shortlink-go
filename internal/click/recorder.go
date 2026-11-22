@@ -1,11 +1,3 @@
-/*
-Package click 异步累计短链点击，并负责来源、设备、客户端和访客的归类（第 10、11 课）。
-
-跳转请求构造一次 Click 后放进缓冲 channel。后台 goroutine 按批交给存储，
-进程退出前由 Close 把缓冲区排空。这条 goroutine 在 New 里启动，
-在 channel 被关闭且排空写完后退出。入口会 recover：panic 时停掉记录，
-并把错误交给 Close。
-*/
 package click
 
 import (
@@ -216,10 +208,12 @@ func (r *Recorder) loop() {
 			batch = append(batch, c)
 			if len(batch) >= r.batchSize {
 				r.flush(batch)
+				clear(batch)
 				batch = batch[:0]
 			}
 		case <-ticker.C:
 			r.flush(batch)
+			clear(batch)
 			batch = batch[:0]
 		}
 	}

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"shortlink/internal/identity"
 	"shortlink/internal/tenant"
 )
@@ -17,6 +15,90 @@ import (
 const (
 	identityUniqueConstraint = "uq_user_identities_issuer_subject"
 	maxIdentityLoginAttempts = 2
+
+	insertSessionSQL = `INSERT INTO sessions (user_id, token_hash, expires_at)
+VALUES ($1, $2, now() + ($3::bigint * interval '1 microsecond'))
+RETURNING id, created_at, expires_at, now()`
+
+	updateUserIdentitySQL = `UPDATE user_identities
+SET email = CASE WHEN $1 <> '' THEN $1 ELSE email END,
+    email_verified = CASE
+        WHEN $1 = '' THEN email_verified
+        WHEN $1 = email AND email_verified THEN TRUE
+        ELSE $2
+    END
+WHERE issuer = $3 AND subject = $4
+RETURNING user_id`
+
+	updateUserProfileSQL = `UPDATE users
+SET email = CASE WHEN $1 <> '' THEN $1 ELSE email END,
+    name = CASE WHEN $2 <> '' THEN $2 ELSE name END
+WHERE id = $3
+RETURNING id, email, name, created_at`
+
+	insertUserSQL = `INSERT INTO users (email, name)
+VALUES ($1, $2)
+RETURNING id, email, name, created_at`
+
+	insertUserIdentitySQL = `INSERT INTO user_identities (user_id, issuer, subject, email, email_verified)
+VALUES ($1, $2, $3, $4, $5)`
+
+	// 按 id 排序加行锁避免多邀请并发兑现死锁；已是组织成员时 ON CONFLICT 保留原角色，同时关闭待兑现邀请。
+	redeemInvitationsSQL = `WITH locked AS (
+    SELECT i.id
+    FROM invitations i
+    WHERE i.email = $2
+      AND i.accepted_at IS NULL
+      AND i.revoked_at IS NULL
+      AND (i.expires_at IS NULL OR i.expires_at > now())
+      AND EXISTS (SELECT 1 FROM tenants t WHERE t.id = i.tenant_id)
+    ORDER BY i.id
+    FOR UPDATE OF i
+),
+redeemed AS (
+    UPDATE invitations i
+    SET accepted_at = now(),
+        accepted_by = $1
+    FROM locked l
+    WHERE i.id = l.id
+    RETURNING i.tenant_id, i.role
+)
+INSERT INTO memberships (user_id, tenant_id, role)
+SELECT $1, r.tenant_id, r.role
+FROM redeemed r
+ON CONFLICT (user_id, tenant_id) DO NOTHING`
+
+	authenticateSessionForOrgSQL = `SELECT u.id,
+       t.id, t.external_id, t.rate_limit_per_second,
+       m.role
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+LEFT JOIN memberships m ON m.user_id = u.id AND m.tenant_id = $2
+LEFT JOIN tenants t ON t.id = m.tenant_id
+WHERE s.token_hash = $1
+  AND s.revoked_at IS NULL
+  AND s.expires_at > now()`
+
+	getSessionInfoSQL = `SELECT u.id, u.email, u.name, u.created_at, s.expires_at,
+       COALESCE((
+           SELECT json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'role', m.role)
+               ORDER BY t.id
+           )
+           FROM memberships m
+           JOIN tenants t ON t.id = m.tenant_id
+           WHERE m.user_id = u.id
+       ), '[]'::json)
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+WHERE s.token_hash = $1
+  AND s.revoked_at IS NULL
+  AND s.expires_at > now()`
+
+	revokeSessionSQL = `UPDATE sessions
+SET revoked_at = now()
+WHERE token_hash = $1
+  AND revoked_at IS NULL`
 )
 
 var errIdentityConflict = errors.New("external identity unique conflict")
@@ -83,12 +165,9 @@ func (s *Store) createSessionForIdentityTx(ctx context.Context, id identity.Exte
 	*/
 	sess := identity.Session{UserID: user.ID}
 	var dbNow time.Time
-	err = tx.QueryRowContext(ctx, `
-INSERT INTO sessions (user_id, token_hash, expires_at)
-VALUES ($1, $2, now() + ($3::bigint * interval '1 microsecond'))
-RETURNING id, created_at, expires_at, now()`,
-		user.ID, hash, ttl.Microseconds(),
-	).Scan(&sess.ID, &sess.CreatedAt, &sess.ExpiresAt, &dbNow)
+	err = tx.QueryRowContext(ctx, insertSessionSQL, user.ID, hash, ttl.Microseconds()).Scan(
+		&sess.ID, &sess.CreatedAt, &sess.ExpiresAt, &dbNow,
+	)
 	if err != nil {
 		return identity.IssuedSession{}, fmt.Errorf("create session for identity: insert session: %w", err)
 	}
@@ -109,26 +188,13 @@ RETURNING id, created_at, expires_at, now()`,
 
 func upsertExternalUserTx(ctx context.Context, tx *sql.Tx, id identity.ExternalIdentity) (identity.User, error) {
 	var userID int64
-	err := tx.QueryRowContext(ctx, `
-UPDATE user_identities
-SET email = CASE WHEN $1 <> '' THEN $1 ELSE email END,
-    email_verified = CASE
-        WHEN $1 = '' THEN email_verified
-        WHEN $1 = email AND email_verified THEN TRUE
-        ELSE $2
-    END
-WHERE issuer = $3 AND subject = $4
-RETURNING user_id`, id.Email, id.EmailVerified, id.Issuer, id.Subject).Scan(&userID)
+	err := tx.QueryRowContext(ctx, updateUserIdentitySQL, id.Email, id.EmailVerified, id.Issuer, id.Subject).Scan(&userID)
 	switch {
 	case err == nil:
 		var user identity.User
-		err = tx.QueryRowContext(ctx, `
-UPDATE users
-SET email = CASE WHEN $1 <> '' THEN $1 ELSE email END,
-    name = CASE WHEN $2 <> '' THEN $2 ELSE name END
-WHERE id = $3
-RETURNING id, email, name, created_at`,
-			id.Email, id.Name, userID).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt)
+		err = tx.QueryRowContext(ctx, updateUserProfileSQL, id.Email, id.Name, userID).Scan(
+			&user.ID, &user.Email, &user.Name, &user.CreatedAt,
+		)
 		if errors.Is(err, sql.ErrNoRows) {
 			return identity.User{}, fmt.Errorf("create session for identity: user %d missing for identity", userID)
 		}
@@ -139,72 +205,37 @@ RETURNING id, email, name, created_at`,
 		return user, nil
 
 	case errors.Is(err, sql.ErrNoRows):
-		var user identity.User
-		err = tx.QueryRowContext(ctx, `
-INSERT INTO users (email, name)
-VALUES ($1, $2)
-RETURNING id, email, name, created_at`,
-			id.Email, id.Name).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt)
-		if err != nil {
-			return identity.User{}, fmt.Errorf("create session for identity: insert user: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO user_identities (user_id, issuer, subject, email, email_verified)
-VALUES ($1, $2, $3, $4, $5)`,
-			user.ID, id.Issuer, id.Subject, id.Email, id.EmailVerified); err != nil {
-			if isUniqueConstraintViolation(err, identityUniqueConstraint) {
-				return identity.User{}, errIdentityConflict
-			}
-			return identity.User{}, fmt.Errorf("create session for identity: insert identity: %w", err)
-		}
-		user.CreatedAt = user.CreatedAt.UTC()
-		return user, nil
+		return insertExternalUserTx(ctx, tx, id)
 
 	default:
 		return identity.User{}, fmt.Errorf("create session for identity: upsert identity: %w", err)
 	}
 }
 
+func insertExternalUserTx(ctx context.Context, tx *sql.Tx, id identity.ExternalIdentity) (identity.User, error) {
+	var user identity.User
+	err := tx.QueryRowContext(ctx, insertUserSQL, id.Email, id.Name).Scan(
+		&user.ID, &user.Email, &user.Name, &user.CreatedAt,
+	)
+	if err != nil {
+		return identity.User{}, fmt.Errorf("create session for identity: insert user: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, insertUserIdentitySQL,
+		user.ID, id.Issuer, id.Subject, id.Email, id.EmailVerified); err != nil {
+		if isUniqueConstraintViolation(err, identityUniqueConstraint) {
+			return identity.User{}, errIdentityConflict
+		}
+		return identity.User{}, fmt.Errorf("create session for identity: insert identity: %w", err)
+	}
+	user.CreatedAt = user.CreatedAt.UTC()
+	return user, nil
+}
+
 func redeemInvitationsTx(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
-	// 按 id 排序加行锁避免多邀请并发兑现死锁；已是组织成员时 ON CONFLICT 保留原角色，同时关闭待兑现邀请。
-	if _, err := tx.ExecContext(ctx, `
-WITH locked AS (
-    SELECT i.id
-    FROM invitations i
-    WHERE i.email = $2
-      AND i.accepted_at IS NULL
-      AND i.revoked_at IS NULL
-      AND (i.expires_at IS NULL OR i.expires_at > now())
-      AND EXISTS (SELECT 1 FROM tenants t WHERE t.id = i.tenant_id)
-    ORDER BY i.id
-    FOR UPDATE OF i
-),
-redeemed AS (
-    UPDATE invitations i
-    SET accepted_at = now(),
-        accepted_by = $1
-    FROM locked l
-    WHERE i.id = l.id
-    RETURNING i.tenant_id, i.role
-)
-INSERT INTO memberships (user_id, tenant_id, role)
-SELECT $1, r.tenant_id, r.role
-FROM redeemed r
-ON CONFLICT (user_id, tenant_id) DO NOTHING`,
-		userID, email,
-	); err != nil {
+	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL, userID, email); err != nil {
 		return fmt.Errorf("create session for identity: redeem invitations: %w", err)
 	}
 	return nil
-}
-
-func isUniqueConstraintViolation(err error, constraint string) bool {
-	return isConstraintViolation(err, "23505", constraint)
-}
-
-func isConstraintViolation(err error, code, constraint string) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == code && pgErr.ConstraintName == constraint
 }
 
 /*
@@ -228,19 +259,9 @@ func (s *Store) AuthenticateSessionForOrg(ctx context.Context, token string, org
 		rateLimit  sql.NullInt64
 		roleStr    sql.NullString
 	)
-	err := s.db.QueryRowContext(ctx, `
-SELECT u.id,
-       t.id, t.external_id, t.rate_limit_per_second,
-       m.role
-FROM sessions s
-JOIN users u ON u.id = s.user_id
-LEFT JOIN memberships m ON m.user_id = u.id AND m.tenant_id = $2
-LEFT JOIN tenants t ON t.id = m.tenant_id
-WHERE s.token_hash = $1
-  AND s.revoked_at IS NULL
-  AND s.expires_at > now()`,
-		identity.HashToken(token), orgID,
-	).Scan(&userID, &tenantID, &externalID, &rateLimit, &roleStr)
+	err := s.db.QueryRowContext(ctx, authenticateSessionForOrgSQL, identity.HashToken(token), orgID).Scan(
+		&userID, &tenantID, &externalID, &rateLimit, &roleStr,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Principal{}, identity.ErrUnauthenticated
 	}
@@ -287,24 +308,9 @@ func (s *Store) GetSessionInfo(ctx context.Context, token string) (identity.Sess
 		info     identity.SessionInfo
 		orgsJSON []byte
 	)
-	err := s.db.QueryRowContext(ctx, `
-SELECT u.id, u.email, u.name, u.created_at, s.expires_at,
-       COALESCE((
-           SELECT json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'role', m.role)
-               ORDER BY t.id
-           )
-           FROM memberships m
-           JOIN tenants t ON t.id = m.tenant_id
-           WHERE m.user_id = u.id
-       ), '[]'::json)
-FROM sessions s
-JOIN users u ON u.id = s.user_id
-WHERE s.token_hash = $1
-  AND s.revoked_at IS NULL
-  AND s.expires_at > now()`,
-		identity.HashToken(token),
-	).Scan(&info.User.ID, &info.User.Email, &info.User.Name, &info.User.CreatedAt, &info.ExpiresAt, &orgsJSON)
+	err := s.db.QueryRowContext(ctx, getSessionInfoSQL, identity.HashToken(token)).Scan(
+		&info.User.ID, &info.User.Email, &info.User.Name, &info.User.CreatedAt, &info.ExpiresAt, &orgsJSON,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.SessionInfo{}, identity.ErrUnauthenticated
 	}
@@ -314,26 +320,36 @@ WHERE s.token_hash = $1
 	info.User.CreatedAt = info.User.CreatedAt.UTC()
 	info.ExpiresAt = info.ExpiresAt.UTC()
 
-	var orgs []struct {
+	orgs, err := parseUserOrgsJSON(orgsJSON)
+	if err != nil {
+		return identity.SessionInfo{}, fmt.Errorf("get session info: %w", err)
+	}
+	info.Orgs = orgs
+	return info, nil
+}
+
+func parseUserOrgsJSON(raw []byte) ([]identity.UserOrg, error) {
+	var rows []struct {
 		ID   int64  `json:"id"`
 		Name string `json:"name"`
 		Role string `json:"role"`
 	}
-	if err := json.Unmarshal(orgsJSON, &orgs); err != nil {
-		return identity.SessionInfo{}, fmt.Errorf("get session info: decode orgs: %w", err)
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("decode orgs: %w", err)
 	}
-	for _, org := range orgs {
-		role := identity.Role(org.Role)
+	orgs := make([]identity.UserOrg, 0, len(rows))
+	for _, row := range rows {
+		role := identity.Role(row.Role)
 		if !role.Valid() {
-			return identity.SessionInfo{}, fmt.Errorf("get session info: invalid role %q", org.Role)
+			return nil, fmt.Errorf("invalid role %q", row.Role)
 		}
-		info.Orgs = append(info.Orgs, identity.UserOrg{
-			ID:   org.ID,
-			Name: org.Name,
+		orgs = append(orgs, identity.UserOrg{
+			ID:   row.ID,
+			Name: row.Name,
 			Role: role,
 		})
 	}
-	return info, nil
+	return orgs, nil
 }
 
 /*
@@ -347,13 +363,7 @@ func (s *Store) RevokeSession(ctx context.Context, token string) error {
 	if !identity.SessionToken.Valid(token) {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE sessions
-SET revoked_at = now()
-WHERE token_hash = $1
-  AND revoked_at IS NULL`,
-		identity.HashToken(token),
-	); err != nil {
+	if _, err := s.db.ExecContext(ctx, revokeSessionSQL, identity.HashToken(token)); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil

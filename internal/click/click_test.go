@@ -81,8 +81,8 @@ func TestVisitorHashChangesByDayAndMetadata(t *testing.T) {
 	day := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 	base := visitorHash(salt, day, "203.0.113.7", "Mozilla/5.0")
-	if len(base) != visitorHashBytes {
-		t.Fatalf("hash length = %d, want %d", len(base), visitorHashBytes)
+	if len(base) != VisitorHashBytes {
+		t.Fatalf("hash length = %d, want %d", len(base), VisitorHashBytes)
 	}
 	if !bytes.Equal(base, visitorHash(salt, day.Add(time.Hour), "203.0.113.7", "Mozilla/5.0")) {
 		t.Error("hash changed within the same UTC day")

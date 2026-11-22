@@ -13,6 +13,22 @@ import (
 const (
 	invitationPendingConstraint = "uq_invitations_pending_tenant_email"
 	invitationExpiresConstraint = "ck_invitations_expires_after_created"
+
+	tenantExistsSQL = `SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`
+
+	// 部分唯一索引只看 accepted_at 和 revoked_at，不看 expires_at；先关闭已过期旧邀请再插入。
+	expireStaleInvitationsSQL = `UPDATE invitations
+SET revoked_at = now()
+WHERE tenant_id = $1
+  AND email = $2
+  AND accepted_at IS NULL
+  AND revoked_at IS NULL
+  AND expires_at IS NOT NULL
+  AND expires_at <= now()`
+
+	insertInvitationSQL = `INSERT INTO invitations (tenant_id, email, role, invited_by, expires_at)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, tenant_id, email, role, invited_by, created_at, expires_at`
 )
 
 var (
@@ -40,21 +56,9 @@ CreateInvitation 在指定租户下登记一条待兑现的成员邀请。
 再写入新邀请，避免部分唯一索引永久阻塞过期后的重邀。
 */
 func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) (identity.Invitation, error) {
-	if p.TenantID <= 0 {
-		return identity.Invitation{}, ErrTenantNotFound
-	}
-	email, err := identity.NormalizeEmail(p.Email)
+	email, err := validateCreateInvitation(p)
 	if err != nil {
 		return identity.Invitation{}, err
-	}
-	if !p.Role.Valid() {
-		return identity.Invitation{}, fmt.Errorf("%w: %q", identity.ErrInvalidRole, p.Role)
-	}
-	if p.InvitedBy != nil && *p.InvitedBy <= 0 {
-		return identity.Invitation{}, errors.New("create invitation: invited_by must be positive")
-	}
-	if p.ExpiresAt != nil && !p.ExpiresAt.After(time.Now()) {
-		return identity.Invitation{}, ErrInvitationExpiresNotFuture
 	}
 	if err := ctx.Err(); err != nil {
 		return identity.Invitation{}, err
@@ -67,28 +71,47 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 	defer func() { _ = tx.Rollback() }()
 
 	var exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`, p.TenantID).Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, tenantExistsSQL, p.TenantID).Scan(&exists); err != nil {
 		return identity.Invitation{}, fmt.Errorf("create invitation: check tenant: %w", err)
 	}
 	if !exists {
 		return identity.Invitation{}, ErrTenantNotFound
 	}
-
-	// 部分唯一索引只看 accepted_at 和 revoked_at，不看 expires_at；先关闭已过期旧邀请再插入。
-	if _, err := tx.ExecContext(ctx, `
-UPDATE invitations
-SET revoked_at = now()
-WHERE tenant_id = $1
-  AND email = $2
-  AND accepted_at IS NULL
-  AND revoked_at IS NULL
-  AND expires_at IS NOT NULL
-  AND expires_at <= now()`,
-		p.TenantID, email,
-	); err != nil {
+	if _, err := tx.ExecContext(ctx, expireStaleInvitationsSQL, p.TenantID, email); err != nil {
 		return identity.Invitation{}, fmt.Errorf("create invitation: expire stale: %w", err)
 	}
 
+	inv, err := insertInvitationTx(ctx, tx, p, email)
+	if err != nil {
+		return identity.Invitation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return identity.Invitation{}, fmt.Errorf("create invitation: commit: %w", err)
+	}
+	return inv, nil
+}
+
+func validateCreateInvitation(p CreateInvitationParams) (string, error) {
+	if p.TenantID <= 0 {
+		return "", ErrTenantNotFound
+	}
+	email, err := identity.NormalizeEmail(p.Email)
+	if err != nil {
+		return "", err
+	}
+	if !p.Role.Valid() {
+		return "", fmt.Errorf("%w: %q", identity.ErrInvalidRole, p.Role)
+	}
+	if p.InvitedBy != nil && *p.InvitedBy <= 0 {
+		return "", errors.New("create invitation: invited_by must be positive")
+	}
+	if p.ExpiresAt != nil && !p.ExpiresAt.After(time.Now()) {
+		return "", ErrInvitationExpiresNotFuture
+	}
+	return email, nil
+}
+
+func insertInvitationTx(ctx context.Context, tx *sql.Tx, p CreateInvitationParams, email string) (identity.Invitation, error) {
 	var invitedBy sql.NullInt64
 	if p.InvitedBy != nil {
 		invitedBy = sql.NullInt64{Int64: *p.InvitedBy, Valid: true}
@@ -104,10 +127,7 @@ WHERE tenant_id = $1
 		scannedInvitedBy sql.NullInt64
 		scannedExpiresAt sql.NullTime
 	)
-	err = tx.QueryRowContext(ctx, `
-INSERT INTO invitations (tenant_id, email, role, invited_by, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, tenant_id, email, role, invited_by, created_at, expires_at`,
+	err := tx.QueryRowContext(ctx, insertInvitationSQL,
 		p.TenantID, email, string(p.Role), invitedBy, expiresAt,
 	).Scan(&inv.ID, &inv.TenantID, &inv.Email, &scannedRole, &scannedInvitedBy, &inv.CreatedAt, &scannedExpiresAt)
 	if err != nil {
@@ -126,13 +146,6 @@ RETURNING id, tenant_id, email, role, invited_by, created_at, expires_at`,
 		v := scannedInvitedBy.Int64
 		inv.InvitedBy = &v
 	}
-	if scannedExpiresAt.Valid {
-		t := scannedExpiresAt.Time.UTC()
-		inv.ExpiresAt = &t
-	}
-
-	if err := tx.Commit(); err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: commit: %w", err)
-	}
+	inv.ExpiresAt = nullTimeUTC(scannedExpiresAt)
 	return inv, nil
 }

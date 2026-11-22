@@ -105,7 +105,7 @@ var ErrNotUpdated = errors.New("cache not updated after successful write")
 
 /*
 LinkStore 是装饰器需要的完整能力，按基础、管理、统计和平台下架分组。
-接口放在使用方，cache 就不依赖 httpapi 和 postgres。
+接口放在使用方，cache 就不依赖 redirector、console 和 postgres。
 Create、Update、Delete、Ban、Unban 除了写库还要维护缓存，其余方法直接透传。
 */
 type LinkStore interface {
@@ -280,8 +280,7 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		return found, err
 	})
 	if ctx.Err() == nil {
-		var shedErr fetchShedError
-		if errors.As(err, &shedErr) {
+		if shedErr, ok := errors.AsType[fetchShedError](err); ok {
 			s.shed.WithLabelValues(shedErr.path).Inc()
 		}
 	}
@@ -594,18 +593,11 @@ func (s *Store) recheckAfterPositiveWrite(ctx context.Context, key, code string)
 	case readErr == nil:
 		return false, nil
 	case errors.Is(readErr, link.ErrNotFound):
-		return true, s.writeNegativeAfterRecheck(ctx, key)
+		return true, s.writeCommittedResult(ctx, key, nil)
 	default:
 		s.logger.WarnContext(ctx, "recheck link after cache write", "code", code, "err", readErr)
-		return true, s.writeNegativeAfterRecheck(ctx, key)
+		return true, s.writeCommittedResult(ctx, key, nil)
 	}
-}
-
-// writeNegativeAfterRecheck 补写负缓存，脱离请求取消，用自己的一份超时。
-func (s *Store) writeNegativeAfterRecheck(ctx context.Context, key string) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
-	defer cancel()
-	return s.writeCache(writeCtx, key, nil, writeOverwrite)
 }
 
 // notUpdated 给「库写成功、缓存没更新」的错误加上操作名和哨兵。

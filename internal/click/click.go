@@ -1,3 +1,11 @@
+/*
+Package click 异步累计短链点击，并负责来源、设备、客户端和访客的归类（第 10、11 课）。
+
+跳转请求构造一次 Click 后放进缓冲 channel。后台 goroutine 按批交给存储，
+进程退出前由 Close 把缓冲区排空。这条 goroutine 在 New 里启动，
+在 channel 被关闭且排空写完后退出。入口会 recover：panic 时停掉记录，
+并把错误交给 Close。
+*/
 package click
 
 import (
@@ -17,7 +25,8 @@ Referer 超限直接归 other；User-Agent 截断后再参与分类和哈希。
 const (
 	maxRefererBytes   = 2048
 	maxUserAgentBytes = 512
-	visitorHashBytes  = 16
+	// VisitorHashBytes 是按天访客哈希截断后的字节数，写入 link_visitors_daily 前由存储层核对。
+	VisitorHashBytes = 16
 )
 
 // 来源、设备和客户端的固定取值。设备、客户端的顺序也是统计接口补零的顺序。
@@ -219,7 +228,7 @@ func visitorHash(salt []byte, at time.Time, clientIP, ua string) []byte {
 	mac.Write([]byte{0})
 	mac.Write([]byte(ua))
 	sum := mac.Sum(nil)
-	return sum[:visitorHashBytes]
+	return sum[:VisitorHashBytes]
 }
 
 // truncate 按字节截断，避免恶意超长头放大内存和哈希开销。

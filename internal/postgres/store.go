@@ -16,10 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"shortlink/internal/identity"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
-	"shortlink/internal/tenant"
 )
 
 const (
@@ -104,7 +102,11 @@ func DefaultPoolConfig() PoolConfig {
 	}
 }
 
-// Store 是 PostgreSQL 版的链接存储，实现 httpapi.LinkStore。
+/*
+Store 是 PostgreSQL 存储层门面，隐式实现 redirector.LinkStore、console.Store、
+click.Store、console.APIKeyAuthenticator、console.SessionStore、console.MemberStore
+以及 cmd/console 运维命令所需的存储能力。
+*/
 type Store struct {
 	db *sql.DB
 	// generate 可以替换，测试里用来强制制造短码冲突。
@@ -210,54 +212,25 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 	return &l, nil
 }
 
-/*
-Authenticate 用 API Key 的哈希查找租户、密钥编号、权限范围和限流配置，返回对应的 Principal。
-格式不对、查无此密钥、已过期、已吊销都返回 identity.ErrUnauthenticated。
-这几种情况共用一个错误，调用方返回同一个 401，不透露密钥是否存在过。
-其他错误原样往上送，避免把数据库故障说成密钥无效。
-到期时刻本身算过期，界限和链接一样是 expires_at > now()。
-*/
-func (s *Store) Authenticate(ctx context.Context, token string) (identity.Principal, error) {
-	if err := ctx.Err(); err != nil {
-		return identity.Principal{}, err
-	}
-	if !identity.APIKeyToken.Valid(token) {
-		return identity.Principal{}, identity.ErrUnauthenticated
-	}
-	var (
-		keyID      int64
-		rawScopes  []string
-		tn         tenant.Tenant
-		externalID sql.NullString
-	)
-	err := s.db.QueryRowContext(ctx, `
-SELECT k.id, k.scopes, t.id, t.external_id, t.rate_limit_per_second
-FROM api_keys k
-JOIN tenants t ON t.id = k.tenant_id
-WHERE k.key_hash = $1
-  AND k.revoked_at IS NULL
-  AND (k.expires_at IS NULL OR k.expires_at > now())`, identity.HashToken(token)).Scan(
-		&keyID, &rawScopes, &tn.ID, &externalID, &tn.RateLimit,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return identity.Principal{}, identity.ErrUnauthenticated
-	}
-	if err != nil {
-		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)
-	}
-	if externalID.Valid {
-		tn.ExternalID = externalID.String
-	}
-	return identity.Principal{
-		Tenant:    tn,
-		ActorKind: identity.ActorAPIKey,
-		ActorID:   keyID,
-		Scopes:    authScopes(rawScopes),
-	}, nil
-}
-
 // isUniqueViolation 报告错误是否是 PostgreSQL 的唯一约束冲突（SQLSTATE 23505）。
 func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == "23505"
+}
+
+func isUniqueConstraintViolation(err error, constraint string) bool {
+	return isConstraintViolation(err, "23505", constraint)
+}
+
+func isConstraintViolation(err error, code, constraint string) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == code && pgErr.ConstraintName == constraint
+}
+
+func nullTimeUTC(nt sql.NullTime) *time.Time {
+	if !nt.Valid {
+		return nil
+	}
+	t := nt.Time.UTC()
+	return &t
 }

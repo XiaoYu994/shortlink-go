@@ -62,9 +62,10 @@ WHERE l.id = data.id`
 取值和迁移里的 CHECK 约束保持一致。
 */
 const (
-	dimensionReferrer = "referrer"
-	dimensionDevice   = "device"
-	dimensionClient   = "client"
+	dimensionReferrer      = "referrer"
+	dimensionDevice        = "device"
+	dimensionClient        = "client"
+	maxDimensionValueBytes = 255
 )
 
 type clickDayKey struct {
@@ -171,7 +172,7 @@ func aggregateClicks(clicks []click.Click) (
 			}]++
 		}
 
-		if len(c.VisitorHash) == 16 {
+		if len(c.VisitorHash) == click.VisitorHashBytes {
 			visitors[clickVisitorKey{
 				linkID: c.LinkID, day: day, hash: hex.EncodeToString(c.VisitorHash),
 			}] = struct{}{}
@@ -181,11 +182,11 @@ func aggregateClicks(clicks []click.Click) (
 }
 
 /*
-validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 255 字节。
+validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 maxDimensionValueBytes 字节。
 无效 UTF-8 会让 PostgreSQL 拒绝整批写入，直接在 Go 里跳过这一个维度。
 */
 func validDimensionValue(v string) bool {
-	return v != "" && len(v) <= 255 && utf8.ValidString(v)
+	return v != "" && len(v) <= maxDimensionValueBytes && utf8.ValidString(v)
 }
 
 /*

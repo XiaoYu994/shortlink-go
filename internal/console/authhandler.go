@@ -228,13 +228,7 @@ func (h *authHandler) handleLoginFlow(
 	spec flowCookieSpec,
 	start func() (authFlowCookie, string, error),
 ) {
-	if httpx.IsClientGone(h.logger, r) {
-		return
-	}
-	// ServeMux 的 GET 模式也会匹配 HEAD；拒绝 HEAD 避免探测请求种下流程 Cookie。
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		httpx.WriteError(h.logger, r.Context(), w, http.StatusMethodNotAllowed, "method not allowed")
+	if httpx.IsClientGone(h.logger, r) || !requireGetOnly(h.logger, w, r) {
 		return
 	}
 
@@ -294,13 +288,7 @@ func (h *authHandler) handleCallbackFlow(
 	spec flowCookieSpec,
 	exchange func(ctx context.Context, code string, flow authFlowCookie) (identity.ExternalIdentity, error),
 ) {
-	if httpx.IsClientGone(h.logger, r) {
-		return
-	}
-	// ServeMux 的 GET 模式也会匹配 HEAD；拒绝 HEAD 避免探测请求种下流程 Cookie。
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		httpx.WriteError(h.logger, r.Context(), w, http.StatusMethodNotAllowed, "method not allowed")
+	if httpx.IsClientGone(h.logger, r) || !requireGetOnly(h.logger, w, r) {
 		return
 	}
 	if h.sessions == nil {
@@ -348,23 +336,7 @@ func (h *authHandler) handleCallbackFlow(
 		return
 	}
 
-	// Max-Age 用数据库时钟算出的剩余寿命。RFC 6265 在同时有 Max-Age 和 Expires 时只认 Max-Age，
-	// 如果这里用应用进程的 TTL，时钟慢的副本会让浏览器把已经过期的会话继续带上。
-	maxAge := int(issued.CookieMaxAge / time.Second)
-	if maxAge < 1 {
-		maxAge = 1
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     SessionCookieName,
-		Value:    issued.Token,
-		Path:     sessionCookiePath,
-		MaxAge:   maxAge,
-		Expires:  issued.Session.ExpiresAt.UTC(),
-		HttpOnly: true,
-		Secure:   spec.secure,
-		SameSite: http.SameSiteLaxMode,
-	})
-
+	setSessionCookie(w, issued, spec.secure)
 	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, loginResponse{
 		User: loginUserResponse{
 			ID:    issued.User.ID,
@@ -372,6 +344,36 @@ func (h *authHandler) handleCallbackFlow(
 			Name:  issued.User.Name,
 		},
 		ExpiresAt: issued.Session.ExpiresAt.UTC(),
+	})
+}
+
+/*
+requireGetOnly 拦截打到有状态 GET 端点（login、callback）上的 HEAD 请求。
+ServeMux 的 "GET /..." 模式会同时匹配 HEAD；只读查询端点允许 HEAD，
+但登录跳转与回调会种下或消费一次性流程 Cookie，必须拒绝 HEAD 探测。
+*/
+func requireGetOnly(logger *slog.Logger, w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		httpx.WriteError(logger, r.Context(), w, http.StatusMethodNotAllowed, "method not allowed")
+		return false
+	}
+	return true
+}
+
+func setSessionCookie(w http.ResponseWriter, issued identity.IssuedSession, secure bool) {
+	// Max-Age 用数据库时钟算出的剩余寿命。RFC 6265 在同时有 Max-Age 和 Expires 时只认 Max-Age，
+	// 如果这里用应用进程的 TTL，时钟慢的副本会让浏览器把已经过期的会话继续带上。
+	maxAge := max(int(issued.CookieMaxAge/time.Second), 1)
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    issued.Token,
+		Path:     sessionCookiePath,
+		MaxAge:   maxAge,
+		Expires:  issued.Session.ExpiresAt.UTC(),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
 	})
 }
 

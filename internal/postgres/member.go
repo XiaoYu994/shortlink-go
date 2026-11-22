@@ -9,12 +9,71 @@ import (
 	"shortlink/internal/identity"
 )
 
+const (
+	listMembersSQL = `SELECT m.user_id, u.email, u.name, m.role, m.created_at
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.tenant_id = $1
+ORDER BY m.user_id`
+
+	lockMemberScopeSQL = `SELECT user_id, role
+FROM memberships
+WHERE tenant_id = $1
+  AND (user_id = $2 OR user_id = $3 OR role = 'owner')
+ORDER BY user_id
+FOR UPDATE`
+
+	updateMemberRoleSQL = `UPDATE memberships m
+SET role = $3
+FROM users u
+WHERE m.tenant_id = $1
+  AND m.user_id = $2
+  AND u.id = m.user_id
+RETURNING m.user_id, u.email, u.name, m.role, m.created_at`
+
+	removeMemberSQL = `DELETE FROM memberships WHERE tenant_id = $1 AND user_id = $2`
+)
+
 type memberScope struct {
 	actorFound  bool
 	actorRole   identity.Role
 	targetFound bool
 	targetRole  identity.Role
 	ownerCount  int
+}
+
+func (s memberScope) canUpdateRole(newRole identity.Role) error {
+	switch {
+	case !s.actorFound:
+		return identity.ErrOrgNotFound
+	case !identity.CanAssignMemberRole(s.actorRole, newRole):
+		return identity.ErrMemberForbidden
+	case !s.targetFound:
+		return identity.ErrMemberNotFound
+	case !identity.CanManageMemberRole(s.actorRole, s.targetRole, newRole):
+		return identity.ErrMemberForbidden
+	case s.targetRole == identity.RoleOwner && newRole != identity.RoleOwner && s.ownerCount <= 1:
+		return identity.ErrLastOwner
+	default:
+		return nil
+	}
+}
+
+func (s memberScope) canRemove() error {
+	switch {
+	case !s.actorFound:
+		return identity.ErrOrgNotFound
+	case !identity.CanManageMembers(s.actorRole):
+		return identity.ErrMemberForbidden
+	case !s.targetFound:
+		return identity.ErrMemberNotFound
+	case !identity.CanRemoveMember(s.actorRole, s.targetRole):
+		return identity.ErrMemberForbidden
+	case s.targetRole == identity.RoleOwner && s.ownerCount <= 1:
+		return identity.ErrLastOwner
+	default:
+		return nil
+	}
 }
 
 /*
@@ -29,12 +88,7 @@ func (s *Store) ListMembers(ctx context.Context, tenantID int64) ([]identity.Mem
 		return nil, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-SELECT m.user_id, u.email, u.name, m.role, m.created_at
-FROM memberships m
-JOIN users u ON u.id = m.user_id
-WHERE m.tenant_id = $1
-ORDER BY m.user_id`, tenantID)
+	rows, err := s.db.QueryContext(ctx, listMembersSQL, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}
@@ -42,25 +96,33 @@ ORDER BY m.user_id`, tenantID)
 
 	var members []identity.Member
 	for rows.Next() {
-		var (
-			member  identity.Member
-			roleStr string
-		)
-		if err := rows.Scan(&member.UserID, &member.Email, &member.Name, &roleStr, &member.JoinedAt); err != nil {
+		member, err := scanMember(rows)
+		if err != nil {
 			return nil, fmt.Errorf("list members: %w", err)
 		}
-		role := identity.Role(roleStr)
-		if !role.Valid() {
-			return nil, fmt.Errorf("list members: invalid role %q for user %d", roleStr, member.UserID)
-		}
-		member.Role = role
-		member.JoinedAt = member.JoinedAt.UTC()
 		members = append(members, member)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}
 	return members, nil
+}
+
+func scanMember(scanner rowScanner) (identity.Member, error) {
+	var (
+		member  identity.Member
+		roleStr string
+	)
+	if err := scanner.Scan(&member.UserID, &member.Email, &member.Name, &roleStr, &member.JoinedAt); err != nil {
+		return identity.Member{}, err
+	}
+	role := identity.Role(roleStr)
+	if !role.Valid() {
+		return identity.Member{}, fmt.Errorf("invalid role %q for user %d", roleStr, member.UserID)
+	}
+	member.Role = role
+	member.JoinedAt = member.JoinedAt.UTC()
+	return member, nil
 }
 
 /*
@@ -70,13 +132,7 @@ lockMemberScopeTx 在事务内按 user_id 升序锁住操作者、目标成员�
 在运行后续写入前必须先关闭 rows，避免同一事务连接占着结果集导致驱动报错。
 */
 func lockMemberScopeTx(ctx context.Context, tx *sql.Tx, tenantID, actorUserID, targetUserID int64) (memberScope, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT user_id, role
-FROM memberships
-WHERE tenant_id = $1
-  AND (user_id = $2 OR user_id = $3 OR role = 'owner')
-ORDER BY user_id
-FOR UPDATE`, tenantID, actorUserID, targetUserID)
+	rows, err := tx.QueryContext(ctx, lockMemberScopeSQL, tenantID, actorUserID, targetUserID)
 	if err != nil {
 		return memberScope{}, fmt.Errorf("lock member scope: %w", err)
 	}
@@ -145,46 +201,17 @@ func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRol
 	if err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
 	}
-	switch {
-	case !scope.actorFound:
-		return identity.Member{}, identity.ErrOrgNotFound
-	case !identity.CanAssignMemberRole(scope.actorRole, p.NewRole):
-		return identity.Member{}, identity.ErrMemberForbidden
-	case !scope.targetFound:
-		return identity.Member{}, identity.ErrMemberNotFound
-	case !identity.CanManageMemberRole(scope.actorRole, scope.targetRole, p.NewRole):
-		return identity.Member{}, identity.ErrMemberForbidden
-	case scope.targetRole == identity.RoleOwner && p.NewRole != identity.RoleOwner && scope.ownerCount <= 1:
-		return identity.Member{}, identity.ErrLastOwner
+	if err := scope.canUpdateRole(p.NewRole); err != nil {
+		return identity.Member{}, err
 	}
 
-	var (
-		member  identity.Member
-		roleStr string
-	)
-	err = tx.QueryRowContext(ctx, `
-UPDATE memberships m
-SET role = $3
-FROM users u
-WHERE m.tenant_id = $1
-  AND m.user_id = $2
-  AND u.id = m.user_id
-RETURNING m.user_id, u.email, u.name, m.role, m.created_at`,
-		p.TenantID, p.TargetUserID, string(p.NewRole),
-	).Scan(&member.UserID, &member.Email, &member.Name, &roleStr, &member.JoinedAt)
+	member, err := scanMember(tx.QueryRowContext(ctx, updateMemberRoleSQL, p.TenantID, p.TargetUserID, string(p.NewRole)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Member{}, fmt.Errorf("update member role: user %d missing", p.TargetUserID)
 	}
 	if err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
 	}
-	role := identity.Role(roleStr)
-	if !role.Valid() {
-		return identity.Member{}, fmt.Errorf("update member role: invalid role %q", roleStr)
-	}
-	member.Role = role
-	member.JoinedAt = member.JoinedAt.UTC()
-
 	if err := tx.Commit(); err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: commit: %w", err)
 	}
@@ -216,22 +243,11 @@ func (s *Store) RemoveMember(ctx context.Context, p identity.RemoveMemberParams)
 	if err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
-	switch {
-	case !scope.actorFound:
-		return identity.ErrOrgNotFound
-	case !identity.CanManageMembers(scope.actorRole):
-		return identity.ErrMemberForbidden
-	case !scope.targetFound:
-		return identity.ErrMemberNotFound
-	case !identity.CanRemoveMember(scope.actorRole, scope.targetRole):
-		return identity.ErrMemberForbidden
-	case scope.targetRole == identity.RoleOwner && scope.ownerCount <= 1:
-		return identity.ErrLastOwner
+	if err := scope.canRemove(); err != nil {
+		return err
 	}
 
-	res, err := tx.ExecContext(ctx, `
-DELETE FROM memberships
-WHERE tenant_id = $1 AND user_id = $2`, p.TenantID, p.TargetUserID)
+	res, err := tx.ExecContext(ctx, removeMemberSQL, p.TenantID, p.TargetUserID)
 	if err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
@@ -242,7 +258,6 @@ WHERE tenant_id = $1 AND user_id = $2`, p.TenantID, p.TargetUserID)
 	if affected != 1 {
 		return fmt.Errorf("remove member: expected 1 row deleted, got %d", affected)
 	}
-
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("remove member: commit: %w", err)
 	}
