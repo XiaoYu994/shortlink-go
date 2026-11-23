@@ -115,36 +115,54 @@
 - [x] （可选）接入 GitHub 作为第二个身份提供方，对比纯 OAuth 2.0 和 OIDC
 - [x] （可选）用 `testing/synctest` 重写限流器和 `ClickRecorder` 依赖时间的测试
 
-## 阶段 12：审计日志（待立 ADR）
+## 阶段 12：可靠后台任务与异步 URL 风控
 
-开工前先立 ADR，定事件口径、写入事务边界和查询接口；[ADR 0019](adr/0019-httpapi-package-evolution.md) 第 3 步（`internal/httpx`、`internal/redirector`、`internal/console` 拆包）已完成。
+决策见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)（已采纳）；[ADR 0019](adr/0019-httpapi-package-evolution.md) 第 3 步（`internal/httpx`、`internal/redirector`、`internal/console` 拆包）已完成。
+
+- [ ] 迁移 009：`jobs` 表（含 `tenant_id`）及部分索引，验证 `up -> down -> up`
+- [ ] `internal/postgres`：`Create`/`Update`（仅改 URL）同事务入队、`FOR UPDATE SKIP LOCKED` 抢占（含租户公平软上限）、状态回写、租约回收、`Ban` 期望 URL 校验与过期 `sessions`/`done` 任务分批清理
+- [ ] `internal/job`：通用 Worker Pool `Runner`、指数退避重试、Lease Reaper、周期清理调度、Prometheus 指标与 `testing/synctest` 测试
+- [ ] `internal/risk`：防 SSRF 的安全 `DialContext`/重定向/响应体上限、按 host 限速、Redis fail-open 扫描结果缓存、`Scanner` 接口与规则实现、`link.risk_scan` handler
+- [ ] `internal/cache`：`Create` 写正缓存后补 `recheckAfterPositiveWrite` 与并发交错测试
+- [ ] `cmd/console`：`console worker` 子命令、`LoadWorkerConfig`、优雅退出、`make smoke` 端到端自动封禁与压测记录（`BenchmarkEnqueueInCreate`、`SKIP LOCKED` 并发曲线、可控延迟全链路吞吐）
+
+## 阶段 13：租户自助闭环与最小控制台（待立 ADR）
+
+开工前先立 ADR，定自助建组织、HTTP 邀请、自助 API Key 管理及前端技术选型与回调流程。
+
+- [ ] 自助管理 HTTP API：创建组织、发起/撤销组织邀请、组织内签发/查看/吊销 API Key
+- [ ] 最小前端控制台：跑通浏览器 OIDC / GitHub 登录、Cookie 会话、`X-Org-ID` 与短链/成员管理
+
+## 阶段 14：审计日志（待立 ADR）
+
+开工前先立 ADR，定事件口径、写入事务边界和查询接口（在自助管理 API 补齐后覆盖面更完整）。
 
 - [ ] 审计表和查询接口：记录操作人、动作、目标、时间和请求编号；与业务写在同一事务里提交
 
-## 阶段 13：Webhook 与可靠后台任务（待立 ADR）
+## 阶段 15：Webhook 投递（待立 ADR）
 
-开工前先立 ADR，定 Outbox 表结构、投递重试与退避、签名和关停语义。
+开工前先立 ADR，定订阅配置、事件类型、HMAC 签名校验和投递超时/失败策略。
 
 - [ ] 租户 Webhook 订阅配置与 HMAC 签名校验
-- [ ] Outbox 模式 + worker pool：可靠投递事件、指数退避重试、优雅退出；顺带承载过期会话清理等后台任务
+- [ ] 复用阶段 12 的 `jobs` 引擎接入 `webhook.deliver` 消费者，实现可靠投递与退避重试
 
-## 阶段 14：自定义域名（待立 ADR）
+## 阶段 16：自定义域名（待立 ADR）
 
 开工前先立 ADR，定域名校验、路由兼容（ADR 0001）、短码唯一约束和缓存 key 演进。
 
 - [ ] 租户绑定自定义域名（DNS TXT 所有权校验）
 - [ ] redirector 按 Host 路由，缓存 key 纳入域名，支持按域名隔离短码
 
-## 阶段 15：套餐与用量计费（待立 ADR）
+## 阶段 17：套餐与用量计费（待立 ADR）
 
 开工前先立 ADR，定套餐模型、用量计量（metering）和配额/限流的统一方式。
 
 - [ ] 套餐（Free / Pro 等）关联月度配额、速率限制和功能开关（如自定义域名、Webhook）
 - [ ] 用量计量和账单周期统计
 
-## 阶段 16：租户隔离兜底与可观测性（待立 ADR）
+## 阶段 18：租户隔离兜底与可观测性（待立 ADR）
 
 开工前先立 ADR，定 RLS 连接上下文约定和追踪采样策略。
 
 - [ ] PostgreSQL 行级安全（RLS）作为租户隔离的第二道防线（`SET LOCAL` 绑定当前租户）
-- [ ] OpenTelemetry 追踪：串联跳转和管理请求里的缓存、singleflight 和数据库 span，日志带 `trace_id`
+- [ ] OpenTelemetry 追踪：串联跳转、管理与 worker 请求里的缓存、singleflight 和数据库 span，日志带 `trace_id`

@@ -36,6 +36,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0017](0017-defer-click-write-optimization.md) | 点击写入暂不改，保留单写入者 | Accepted |
 | [0018](0018-users-orgs-and-rbac.md) | 用户、组织和权限 | Accepted |
 | [0019](0019-httpapi-package-evolution.md) | 暂不拆分 httpapi，先拆结构体再按依赖分叉拆包 | Accepted |
+| [0020](0020-background-jobs-and-async-risk-scan.md) | 可靠后台任务与异步 URL 风控 | Accepted |
 
 ## 模板
 
