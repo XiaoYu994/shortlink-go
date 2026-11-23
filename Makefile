@@ -11,7 +11,7 @@ console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
-.PHONY: help run-redirector run-console build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
+.PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
 	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli
 
 help: ## 列出所有命令
@@ -22,6 +22,9 @@ run-redirector: ## 启动跳转进程（ADDR，默认 :8080）
 
 run-console: ## 启动管理进程（CONSOLE_ADDR，默认 :8081）
 	CONSOLE_ADDR=$(CONSOLE_ADDR) go run ./cmd/console serve
+
+run-worker: ## 启动后台任务进程（异步 URL 风控与定期清理）
+	go run ./cmd/console worker
 
 build: ## 编译到 bin/redirector 和 bin/console
 	go build -o bin/redirector ./cmd/redirector

@@ -47,6 +47,23 @@ func main() {
 		}
 		return
 	}
+	if len(args) > 0 && args[0] == "worker" {
+		opts, ok, err := parseWorkerArgs(args[1:], os.Stderr)
+		if !ok {
+			if err != nil {
+				if !errors.Is(err, errUsage) {
+					_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+				}
+				os.Exit(2)
+			}
+			return
+		}
+		if err := runWorker(opts); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(args, os.Stdout, os.Stderr, openStore, openLinkStore); err != nil {
 		if !errors.Is(err, errUsage) {

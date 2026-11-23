@@ -19,7 +19,10 @@ import (
 	"time"
 
 	"shortlink/internal/cache"
+	"shortlink/internal/job"
+	"shortlink/internal/link"
 	"shortlink/internal/postgres"
+	"shortlink/internal/risk"
 )
 
 const (
@@ -41,6 +44,9 @@ const (
 	// 本地默认 text，人眼能直接读。json 一行一条，给生产采集。
 	logFormatText = "text"
 	logFormatJSON = "json"
+
+	defaultWorkerCleanupInterval = time.Hour
+	defaultWorkerRetention       = 7 * 24 * time.Hour
 )
 
 /*
@@ -133,6 +139,27 @@ func (c GitHubConfig) Enabled() bool {
 }
 
 /*
+WorkerConfig 是后台任务进程（cmd/console worker）的完整启动配置（阶段 12、ADR 0020）。
+Addr 来自 WORKER_ADDR，默认空表示不开启运维 HTTP 端口；设置后暴露 /healthz、/readyz 和 /metrics。
+*/
+type WorkerConfig struct {
+	BaseConfig
+
+	Concurrency         int
+	MaxPerTenant        int
+	PollInterval        time.Duration
+	LeaseDuration       time.Duration
+	JobTimeout          time.Duration
+	ReapInterval        time.Duration
+	CleanupInterval     time.Duration
+	SessionRetention    time.Duration
+	DoneJobRetention    time.Duration
+	RiskFetchTimeout    time.Duration
+	RiskHostRateLimit   int
+	RiskBlockedKeywords map[string]link.BanReason
+}
+
+/*
 LoadRedirectorConfig 加载并校验跳转进程配置。
 监听地址只读 ADDR（默认 :8080）；VISITOR_SALT 必填；PPROF_ADDR 若设置必须是回环地址。
 不读取 OIDC_* 或 GITHUB_*。
@@ -196,6 +223,118 @@ func LoadConsoleConfig() (ConsoleConfig, error) {
 		return ConsoleConfig{}, err
 	}
 	return cfg, nil
+}
+
+/*
+LoadWorkerConfig 加载并校验后台任务进程（cmd/console worker）的配置。
+监听地址只读 WORKER_ADDR（默认空不开），不要求 VISITOR_SALT，不读取 OIDC_* / GITHUB_*。
+*/
+func LoadWorkerConfig() (WorkerConfig, error) {
+	base, err := loadBaseConfig(os.Getenv("WORKER_ADDR"))
+	if err != nil {
+		return WorkerConfig{}, err
+	}
+
+	cfg := WorkerConfig{
+		BaseConfig:        base,
+		Concurrency:       job.DefaultConcurrency,
+		MaxPerTenant:      job.DefaultMaxPerTenant,
+		PollInterval:      job.DefaultPollInterval,
+		LeaseDuration:     job.DefaultLeaseDuration,
+		JobTimeout:        job.DefaultJobTimeout,
+		ReapInterval:      job.DefaultReapInterval,
+		CleanupInterval:   defaultWorkerCleanupInterval,
+		SessionRetention:  defaultWorkerRetention,
+		DoneJobRetention:  defaultWorkerRetention,
+		RiskFetchTimeout:  risk.DefaultFetchTimeout,
+		RiskHostRateLimit: risk.DefaultHostRateLimit,
+	}
+
+	if cfg.Concurrency, err = envInt("WORKER_CONCURRENCY", cfg.Concurrency); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.MaxPerTenant, err = envInt("WORKER_MAX_PER_TENANT", cfg.MaxPerTenant); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.PollInterval, err = envDuration("WORKER_POLL_INTERVAL", cfg.PollInterval); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.LeaseDuration, err = envDuration("WORKER_LEASE_DURATION", cfg.LeaseDuration); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.JobTimeout, err = envDuration("WORKER_JOB_TIMEOUT", cfg.JobTimeout); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.ReapInterval, err = envDuration("WORKER_REAP_INTERVAL", cfg.ReapInterval); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.CleanupInterval, err = envDuration("WORKER_CLEANUP_INTERVAL", cfg.CleanupInterval); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.SessionRetention, err = envDuration("WORKER_SESSION_RETENTION", cfg.SessionRetention); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.DoneJobRetention, err = envDuration("WORKER_DONE_JOB_RETENTION", cfg.DoneJobRetention); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.RiskFetchTimeout, err = envDuration("RISK_FETCH_TIMEOUT", cfg.RiskFetchTimeout); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.RiskHostRateLimit, err = envInt("RISK_HOST_RATE_LIMIT", cfg.RiskHostRateLimit); err != nil {
+		return WorkerConfig{}, err
+	}
+	if raw := os.Getenv("RISK_BLOCKED_KEYWORDS"); raw != "" {
+		rules, err := risk.ParseKeywordRules(raw)
+		if err != nil {
+			return WorkerConfig{}, fmt.Errorf("RISK_BLOCKED_KEYWORDS: %w", err)
+		}
+		cfg.RiskBlockedKeywords = rules
+	}
+
+	if err := validateWorker(cfg); err != nil {
+		return WorkerConfig{}, err
+	}
+	return cfg, nil
+}
+
+func validateWorker(cfg WorkerConfig) error {
+	if cfg.Concurrency <= 0 {
+		return errors.New("WORKER_CONCURRENCY must be positive")
+	}
+	if cfg.MaxPerTenant < 0 {
+		return errors.New("WORKER_MAX_PER_TENANT must not be negative")
+	}
+	if cfg.PollInterval <= 0 {
+		return errors.New("WORKER_POLL_INTERVAL must be positive")
+	}
+	if cfg.LeaseDuration <= 0 {
+		return errors.New("WORKER_LEASE_DURATION must be positive")
+	}
+	if cfg.JobTimeout <= 0 {
+		return errors.New("WORKER_JOB_TIMEOUT must be positive")
+	}
+	if cfg.JobTimeout > cfg.LeaseDuration {
+		return errors.New("WORKER_JOB_TIMEOUT must not exceed WORKER_LEASE_DURATION")
+	}
+	if cfg.ReapInterval <= 0 {
+		return errors.New("WORKER_REAP_INTERVAL must be positive")
+	}
+	if cfg.CleanupInterval <= 0 {
+		return errors.New("WORKER_CLEANUP_INTERVAL must be positive")
+	}
+	if cfg.SessionRetention < 0 {
+		return errors.New("WORKER_SESSION_RETENTION must not be negative")
+	}
+	if cfg.DoneJobRetention < 0 {
+		return errors.New("WORKER_DONE_JOB_RETENTION must not be negative")
+	}
+	if cfg.RiskFetchTimeout <= 0 {
+		return errors.New("RISK_FETCH_TIMEOUT must be positive")
+	}
+	if cfg.RiskHostRateLimit < 0 {
+		return errors.New("RISK_HOST_RATE_LIMIT must not be negative")
+	}
+	return nil
 }
 
 func loadBaseConfig(addr string) (BaseConfig, error) {

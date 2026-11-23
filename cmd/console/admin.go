@@ -20,6 +20,7 @@ var errUsage = errors.New("usage")
 
 const usageText = `用法:
   console serve
+  console worker [--allow-test-host HOST:PORT]
   console key issue --name NAME [--external-id ID] [--expires RFC3339] [--scope SCOPE]...
   console key issue --tenant ID [--expires RFC3339] [--scope SCOPE]...
   console key list --tenant ID
@@ -31,6 +32,7 @@ const usageText = `用法:
   console link unban --code CODE
 
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
+worker 启动后台任务引擎（异步 URL 风控、租约回收与过期会话/已完成任务清理），需要 DATABASE_URL 和 REDIS_URL。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；
 --scope 省略表示拥有全部密钥权限（links:read、links:write、stats:read），
 可重复传入或用逗号分隔。

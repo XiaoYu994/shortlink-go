@@ -30,9 +30,12 @@ if [ -n "$explicit_redis" ]; then TEST_REDIS_URL=$explicit_redis; fi
 
 REDIRECTOR_LOG=$(mktemp)
 CONSOLE_LOG=$(mktemp)
+WORKER_LOG=$(mktemp)
 TMP=$(mktemp -d)
 REDIRECTOR_PID=
 CONSOLE_PID=
+WORKER_PID=
+STUB_PID=
 WATCHDOG_PID=
 
 cleanup() {
@@ -41,7 +44,7 @@ cleanup() {
 		kill "$WATCHDOG_PID" 2>/dev/null || true
 		wait "$WATCHDOG_PID" 2>/dev/null || true
 	fi
-	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}"; do
+	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}"; do
 		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 			kill -TERM "$pid" 2>/dev/null || true
 			i=0
@@ -55,7 +58,7 @@ cleanup() {
 			wait "$pid" 2>/dev/null || true
 		fi
 	done
-	rm -f "$REDIRECTOR_LOG" "$CONSOLE_LOG"
+	rm -f "$REDIRECTOR_LOG" "$CONSOLE_LOG" "$WORKER_LOG"
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -71,6 +74,10 @@ fail() {
 	if [ -s "$CONSOLE_LOG" ]; then
 		printf '%s\n' '--- console log (last 20 lines) ---' >&2
 		tail -n 20 "$CONSOLE_LOG" >&2
+	fi
+	if [ -s "$WORKER_LOG" ]; then
+		printf '%s\n' '--- worker log (last 20 lines) ---' >&2
+		tail -n 20 "$WORKER_LOG" >&2
 	fi
 	exit 1
 }
@@ -184,8 +191,12 @@ export DATABASE_URL REDIS_URL
 
 redirector_addr=${SMOKE_REDIRECTOR_ADDR:-127.0.0.1:18080}
 console_addr=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
+worker_addr=${SMOKE_WORKER_ADDR:-127.0.0.1:18082}
+risk_stub_port=${SMOKE_RISK_STUB_PORT:-18089}
 REDIRECTOR_BASE=http://$redirector_addr
 CONSOLE_BASE=http://$console_addr
+WORKER_BASE=http://$worker_addr
+RISK_STUB_HOST=127.0.0.1:$risk_stub_port
 export LOG_LEVEL=error
 # redirector 没有盐会拒绝启动。CI 从 .env.example 生成 .env，本机可能还没配。
 VISITOR_SALT=${VISITOR_SALT:-smoke-visitor-salt}
@@ -569,6 +580,59 @@ status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code
 assert_eq "$status" 401 '登出后重放会话创建短链'
 grep -q '"unauthorized"' "$TMP/body" || fail "登出后创建短链响应体不是 unauthorized: $(cat "$TMP/body")"
 
+echo 'smoke: async risk scan'
+# 先清理前面冒烟段写入的 example.com 待审任务，确保本次风控冒烟完全离线、只访问本地假站点。
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DELETE FROM jobs" \
+	|| fail '清理冒烟前置 jobs 失败'
+
+mkdir -p "$TMP/stub"
+printf '%s\n' '<html>safe landing page</html>' >"$TMP/stub/safe.html"
+printf '%s\n' '<html>urgent smoke-phish-marker page</html>' >"$TMP/stub/phish.html"
+python3 -m http.server "$risk_stub_port" --bind 127.0.0.1 --directory "$TMP/stub" >"$TMP/stub.log" 2>&1 &
+STUB_PID=$!
+
+i=0
+while ! curl -fsS --max-time 1 "http://$RISK_STUB_HOST/safe.html" >/dev/null 2>&1; do
+	kill -0 "$STUB_PID" 2>/dev/null || fail '本地风控假站点启动失败'
+	i=$((i + 1))
+	[ "$i" -ge 50 ] && fail '本地风控假站点 5 秒内未就绪'
+	sleep 0.1
+done
+
+WORKER_ADDR=$worker_addr \
+WORKER_POLL_INTERVAL=50ms \
+RISK_HOST_RATE_LIMIT=100 \
+RISK_BLOCKED_KEYWORDS=smoke-phish-marker:phishing \
+	./bin/console worker --allow-test-host "$RISK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
+WORKER_PID=$!
+wait_ready "$WORKER_BASE" "$WORKER_PID" worker
+
+status=$(request "$WORKER_BASE" GET /readyz)
+assert_eq "$status" 200 'worker GET /readyz 状态码'
+assert_eq "$(cat "$TMP/body")" 'ok' 'worker GET /readyz 响应体'
+
+phish_url="http://$RISK_STUB_HOST/phish.html"
+status=$(request "$CONSOLE_BASE" POST /api/v1/links "{\"url\":\"$phish_url\"}")
+assert_eq "$status" 201 '创建待风控短链状态码'
+risk_location=$(header Location)
+risk_code=${risk_location#/r/}
+
+i=0
+while :; do
+	status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$risk_code")
+	assert_eq "$status" 200 '轮询风控短链详情状态码'
+	if grep -q '"status":"banned"' "$TMP/body"; then
+		break
+	fi
+	i=$((i + 1))
+	[ "$i" -ge 100 ] && fail "异步风控 10 秒内未自动封禁: $(cat "$TMP/body")"
+	sleep 0.1
+done
+grep -q '"ban_reason":"phishing"' "$TMP/body" || fail "风控自动封禁缺少 ban_reason=phishing: $(cat "$TMP/body")"
+
+status=$(request "$REDIRECTOR_BASE" GET "/r/$risk_code")
+assert_eq "$status" 404 '异步风控封禁后跳转应返回 404'
+
 echo 'smoke: metrics'
 status=$(request "$REDIRECTOR_BASE" GET /metrics)
 assert_eq "$status" 200 'redirector GET /metrics 状态码'
@@ -590,22 +654,31 @@ if grep -q 'shortlink_clicks_' "$TMP/body"; then
 	fail 'console 不应启动 ClickRecorder'
 fi
 
+status=$(request "$WORKER_BASE" GET /metrics)
+assert_eq "$status" 200 'worker GET /metrics 状态码'
+grep -q 'shortlink_jobs_processed_total{kind="link.risk_scan",result="done"}' "$TMP/body" || fail 'worker 指标缺少已完成风控任务计数'
+grep -q 'shortlink_jobs_oldest_pending_age_seconds{kind="link.risk_scan"}' "$TMP/body" || fail 'worker 指标缺少最老待执行任务时长'
+
 echo 'smoke: shutdown'
 # 看门狗：服务卡在关停流程里时最多等 20 秒，避免冒烟把 CI 拖到 job 超时。
-( sleep 20; kill -KILL "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null ) &
+( sleep 20; kill -KILL "$REDIRECTOR_PID" "$CONSOLE_PID" "$WORKER_PID" 2>/dev/null ) &
 WATCHDOG_PID=$!
 # 进程可能在上一次请求后已经退出；这里失败不能触发 set -e，交给后面的 wait 报状态。
-kill -TERM "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null || true
+kill -TERM "$REDIRECTOR_PID" "$CONSOLE_PID" "$WORKER_PID" 2>/dev/null || true
 redirector_status=0
 console_status=0
+worker_status=0
 wait "$REDIRECTOR_PID" || redirector_status=$?
 wait "$CONSOLE_PID" || console_status=$?
+wait "$WORKER_PID" || worker_status=$?
 kill "$WATCHDOG_PID" 2>/dev/null || true
 wait "$WATCHDOG_PID" 2>/dev/null || true
 WATCHDOG_PID=
 REDIRECTOR_PID=
 CONSOLE_PID=
+WORKER_PID=
 assert_eq "$redirector_status" 0 'redirector SIGTERM 后的退出码'
 assert_eq "$console_status" 0 'console SIGTERM 后的退出码'
+assert_eq "$worker_status" 0 'worker SIGTERM 后的退出码'
 
 echo 'smoke: ok'
