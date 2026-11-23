@@ -15,7 +15,7 @@ VISITOR_SALT=dev-only-visitor-salt
 
 `.env` 已被 gitignore，不会提交。
 
-- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`、`users`、`user_identities`、`memberships`、`sessions` 和 `invitations`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
+- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`、`users`、`user_identities`、`memberships`、`sessions`、`invitations` 和 `jobs`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
 
 如果使用项目自带的 `docker-compose.yml`：
 
@@ -803,6 +803,49 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 - 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
 - 限流在鉴权之后，格式合法但不存在的密钥每次都会查一次 `api_keys`（走 `key_hash` 唯一索引）。256 位密钥无法被猜中，但这是一个能放大数据库查询的入口；防护放在入口层（nginx `limit_req` 或云厂商的 WAF），应用内不做按 IP 的未鉴权限流。
+
+## 后台任务与异步 URL 风控（`console worker`）
+
+阶段 12（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)）引入基于 PostgreSQL `jobs` 表的可靠后台任务进程：
+
+```bash
+# 另开终端启动后台任务进程（可选设 WORKER_ADDR 暴露 /healthz、/readyz、/metrics）
+WORKER_ADDR=127.0.0.1:8082 make run-worker
+```
+
+- 创建短链和修改 URL 时，PostgreSQL 在同一条多 CTE 语句内写入 `link.risk_scan` 任务；只改 `expires_at` 或 `disabled` 不入队。
+- `console worker` 通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`），抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据地址，命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
+- Redis 只存扫描结果短时缓存（fail-open），不承载任务队列；Redis 写负缓存失败返回 `cache.ErrNotUpdated` 时，worker 自动退避重试自愈。
+- 同一个 worker 进程定时分批清理过期/吊销超 7 天的 `sessions` 和完成超 7 天的 `done` 任务；`dead` 任务保留供排障。
+- 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站，不提供关闭 SSRF 检查的全局环境变量。
+
+## 后台任务与异步风控基准测试（2026-11-23）
+
+目标：验证 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md) 的三项性能假设：同语句入队额外开销、`FOR UPDATE SKIP LOCKED` 队列上限、以及 Redis 结果缓存对出站抓取吞吐的影响。
+
+```bash
+set -a; . ./.env; set +a
+go test ./internal/postgres -run '^$' \
+  -bench 'BenchmarkEnqueueInCreate|BenchmarkJobClaimSkipLocked|BenchmarkRiskScanEndToEnd' \
+  -benchtime 2s
+```
+
+环境：Intel Core i5-14400（WSL2 16 vCPU）、Go 1.27.3、PostgreSQL 16（Docker，默认 `synchronous_commit=on`，`DB_MAX_OPEN_CONNS=10`）、Redis 7.4（Docker）。
+
+| 基准项 | 结果 | 说明 |
+| --- | --- | --- |
+| `BenchmarkEnqueueInCreate/with_enqueue` | `1.97 ms/op`，`1366 B/op`，`24 allocs/op` | 配额 + 插 `links` + 插 `jobs` 单语句提交，0 额外往返与分配 |
+| `BenchmarkEnqueueInCreate/link_only_baseline` | `2.65 ms/op`，`1168 B/op`，`24 allocs/op` | 延迟由单次提交 fsync 主导，同语句入队开销落入抖动噪声内 |
+| `BenchmarkJobClaimSkipLocked/workers_8` | `637.2 jobs/s`（`1.57 ms/op`） | 空 handler、单条抢占、`DB_MAX_OPEN_CONNS=10` 下的峰值 |
+| `BenchmarkJobClaimSkipLocked/workers_32` | `499.1 jobs/s`（`2.00 ms/op`） | 并发超过连接池上限（10）后连接等待与 CTE 竞争拉低吞吐 |
+| `BenchmarkJobClaimSkipLocked/workers_64` | `399.4 jobs/s`（`2.50 ms/op`） | 进一步放大连接池排队 |
+| `BenchmarkRiskScanEndToEnd/no_cache` | `437.8 jobs/s`（16 worker，25ms 模拟抓取延迟） | 受出站抓取耗时支配 |
+| `BenchmarkRiskScanEndToEnd/with_redis_cache` | `668.9 jobs/s`（`+52.8%`） | 同 URL 命中 Redis 结果缓存跳过抓取，吞吐回到 PG 队列上限 |
+
+结论：
+- 同语句多 CTE 入队对创建接口几乎无额外成本，不需要为创建路径牺牲事务一致性去换异步入队。
+- `SKIP LOCKED` 抢占并发不应盲目高过 `DB_MAX_OPEN_CONNS`；默认 `WORKER_CONCURRENCY=8` 匹配默认连接池 `10`，并通过按空闲槽位批量抢占减少数据库往返。
+- Redis 作为 fail-open 扫描结果缓存能显著提升重复目标 URL 的消化速度，同时不改变数据库作为任务事实来源的边界。
 
 ## 封禁和解封链接
 

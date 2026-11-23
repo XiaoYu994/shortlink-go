@@ -119,12 +119,12 @@
 
 决策见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)（已采纳）；[ADR 0019](adr/0019-httpapi-package-evolution.md) 第 3 步（`internal/httpx`、`internal/redirector`、`internal/console` 拆包）已完成。
 
-- [ ] 迁移 009：`jobs` 表（含 `tenant_id`）及部分索引，验证 `up -> down -> up`
-- [ ] `internal/postgres`：`Create`/`Update`（仅改 URL）同事务入队、`FOR UPDATE SKIP LOCKED` 抢占（含租户公平软上限）、状态回写、租约回收、`Ban` 期望 URL 校验与过期 `sessions`/`done` 任务分批清理
-- [ ] `internal/job`：通用 Worker Pool `Runner`、指数退避重试、Lease Reaper、周期清理调度、Prometheus 指标与 `testing/synctest` 测试
-- [ ] `internal/risk`：防 SSRF 的安全 `DialContext`/重定向/响应体上限、按 host 限速、Redis fail-open 扫描结果缓存、`Scanner` 接口与规则实现、`link.risk_scan` handler
-- [ ] `internal/cache`：`Create` 写正缓存后补 `recheckAfterPositiveWrite` 与并发交错测试
-- [ ] `cmd/console`：`console worker` 子命令、`LoadWorkerConfig`、优雅退出、`make smoke` 端到端自动封禁与压测记录（`BenchmarkEnqueueInCreate`、`SKIP LOCKED` 并发曲线、可控延迟全链路吞吐）
+- [x] 迁移 009：`jobs` 表（含 `tenant_id`）及部分索引，验证 `up -> down -> up`
+- [x] `internal/postgres`：`Create`/`Update`（仅改 URL）同事务入队、`FOR UPDATE SKIP LOCKED` 抢占（含租户公平软上限）、状态回写、租约回收、`Ban` 期望 URL 校验与过期 `sessions`/`done` 任务分批清理
+- [x] `internal/job`：通用 Worker Pool `Runner`、指数退避重试、Lease Reaper、周期清理调度、Prometheus 指标与 `testing/synctest` 测试
+- [x] `internal/risk`：防 SSRF 的安全 `DialContext`/重定向/响应体上限、按 host 限速、Redis fail-open 扫描结果缓存、`Scanner` 接口与规则实现、`link.risk_scan` handler
+- [x] `internal/cache`：`Create` 写正缓存后补 `recheckAfterPositiveWrite` 与并发交错测试
+- [x] `cmd/console`：`console worker` 子命令、`LoadWorkerConfig`、优雅退出、`make smoke` 端到端自动封禁与压测记录（`BenchmarkEnqueueInCreate`、`SKIP LOCKED` 并发曲线、可控延迟全链路吞吐）
 
 ## 阶段 13：租户自助闭环与最小控制台（待立 ADR）
 

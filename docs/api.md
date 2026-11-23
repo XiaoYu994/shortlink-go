@@ -439,11 +439,17 @@ curl -i localhost:8081/metrics   # console
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
 - `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建、修改、删除和回源写缓存都会计数；`skipped` 表示回源的 `SET NX` 发现 key 已有更新的值，可能是并发的创建或管理写。封禁和解封的缓存写入发生在 `console link` 命令里，不进这个进程的 `/metrics`）
 - `shortlink_cache_operation_duration_seconds`（缓存操作耗时，`operation` 为 `get`、`set`，`result` 取值同上面两个计数器）
-- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`；`result` 为 `success`、`not_found`、`quota_exceeded`、`banned`、`canceled`、`timeout`、`error`。租户修改或删除被封禁的链接是策略生效，记成 `banned`，不算存储失败。管理写在写完正缓存后会按跳转查询复查一次，所以 console 的存储指标里还会多出 `operation="get"`。`console link` 不经过这个装饰器，`ban`、`unban` 不会出现在进程的 `/metrics` 里）
+- `shortlink_store_operations_total`、`shortlink_store_operation_duration_seconds`（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`；`result` 为 `success`、`not_found`、`quota_exceeded`、`banned`、`url_changed`、`canceled`、`timeout`、`error`。租户修改或删除被封禁的链接记成 `banned`，风控封禁前发现 URL 已被改写记成 `url_changed`，都是策略生效，不算存储失败。管理写（含创建和修改）在写完正缓存后会按跳转查询复查一次，所以 console 的存储指标里还会多出 `operation="get"`。`console link` 不经过这个装饰器，`ban`、`unban` 出现在 `console worker` 的 `/metrics` 里）
 - `go_sql_*`（连接池，`db_name="shortlink"`）
 - `process_*`（进程 CPU、内存、文件描述符）
 - `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）
 - `shortlink_clicks_written_total`（交给存储的点击数，`result` 为 `success` 或 `error`。启动后两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`；只有 redirector 有）
+- `shortlink_jobs_processed_total`（后台任务完成计数，`kind` 如 `link.risk_scan`，`result` 为 `done`、`skipped`、`retry`、`dead`；仅 `console worker` 配置 `WORKER_ADDR` 时暴露）
+- `shortlink_job_duration_seconds`（后台任务执行耗时直方图，`kind`；仅 `console worker`）
+- `shortlink_jobs_in_flight`（当前执行中的后台任务数，`kind`；仅 `console worker`）
+- `shortlink_jobs_reaped_total`（超时租约回收次数，`kind`；仅 `console worker`）
+- `shortlink_jobs_oldest_pending_age_seconds`（最老待执行任务等待秒数，`kind`，反映异步风控暴露窗口；仅 `console worker`）
+- `shortlink_risk_cache_lookups_total`（风控扫描结果缓存查找次数，`result` 为 `hit`、`miss`、`fallback`；仅 `console worker`）
 
 它是运维端点，不版本化，公网隔离由部署层保证。
 
