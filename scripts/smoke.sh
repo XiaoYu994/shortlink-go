@@ -224,6 +224,10 @@ psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
 	"UPDATE tenants SET rate_limit_per_second = 100 WHERE id = (SELECT min(id) FROM tenants WHERE name = 'smoke')" \
 	|| fail '调高冒烟租户限流失败'
 
+# 为冒烟构造最小前端构建目录，顺带验证 console 的 WEB_DIST_DIR 托管与路由隔离。
+mkdir -p "$TMP/webdist"
+printf '%s\n' '<!doctype html><html><body>smoke-web-console</body></html>' >"$TMP/webdist/index.html"
+
 # 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
 ADDR=$redirector_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
@@ -232,6 +236,7 @@ OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
 OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
 OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
 OIDC_REDIRECT_URL=$SMOKE_OIDC_REDIRECT_URL \
+WEB_DIST_DIR=$TMP/webdist \
 	./bin/console serve >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
@@ -282,6 +287,11 @@ assert_eq "$(header Location)" "$url" '跳转 Location'
 echo 'smoke: route isolation'
 status=$(request "$CONSOLE_BASE" GET "/r/$code")
 assert_eq "$status" 404 'console 不应提供跳转路由'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/does-not-exist")
+assert_eq "$status" 404 'console 未知 /api/* 不应回退到 SPA'
+status=$(request "$CONSOLE_BASE" GET "/")
+assert_eq "$status" 200 'console WEB_DIST_DIR 首页'
+grep -q 'smoke-web-console' "$TMP/body" || fail 'console 首页未返回 index.html'
 status=$(request "$REDIRECTOR_BASE" POST /api/v1/links '{"url":"https://example.com/isolated"}')
 assert_eq "$status" 404 'redirector 不应提供管理路由'
 
@@ -558,6 +568,94 @@ status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code
 	"$CONSOLE_BASE/api/v1/links")
 assert_eq "$status" 403 '跨站携带会话 Cookie 创建短链应被拒绝'
 grep -q '"cross-origin request rejected"' "$TMP/body" || fail "跨站拒绝响应体不对: $(cat "$TMP/body")"
+
+echo 'smoke: tenant self-service'
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	"$CONSOLE_BASE/api/v1/auth/providers")
+assert_eq "$status" 200 'GET /api/v1/auth/providers 状态码'
+grep -q '"oidc":true' "$TMP/body" || fail "auth/providers 缺少 oidc=true: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-b "$oidc_cookies" \
+	-d '{"name":"Self Service Org"}' \
+	"$CONSOLE_BASE/api/v1/orgs")
+assert_eq "$status" 201 'POST /api/v1/orgs 自助建组织状态码'
+self_org_id=$(sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' "$TMP/body")
+[ -n "$self_org_id" ] || fail "无法解析新建组织 ID: $(cat "$TMP/body")"
+grep -q '"role":"owner"' "$TMP/body" || fail "新建组织响应缺少 owner 角色: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/me")
+assert_eq "$status" 200 '建组织后 GET /api/v1/me 状态码'
+grep -Fq "\"id\":$self_org_id,\"name\":\"Self Service Org\",\"role\":\"owner\"" "$TMP/body" \
+	|| fail "GET /api/v1/me 缺少新建组织: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" \
+	-d '{"email":"bob@example.com","role":"member"}' \
+	"$CONSOLE_BASE/api/v1/invitations")
+assert_eq "$status" 201 'POST /api/v1/invitations 发起邀请状态码'
+self_inv_id=$(sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' "$TMP/body")
+[ -n "$self_inv_id" ] || fail "无法解析邀请 ID: $(cat "$TMP/body")"
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/invitations")
+assert_eq "$status" 200 'GET /api/v1/invitations 状态码'
+grep -Fq '"email":"bob@example.com"' "$TMP/body" || fail "邀请列表缺少 bob@example.com: $(cat "$TMP/body")"
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X DELETE -H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/invitations/$self_inv_id")
+assert_eq "$status" 204 'DELETE /api/v1/invitations/{id} 撤销邀请状态码'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" \
+	-d '{"scopes":["links:read","links:write"]}' \
+	"$CONSOLE_BASE/api/v1/api-keys")
+assert_eq "$status" 201 'POST /api/v1/api-keys 签发组织 API Key 状态码'
+assert_eq "$(header Cache-Control)" 'no-store' 'POST /api/v1/api-keys Cache-Control'
+self_key_id=$(sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' "$TMP/body")
+self_api_key=$(sed -n 's/.*"api_key":"\(slk_[0-9a-f]\{64\}\)".*/\1/p' "$TMP/body")
+[ -n "$self_key_id" ] && [ -n "$self_api_key" ] || fail "无法解析自助 API Key: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/api-keys")
+assert_eq "$status" 200 'GET /api/v1/api-keys 状态码'
+grep -Fq "\"id\":$self_key_id" "$TMP/body" || fail "API Key 列表缺少新签发的 key: $(cat "$TMP/body")"
+
+status=$(request_as "$self_api_key" "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/self-service-key"}')
+assert_eq "$status" 201 '自助签发的 API Key 创建短链状态码'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X DELETE -H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/api-keys/$self_key_id")
+assert_eq "$status" 204 'DELETE /api/v1/api-keys/{id} 吊销 API Key 状态码'
+
+status=$(request_as "$self_api_key" "$CONSOLE_BASE" GET /api/v1/links)
+assert_eq "$status" 401 '吊销后的自助 API Key 应返回 401'
+
+# 验证带 ?return_to=/ 的登录回调返回 302 并落到 SPA 首页且写入 sl_session。
+return_cookies=$TMP/return_to_cookies.txt
+return_meta=$(curl -sS --max-time 10 -L \
+	-c "$return_cookies" -b "$return_cookies" \
+	-o "$TMP/dex_return.html" -w '%{http_code} %{url_effective}' \
+	"$CONSOLE_BASE/api/v1/auth/login?return_to=/") || fail '访问带 return_to 的 login 失败'
+return_dex_url=${return_meta#* }
+return_end=$(curl -sS --max-time 10 -L \
+	-c "$return_cookies" -b "$return_cookies" \
+	-o "$TMP/body" -w '%{http_code} %{url_effective}' \
+	--data-urlencode "login=$SMOKE_OIDC_USER_EMAIL" \
+	--data-urlencode "password=$SMOKE_OIDC_USER_PASSWORD" \
+	"$return_dex_url") || fail '提交 return_to Dex 登录失败'
+assert_eq "${return_end%% *}" 200 'return_to=/ 登录后落地首页状态码'
+assert_eq "${return_end#* }" "$CONSOLE_BASE/" 'return_to=/ 登录后落地 URL'
+grep -q 'smoke-web-console' "$TMP/body" || fail 'return_to=/ 落地页不是 SPA 首页'
+grep -q 'sl_session' "$return_cookies" || fail 'return_to=/ 登录后未写入 sl_session'
 
 # 保存登出前的 Cookie 再调登出，用旧 Cookie 重放才能证明服务端已吊销会话。
 cp "$oidc_cookies" "$TMP/oidc_cookies_before_logout.txt"

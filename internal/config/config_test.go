@@ -42,6 +42,7 @@ func baseTestEnv() map[string]string {
 		"GITHUB_CLIENT_ID":          "",
 		"GITHUB_CLIENT_SECRET":      "",
 		"GITHUB_REDIRECT_URL":       "",
+		"WEB_DIST_DIR":              "",
 		"WORKER_ADDR":               "",
 		"WORKER_CONCURRENCY":        "",
 		"WORKER_MAX_PER_TENANT":     "",
@@ -364,6 +365,17 @@ func TestLoadConsoleConfig(t *testing.T) {
 			want: func() ConsoleConfig {
 				c := defaults
 				c.Addr = ":18081"
+				return c
+			}(),
+		},
+		{
+			name: "web dist dir trimmed",
+			env: map[string]string{
+				"WEB_DIST_DIR": "  web/dist  ",
+			},
+			want: func() ConsoleConfig {
+				c := defaults
+				c.WebDistDir = "web/dist"
 				return c
 			}(),
 		},

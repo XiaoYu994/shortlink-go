@@ -3,6 +3,7 @@ package console
 import (
 	"net/http"
 
+	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
 )
 
@@ -22,13 +23,27 @@ Routes 返回管理进程的路由：可选 OIDC 与 GitHub OAuth 2.0 登录、�
 */
 func (s *Server) Routes() http.Handler {
 	return s.base.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+authProvidersPath, s.handleAuthProviders)
 		if s.auth != nil {
 			s.auth.registerRoutes(mux)
+		}
+		if s.orgs != nil {
+			mux.HandleFunc("POST "+apiV1Prefix+"/orgs", s.orgs.handleCreate)
 		}
 		if s.members != nil {
 			mux.Handle("GET "+apiV1Prefix+"/members", s.consoleRoute(identity.PermMembersRead, s.members.handleList))
 			mux.Handle("PATCH "+apiV1Prefix+"/members/{user_id}", s.consoleRoute(identity.PermMembersWrite, s.members.handleUpdateRole))
 			mux.Handle("DELETE "+apiV1Prefix+"/members/{user_id}", s.consoleRoute(identity.PermMembersWrite, s.members.handleRemove))
+		}
+		if s.invitations != nil {
+			mux.Handle("GET "+apiV1Prefix+"/invitations", s.consoleRoute(identity.PermMembersRead, s.invitations.handleList))
+			mux.Handle("POST "+apiV1Prefix+"/invitations", s.consoleRoute(identity.PermMembersWrite, s.invitations.handleCreate))
+			mux.Handle("DELETE "+apiV1Prefix+"/invitations/{id}", s.consoleRoute(identity.PermMembersWrite, s.invitations.handleRevoke))
+		}
+		if s.apiKeys != nil {
+			mux.Handle("GET "+apiV1Prefix+"/api-keys", s.consoleRoute(identity.PermAPIKeysRead, s.apiKeys.handleList))
+			mux.Handle("POST "+apiV1Prefix+"/api-keys", s.consoleRoute(identity.PermAPIKeysWrite, s.apiKeys.handleIssue))
+			mux.Handle("DELETE "+apiV1Prefix+"/api-keys/{id}", s.consoleRoute(identity.PermAPIKeysWrite, s.apiKeys.handleRevoke))
 		}
 		mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
 		mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))
@@ -36,7 +51,19 @@ func (s *Server) Routes() http.Handler {
 		mux.Handle("PATCH "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksWrite, s.handleUpdate))
 		mux.Handle("DELETE "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksWrite, s.handleDelete))
 		mux.Handle("GET "+apiV1Prefix+"/links/{code}/stats", s.consoleRoute(identity.PermStatsRead, s.handleStats))
+		if s.web != nil {
+			mux.Handle("/", s.web)
+		}
 	})
+}
+
+func (s *Server) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
+	if s.auth != nil {
+		s.auth.handleProviders(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, authProvidersResponse{})
 }
 
 /*

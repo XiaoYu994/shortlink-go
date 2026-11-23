@@ -29,13 +29,27 @@ WHERE tenant_id = $1
 	insertInvitationSQL = `INSERT INTO invitations (tenant_id, email, role, invited_by, expires_at)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING id, tenant_id, email, role, invited_by, created_at, expires_at`
+
+	listInvitationsSQL = `SELECT id, tenant_id, email, role, invited_by, created_at, expires_at, accepted_at, accepted_by, revoked_at
+FROM invitations
+WHERE tenant_id = $1
+ORDER BY id DESC`
+
+	lockInvitationForRevokeSQL = `SELECT role, accepted_at, revoked_at, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+FROM invitations
+WHERE id = $1 AND tenant_id = $2
+FOR UPDATE`
+
+	revokeInvitationSQL = `UPDATE invitations
+SET revoked_at = now()
+WHERE id = $1 AND tenant_id = $2`
 )
 
 var (
 	// ErrInvitationPending 表示同一租户对该邮箱已存在尚未过期、未撤销且未兑现的邀请。
-	ErrInvitationPending = errors.New("pending invitation already exists")
+	ErrInvitationPending = identity.ErrInvitationPending
 	// ErrInvitationExpiresNotFuture 表示创建邀请时给出的过期时间不在将来。
-	ErrInvitationExpiresNotFuture = errors.New("create invitation: expires_at must be in the future")
+	ErrInvitationExpiresNotFuture = identity.ErrInvitationExpiresNotFuture
 )
 
 /*
@@ -148,4 +162,128 @@ func insertInvitationTx(ctx context.Context, tx *sql.Tx, p CreateInvitationParam
 	}
 	inv.ExpiresAt = nullTimeUTC(scannedExpiresAt)
 	return inv, nil
+}
+
+// CreateOrgInvitation 给 HTTP 管理接口使用，复用 CreateInvitation 并记录发起人 user_id。
+func (s *Store) CreateOrgInvitation(ctx context.Context, p identity.CreateInvitationParams) (identity.Invitation, error) {
+	if p.InvitedBy <= 0 {
+		return identity.Invitation{}, errors.New("create invitation: invited_by must be positive")
+	}
+	invitedBy := p.InvitedBy
+	inv, err := s.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID:  p.TenantID,
+		Email:     p.Email,
+		Role:      p.Role,
+		InvitedBy: &invitedBy,
+		ExpiresAt: p.ExpiresAt,
+	})
+	if errors.Is(err, ErrTenantNotFound) {
+		return identity.Invitation{}, identity.ErrOrgNotFound
+	}
+	return inv, err
+}
+
+// ListInvitations 按 id 降序返回指定组织的全部邀请（含待兑现、已兑现、已撤销和已过期）。
+func (s *Store) ListInvitations(ctx context.Context, tenantID int64) ([]identity.Invitation, error) {
+	if tenantID <= 0 {
+		return nil, identity.ErrOrgNotFound
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, listInvitationsSQL, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list invitations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []identity.Invitation
+	for rows.Next() {
+		var (
+			inv        identity.Invitation
+			roleStr    string
+			invitedBy  sql.NullInt64
+			expiresAt  sql.NullTime
+			acceptedAt sql.NullTime
+			acceptedBy sql.NullInt64
+			revokedAt  sql.NullTime
+		)
+		if err := rows.Scan(
+			&inv.ID, &inv.TenantID, &inv.Email, &roleStr, &invitedBy,
+			&inv.CreatedAt, &expiresAt, &acceptedAt, &acceptedBy, &revokedAt,
+		); err != nil {
+			return nil, fmt.Errorf("list invitations: %w", err)
+		}
+		inv.Role = identity.Role(roleStr)
+		inv.CreatedAt = inv.CreatedAt.UTC()
+		if invitedBy.Valid {
+			v := invitedBy.Int64
+			inv.InvitedBy = &v
+		}
+		inv.ExpiresAt = nullTimeUTC(expiresAt)
+		inv.AcceptedAt = nullTimeUTC(acceptedAt)
+		if acceptedBy.Valid {
+			v := acceptedBy.Int64
+			inv.AcceptedBy = &v
+		}
+		inv.RevokedAt = nullTimeUTC(revokedAt)
+		out = append(out, inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list invitations: %w", err)
+	}
+	return out, nil
+}
+
+/*
+RevokeInvitation 撤销指定组织下的一条待兑现邀请（ADR 0021）。
+不存在或属于其他组织返回 identity.ErrInvitationNotFound；
+admin 撤销 owner 邀请返回 identity.ErrMemberForbidden；
+已兑现或已撤销返回 identity.ErrInvitationNotPending。
+*/
+func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitationParams) error {
+	if p.TenantID <= 0 || p.InvitationID <= 0 {
+		return identity.ErrInvitationNotFound
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		roleStr    string
+		acceptedAt sql.NullTime
+		revokedAt  sql.NullTime
+		expired    bool
+	)
+	err = tx.QueryRowContext(ctx, lockInvitationForRevokeSQL, p.InvitationID, p.TenantID).Scan(
+		&roleStr, &acceptedAt, &revokedAt, &expired,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return identity.ErrInvitationNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
+	targetRole := identity.Role(roleStr)
+	if !identity.CanAssignMemberRole(p.ActorRole, targetRole) {
+		return identity.ErrMemberForbidden
+	}
+	if acceptedAt.Valid || revokedAt.Valid || expired {
+		return identity.ErrInvitationNotPending
+	}
+
+	if _, err := tx.ExecContext(ctx, revokeInvitationSQL, p.InvitationID, p.TenantID); err != nil {
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("revoke invitation: commit: %w", err)
+	}
+	return nil
 }

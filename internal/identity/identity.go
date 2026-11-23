@@ -28,6 +28,24 @@ var (
 	ErrInvalidRole = errors.New("invalid role")
 	// ErrInvalidEmail 表示邮箱格式不合法或超出数据库约束长度。
 	ErrInvalidEmail = errors.New("invalid email")
+	// ErrInvalidOrgName 表示组织名称为空、过长或包含非法控制字符。
+	ErrInvalidOrgName = errors.New("invalid organization name")
+	// ErrOrgLimitExceeded 表示用户作为 owner 创建的组织数已达上限。
+	ErrOrgLimitExceeded = errors.New("organization limit exceeded")
+	// ErrInvitationPending 表示同一租户对该邮箱已存在待兑现邀请。
+	ErrInvitationPending = errors.New("pending invitation already exists")
+	// ErrInvitationExpiresNotFuture 表示创建邀请时给出的过期时间不在将来。
+	ErrInvitationExpiresNotFuture = errors.New("expires_at must be in the future")
+	// ErrInvitationNotFound 表示邀请不存在或不属于当前组织。
+	ErrInvitationNotFound = errors.New("invitation not found")
+	// ErrInvitationNotPending 表示邀请已兑现或已撤销，不能再次撤销。
+	ErrInvitationNotPending = errors.New("invitation is no longer pending")
+	// ErrAPIKeyNotFound 表示密钥不存在或不属于当前组织。
+	ErrAPIKeyNotFound = errors.New("api key not found")
+	// ErrAPIKeyRevoked 表示这把密钥已经吊销过。
+	ErrAPIKeyRevoked = errors.New("api key already revoked")
+	// ErrExpiresNotFuture 表示签发密钥时给出的过期时间不在将来。
+	ErrExpiresNotFuture = errors.New("expires_at must be in the future")
 )
 
 // ActorKind 区分管理请求的执行者类型：人（用户会话）或机器（API Key）。
@@ -93,6 +111,8 @@ const (
 	PermStatsRead    Perm = "stats:read"
 	PermMembersRead  Perm = "members:read"
 	PermMembersWrite Perm = "members:write"
+	PermAPIKeysRead  Perm = "apikeys:read"
+	PermAPIKeysWrite Perm = "apikeys:write"
 )
 
 /*

@@ -74,22 +74,39 @@ func runServe() error {
 		return err
 	}
 	var (
-		sessions console.SessionStore
-		members  console.MemberStore
+		sessions    console.SessionStore
+		members     console.MemberStore
+		orgs        console.OrgStore
+		invitations console.InvitationStore
+		apiKeys     console.APIKeyStore
 	)
 	if oidcClient != nil || githubClient != nil {
 		sessions = pgStore
 		members = pgStore
+		orgs = pgStore
+		invitations = pgStore
+		apiKeys = pgStore
+	}
+	if cfg.WebDistDir != "" {
+		info, err := os.Stat(cfg.WebDistDir)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("WEB_DIST_DIR %q must be an existing directory", cfg.WebDistDir)
+		}
+		logger.Info("serving web console static files", "dir", cfg.WebDistDir)
 	}
 
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
 	srv := console.New(logger, store, cfg.RequestTimeout, registry, console.Options{
-		Keys:       pgStore,
-		Authorizer: identity.NewMapAuthorizer(),
-		OIDC:       oidcClient,
-		GitHub:     githubClient,
-		Sessions:   sessions,
-		Members:    members,
+		Keys:        pgStore,
+		Authorizer:  identity.NewMapAuthorizer(),
+		OIDC:        oidcClient,
+		GitHub:      githubClient,
+		Sessions:    sessions,
+		Members:     members,
+		Orgs:        orgs,
+		Invitations: invitations,
+		APIKeys:     apiKeys,
+		WebDistDir:  cfg.WebDistDir,
 	})
 	/*
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。

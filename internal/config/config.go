@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"shortlink/internal/cache"
@@ -111,6 +112,8 @@ type ConsoleConfig struct {
 		三个字段要么全配，要么全空；可与 OIDC 独立启用或同时启用。
 	*/
 	GitHub GitHubConfig
+	// WebDistDir 非空时，console serve 在 / 托管前端构建产物（阶段 13、ADR 0021）。
+	WebDistDir string
 }
 
 // OIDCConfig 存放标准 OIDC 身份提供方的接入参数。
@@ -215,6 +218,7 @@ func LoadConsoleConfig() (ConsoleConfig, error) {
 			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 			RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
 		},
+		WebDistDir: strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
 	}
 	if err := validateOIDC(cfg.OIDC); err != nil {
 		return ConsoleConfig{}, err

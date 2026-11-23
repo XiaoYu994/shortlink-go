@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -30,11 +31,13 @@ const (
 	githubLoginPath    = apiV1Prefix + "/auth/github/login"
 	githubCallbackPath = apiV1Prefix + "/auth/github/callback"
 	authLogoutPath     = apiV1Prefix + "/auth/logout"
+	authProvidersPath  = apiV1Prefix + "/auth/providers"
 	mePath             = apiV1Prefix + "/me"
 	sessionCookiePath  = "/api/"
 
 	flowCookieTTL      = 10 * time.Minute
-	maxFlowCookieBytes = 1024
+	maxFlowCookieBytes = 1536
+	maxReturnToBytes   = 256
 )
 
 /*
@@ -167,7 +170,24 @@ type authFlowCookie struct {
 	State        string `json:"s"`
 	CodeVerifier string `json:"v"`
 	Nonce        string `json:"n,omitempty"`
+	ReturnTo     string `json:"r,omitempty"`
 	ExpiresAt    int64  `json:"e"`
+}
+
+type authProvidersResponse struct {
+	OIDC   bool `json:"oidc"`
+	GitHub bool `json:"github"`
+}
+
+func (h *authHandler) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if httpx.IsClientGone(h.logger, r) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, authProvidersResponse{
+		OIDC:   h.oidc != nil,
+		GitHub: h.github != nil,
+	})
 }
 
 type loginResponse struct {
@@ -232,6 +252,12 @@ func (h *authHandler) handleLoginFlow(
 		return
 	}
 
+	returnTo, ok := validateReturnTo(r.URL.Query().Get("return_to"))
+	if !ok {
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, "invalid return_to")
+		return
+	}
+
 	flow, authURL, err := start()
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "start external login", "err", err)
@@ -240,6 +266,7 @@ func (h *authHandler) handleLoginFlow(
 	}
 
 	expiresAt := h.now().UTC().Add(flowCookieTTL)
+	flow.ReturnTo = returnTo
 	flow.ExpiresAt = expiresAt.Unix()
 	cookieVal, err := encodeFlowCookie(flow, spec.key)
 	if err != nil {
@@ -337,6 +364,10 @@ func (h *authHandler) handleCallbackFlow(
 	}
 
 	setSessionCookie(w, issued, spec.secure)
+	if flow.ReturnTo != "" {
+		http.Redirect(w, r, flow.ReturnTo, http.StatusFound)
+		return
+	}
 	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, loginResponse{
 		User: loginUserResponse{
 			ID:    issued.User.ID,
@@ -568,5 +599,36 @@ func decodeFlowCookie(sealed string, spec flowCookieSpec) (authFlowCookie, bool)
 	if !spec.requireNonce && flow.Nonce != "" {
 		return authFlowCookie{}, false
 	}
+	if _, ok := validateReturnTo(flow.ReturnTo); !ok {
+		return authFlowCookie{}, false
+	}
 	return flow, true
+}
+
+/*
+validateReturnTo 只允许空串或站内前端相对路径，防止开放重定向攻击（ADR 0021）。
+拒绝协议相对路径（//evil.com）、反斜杠、控制字符，以及指向 /api/ 或 /r/ 的路径。
+*/
+func validateReturnTo(raw string) (string, bool) {
+	if raw == "" {
+		return "", true
+	}
+	if len(raw) > maxReturnToBytes || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+		return "", false
+	}
+	for i := range len(raw) {
+		c := raw[i]
+		if c < 0x20 || c == 0x7f || c == '\\' {
+			return "", false
+		}
+	}
+	pathOnly := raw
+	if idx := strings.IndexAny(pathOnly, "?#"); idx >= 0 {
+		pathOnly = pathOnly[:idx]
+	}
+	cleanPath := path.Clean(pathOnly)
+	if cleanPath == "/api" || strings.HasPrefix(cleanPath, "/api/") || cleanPath == "/r" || strings.HasPrefix(cleanPath, "/r/") {
+		return "", false
+	}
+	return raw, true
 }

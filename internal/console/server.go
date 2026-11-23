@@ -53,31 +53,40 @@ type Options struct {
 		OIDC 非空时，Routes 注册 /api/v1/auth/login 和 /api/v1/auth/callback。
 		GitHub 非空时，Routes 注册 /api/v1/auth/github/login 和 /api/v1/auth/github/callback。
 		Sessions 非空时，管理 API 支持会话 Cookie + X-Org-ID 鉴权，并注册 logout 和 /me。
-		Members 非空时，Routes 注册 /api/v1/members 成员管理路由（同样依赖有效会话和成员校验）。
-		全为空时不挂登录、会话与成员路由，只支持 API Key（ADR 0018）。
+		Members / Orgs / Invitations / APIKeys 非空时，分别注册对应组织自助与成员管理路由（ADR 0018、ADR 0021）。
+		全为空时不挂登录、会话与自助路由，只支持 API Key（ADR 0018）。
 	*/
-	OIDC     OIDCClient
-	GitHub   GitHubClient
-	Sessions SessionStore
-	Members  MemberStore
+	OIDC        OIDCClient
+	GitHub      GitHubClient
+	Sessions    SessionStore
+	Members     MemberStore
+	Orgs        OrgStore
+	Invitations InvitationStore
+	APIKeys     APIKeyStore
+	// WebDistDir 非空时在 / 挂载前端构建产物（SPA），不拦截 /api/*、/r/* 和运维端点（ADR 0021）。
+	WebDistDir string
 	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
 	SessionTTL time.Duration
 }
 
 // Server 持有管理进程需要的依赖，复用 httpx 提供的运维端点与通用中间件。
 type Server struct {
-	base     *httpx.Server
-	logger   *slog.Logger
-	store    LinkCreator
-	admin    LinkAdminStore
-	stats    LinkStatsStore
-	keys     APIKeyAuthenticator
-	sessions SessionAuthenticator
-	authz    Authorizer
-	csrf     *http.CrossOriginProtection
-	auth     *authHandler
-	members  *memberHandler
-	limiter  *tenantRateLimiter
+	base        *httpx.Server
+	logger      *slog.Logger
+	store       LinkCreator
+	admin       LinkAdminStore
+	stats       LinkStatsStore
+	keys        APIKeyAuthenticator
+	sessions    SessionAuthenticator
+	authz       Authorizer
+	csrf        *http.CrossOriginProtection
+	auth        *authHandler
+	members     *memberHandler
+	orgs        *orgHandler
+	invitations *invitationHandler
+	apiKeys     *apiKeyHandler
+	web         http.Handler
+	limiter     *tenantRateLimiter
 	// rateLimited 只属于管理 API；在 newServer 里注册一次，不在 Routes 中重复注册。
 	rateLimited prometheus.Counter
 }
@@ -95,6 +104,10 @@ type serverDeps struct {
 	github         GitHubClient
 	sessionMgr     SessionManager
 	members        MemberStore
+	orgs           OrgStore
+	invitations    InvitationStore
+	apiKeys        APIKeyStore
+	webDistDir     string
 	sessionTTL     time.Duration
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
@@ -120,6 +133,10 @@ func New(logger *slog.Logger, store Store, requestTimeout time.Duration, registr
 		github:         opts.GitHub,
 		sessionMgr:     opts.Sessions,
 		members:        opts.Members,
+		orgs:           opts.Orgs,
+		invitations:    opts.Invitations,
+		apiKeys:        opts.APIKeys,
+		webDistDir:     opts.WebDistDir,
 		sessionTTL:     opts.SessionTTL,
 		requestTimeout: requestTimeout,
 		registry:       registry,
@@ -138,6 +155,22 @@ func newServer(d serverDeps) *Server {
 	if d.members != nil {
 		members = newMemberHandler(logger, d.members)
 	}
+	var orgs *orgHandler
+	if d.orgs != nil && d.sessionMgr != nil {
+		orgs = newOrgHandler(logger, d.sessionMgr, d.orgs, csrf)
+	}
+	var invitations *invitationHandler
+	if d.invitations != nil {
+		invitations = newInvitationHandler(logger, d.invitations)
+	}
+	var apiKeys *apiKeyHandler
+	if d.apiKeys != nil {
+		apiKeys = newAPIKeyHandler(logger, d.apiKeys)
+	}
+	var web http.Handler
+	if d.webDistDir != "" {
+		web = newWebSPAHandler(d.webDistDir)
+	}
 	return &Server{
 		base:        base,
 		logger:      logger,
@@ -150,6 +183,10 @@ func newServer(d serverDeps) *Server {
 		csrf:        csrf,
 		auth:        auth,
 		members:     members,
+		orgs:        orgs,
+		invitations: invitations,
+		apiKeys:     apiKeys,
+		web:         web,
 		limiter:     newTenantRateLimiter(),
 		rateLimited: newRateLimitedCounter(d.registry),
 	}

@@ -13,15 +13,15 @@ import (
 )
 
 const (
-	insertAPIKeySQL = `INSERT INTO api_keys (tenant_id, key_hash, expires_at, scopes)
-VALUES ($1, $2, $3, $4::text[])
+	insertAPIKeySQL = `INSERT INTO api_keys (tenant_id, key_hash, expires_at, scopes, created_by)
+VALUES ($1, $2, $3, $4::text[], $5)
 RETURNING id, created_at, expires_at`
 
 	selectTenantForIssueSQL = `SELECT id, external_id FROM tenants WHERE id = $1`
 
 	insertTenantForIssueSQL = `INSERT INTO tenants (name, external_id) VALUES ($1, $2) RETURNING id`
 
-	listAPIKeysSQL = `SELECT id, tenant_id, scopes, created_at, expires_at, revoked_at
+	listAPIKeysSQL = `SELECT id, tenant_id, scopes, created_by, created_at, expires_at, revoked_at
 FROM api_keys
 WHERE tenant_id = $1
 ORDER BY id`
@@ -32,6 +32,13 @@ WHERE id = $1 AND revoked_at IS NULL
 RETURNING id`
 
 	checkAPIKeyRevokedSQL = `SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1`
+
+	revokeAPIKeyForTenantSQL = `UPDATE api_keys
+SET revoked_at = now()
+WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL
+RETURNING id`
+
+	checkAPIKeyRevokedForTenantSQL = `SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1 AND tenant_id = $2`
 
 	authenticateAPIKeySQL = `SELECT k.id, k.scopes, t.id, t.external_id, t.rate_limit_per_second
 FROM api_keys k
@@ -47,13 +54,13 @@ var (
 	// ErrExternalIDOnExisting 表示给已有租户签发时又带了外部编号。
 	ErrExternalIDOnExisting = errors.New("issue api key: external id only applies to a new tenant")
 	// ErrExpiresNotFuture 表示签发时给出的到期时间不是将来。
-	ErrExpiresNotFuture = errors.New("issue api key: expires_at must be in the future")
+	ErrExpiresNotFuture = identity.ErrExpiresNotFuture
 	// ErrTenantNotFound 表示租户不存在。
 	ErrTenantNotFound = errors.New("tenant not found")
 	// ErrAPIKeyNotFound 表示密钥行不存在。
-	ErrAPIKeyNotFound = errors.New("api key not found")
+	ErrAPIKeyNotFound = identity.ErrAPIKeyNotFound
 	// ErrAPIKeyRevoked 表示这把密钥已经吊销过。
-	ErrAPIKeyRevoked = errors.New("api key already revoked")
+	ErrAPIKeyRevoked = identity.ErrAPIKeyRevoked
 )
 
 /*
@@ -64,6 +71,7 @@ type APIKey struct {
 	ID        int64
 	TenantID  int64
 	Scopes    []identity.Perm
+	CreatedBy *int64
 	CreatedAt time.Time
 	ExpiresAt *time.Time
 	RevokedAt *time.Time
@@ -80,6 +88,7 @@ type IssuedAPIKey struct {
 IssueAPIKeyParams 指定把密钥发给谁以及授予哪些权限。
 TenantID 和 Name 只能填一个：前者给已有租户加一把密钥，后者新建租户再签发。
 ExternalID 只在新建时写入；空字符串存成 NULL，避免占住唯一约束。
+CreatedBy 为空表示由运维 CLI 签发；非空表示由组织管理员通过 HTTP 接口签发。
 ExpiresAt 为 nil 表示不过期。
 Scopes 必填，nil 和空切片都拒绝：零值不能表示全权限。
 只允许 links:read、links:write、stats:read，写入前会去重并按规范顺序排列。
@@ -89,6 +98,7 @@ type IssueAPIKeyParams struct {
 	TenantID   int64
 	Name       string
 	ExternalID string
+	CreatedBy  *int64
 	ExpiresAt  *time.Time
 	Scopes     []identity.Perm
 }
@@ -132,14 +142,22 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 		t := p.ExpiresAt.UTC()
 		expires = &t
 	}
-	key := APIKey{TenantID: tn.ID, Scopes: scopes, ExpiresAt: expires}
+	var createdBy sql.NullInt64
+	var keyCreatedBy *int64
+	if p.CreatedBy != nil {
+		createdBy = sql.NullInt64{Int64: *p.CreatedBy, Valid: true}
+		v := *p.CreatedBy
+		keyCreatedBy = &v
+	}
+	key := APIKey{TenantID: tn.ID, Scopes: scopes, CreatedBy: keyCreatedBy, ExpiresAt: expires}
 	var scannedExpires sql.NullTime
-	err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, expires, permsToStrings(scopes)).Scan(
+	err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, expires, permsToStrings(scopes), createdBy).Scan(
 		&key.ID, &key.CreatedAt, &scannedExpires,
 	)
 	if err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
+	key.CreatedAt = key.CreatedAt.UTC()
 	if scannedExpires.Valid {
 		key.ExpiresAt = nullTimeUTC(scannedExpires)
 	}
@@ -269,10 +287,11 @@ func scanAPIKey(scanner rowScanner) (APIKey, error) {
 	var (
 		key       APIKey
 		rawScopes []string
+		createdBy sql.NullInt64
 		expiresAt sql.NullTime
 		revokedAt sql.NullTime
 	)
-	if err := scanner.Scan(&key.ID, &key.TenantID, &rawScopes, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
+	if err := scanner.Scan(&key.ID, &key.TenantID, &rawScopes, &createdBy, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
 		return APIKey{}, err
 	}
 	scopes, err := parseAPIKeyScopes(rawScopes)
@@ -280,6 +299,11 @@ func scanAPIKey(scanner rowScanner) (APIKey, error) {
 		return APIKey{}, err
 	}
 	key.Scopes = scopes
+	if createdBy.Valid {
+		v := createdBy.Int64
+		key.CreatedBy = &v
+	}
+	key.CreatedAt = key.CreatedAt.UTC()
 	key.ExpiresAt = nullTimeUTC(expiresAt)
 	key.RevokedAt = nullTimeUTC(revokedAt)
 	return key, nil
@@ -319,6 +343,98 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID int64) error {
 		return fmt.Errorf("revoke api key: row %d was not updated", keyID)
 	}
 	return ErrAPIKeyRevoked
+}
+
+/*
+RevokeAPIKeyForTenant 按 (keyID, tenantID) 强制租户隔离地吊销一把密钥（ADR 0021）。
+跨租户或不存在一律返回 ErrAPIKeyNotFound，不暴露其他租户密钥是否存在；已吊销返回 ErrAPIKeyRevoked。
+*/
+func (s *Store) RevokeAPIKeyForTenant(ctx context.Context, tenantID, keyID int64) error {
+	if tenantID <= 0 || keyID <= 0 {
+		return ErrAPIKeyNotFound
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	var id int64
+	err := s.db.QueryRowContext(ctx, revokeAPIKeyForTenantSQL, keyID, tenantID).Scan(&id)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+
+	var revoked bool
+	err = s.db.QueryRowContext(ctx, checkAPIKeyRevokedForTenantSQL, keyID, tenantID).Scan(&revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAPIKeyNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+	if !revoked {
+		return fmt.Errorf("revoke api key: row %d was not updated", keyID)
+	}
+	return ErrAPIKeyRevoked
+}
+
+// ListOrgAPIKeys 给 HTTP 管理接口使用，返回 identity.APIKeyInfo 列表以保持 console 不依赖 postgres。
+func (s *Store) ListOrgAPIKeys(ctx context.Context, tenantID int64) ([]identity.APIKeyInfo, error) {
+	keys, err := s.ListAPIKeys(ctx, tenantID)
+	if errors.Is(err, ErrTenantNotFound) {
+		return nil, identity.ErrOrgNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]identity.APIKeyInfo, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, toAPIKeyInfo(k))
+	}
+	return out, nil
+}
+
+// IssueOrgAPIKey 给 HTTP 管理接口使用，在当前组织内签发密钥并记录 created_by。
+func (s *Store) IssueOrgAPIKey(ctx context.Context, p identity.IssueOrgAPIKeyParams) (identity.IssuedOrgAPIKey, error) {
+	if p.CreatedBy <= 0 {
+		return identity.IssuedOrgAPIKey{}, errors.New("issue api key: created_by must be positive")
+	}
+	createdBy := p.CreatedBy
+	issued, err := s.IssueAPIKey(ctx, IssueAPIKeyParams{
+		TenantID:  p.TenantID,
+		CreatedBy: &createdBy,
+		ExpiresAt: p.ExpiresAt,
+		Scopes:    p.Scopes,
+	})
+	if errors.Is(err, ErrTenantNotFound) {
+		return identity.IssuedOrgAPIKey{}, identity.ErrOrgNotFound
+	}
+	if err != nil {
+		return identity.IssuedOrgAPIKey{}, err
+	}
+	return identity.IssuedOrgAPIKey{
+		Key:       toAPIKeyInfo(issued.Key),
+		Plaintext: issued.Plaintext,
+	}, nil
+}
+
+// RevokeOrgAPIKey 给 HTTP 管理接口使用，按组织隔离吊销 API Key。
+func (s *Store) RevokeOrgAPIKey(ctx context.Context, tenantID, keyID int64) error {
+	return s.RevokeAPIKeyForTenant(ctx, tenantID, keyID)
+}
+
+func toAPIKeyInfo(k APIKey) identity.APIKeyInfo {
+	return identity.APIKeyInfo{
+		ID:        k.ID,
+		TenantID:  k.TenantID,
+		Scopes:    k.Scopes,
+		CreatedBy: k.CreatedBy,
+		CreatedAt: k.CreatedAt,
+		ExpiresAt: k.ExpiresAt,
+		RevokedAt: k.RevokedAt,
+	}
 }
 
 /*
