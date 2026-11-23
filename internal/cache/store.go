@@ -137,6 +137,7 @@ type LinkStats interface {
 // LinkTakedown 是平台封禁和解封，按短码操作，不需要租户 ID。
 type LinkTakedown interface {
 	Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error)
+	BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error)
 	Unban(ctx context.Context, code string) (*link.Link, error)
 }
 
@@ -226,12 +227,24 @@ func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts 
 	return s
 }
 
-// Create 成功后写穿正缓存，盖掉负缓存。写失败不影响创建结果。
+/*
+Create 成功后写穿正缓存，盖掉负缓存；写完后再按跳转查询复查一次数据库。
+异步风控上线后（ADR 0016、ADR 0020），创建提交后 worker 可能立刻封禁并写负缓存，
+复查确保晚到的正缓存不会把风控负缓存盖回去。写失败不影响创建结果。
+*/
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := s.next.Create(ctx, l); err != nil {
 		return err
 	}
-	s.writeCommitted(ctx, keyPrefix+l.Code, l)
+	key := keyPrefix + l.Code
+	if !l.Servable(time.Now()) {
+		s.writeCommitted(ctx, key, nil)
+		return nil
+	}
+	s.writeCommitted(ctx, key, l)
+	if _, err := s.recheckAfterPositiveWrite(ctx, key, l.Code); err != nil {
+		s.logger.WarnContext(ctx, "write negative cache after recheck", "code", l.Code, "err", err)
+	}
 	return nil
 }
 
@@ -308,8 +321,7 @@ Update 先提交数据库，再无条件覆盖缓存。
 Redis 写失败只影响一致性，旧值最多保留到 TTL，见 ADR 0011。
 
 写了正缓存之后还要复查一次数据库：删除、停用、封禁可能和这次修改并发，
-晚到的正缓存会盖掉它们的负缓存。复查偏向不跳转，见 ADR 0016。
-Create 不做复查：创建响应返回之前没有人知道这个短码；风控上线后要加上。
+晚到的正缓存会盖掉它们的负缓存。复查偏向不跳转，见 ADR 0016、ADR 0020。
 */
 func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
 	updated, err := s.next.Update(ctx, tenantID, code, u)
@@ -349,6 +361,22 @@ Ban 先封禁数据库，再无条件写负缓存，盖掉旧的正缓存。
 */
 func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 	banned, err := s.next.Ban(ctx, code, reason, source)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.writeCommittedResult(ctx, keyPrefix+code, nil); err != nil {
+		return banned, notUpdated("ban link", err)
+	}
+	return banned, nil
+}
+
+/*
+BanIfURL 供异步风控按期望 URL 条件封禁，并写负缓存（ADR 0020）。
+链接已删除（link.ErrNotFound）或 URL 已变更（link.ErrURLChanged）时缓存不动；
+数据库已封禁但负缓存写失败时返回包装 ErrNotUpdated 的错误，由 worker 自动退避重试自愈。
+*/
+func (s *Store) BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	banned, err := s.next.BanIfURL(ctx, code, expectedURL, reason, source)
 	if err != nil {
 		return nil, err
 	}

@@ -719,36 +719,125 @@ func TestUpdateRechecksWhenRequestAlreadyCanceled(t *testing.T) {
 	}
 }
 
-// TestStoreCreateDoesNotRecheck 创建响应返回之前没人知道短码，不做复查。
-func TestStoreCreateDoesNotRecheck(t *testing.T) {
-	rdb := newTestRedis(t)
-	code := newTestCode(t)
-	cleanupTestKey(t, rdb, code)
-	ctx := context.Background()
+// TestStoreCreateRechecksAfterPositiveWrite 异步风控上线后，Create 写完正缓存必须复查（ADR 0016、ADR 0020）。
+func TestStoreCreateRechecksAfterPositiveWrite(t *testing.T) {
+	boom := errors.New("database down")
+	tests := []struct {
+		name         string
+		get          func(ctx context.Context, code string) (*link.Link, error)
+		wantNegative bool
+	}{
+		{
+			name: "banned right after create",
+			get: func(context.Context, string) (*link.Link, error) {
+				return nil, link.ErrNotFound
+			},
+			wantNegative: true,
+		},
+		{
+			name: "recheck error falls back to negative",
+			get: func(context.Context, string) (*link.Link, error) {
+				return nil, boom
+			},
+			wantNegative: true,
+		},
+		{
+			name: "still active",
+			get: func(_ context.Context, code string) (*link.Link, error) {
+				return &link.Link{ID: 7, Code: code, URL: "https://example.com/created"}, nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdb := newTestRedis(t)
+			code := newTestCode(t)
+			cleanupTestKey(t, rdb, code)
+			ctx := context.Background()
 
-	next := &fakeStore{
-		create: func(l *link.Link) error {
-			l.Code = code
-			return nil
-		},
-		get: func(context.Context, string) (*link.Link, error) {
-			t.Error("Create triggered a recheck")
-			return nil, link.ErrNotFound
-		},
+			next := &fakeStore{
+				create: func(l *link.Link) error {
+					l.ID = 7
+					l.Code = code
+					return nil
+				},
+				get: tt.get,
+			}
+			s := newTestStore(t, next, rdb)
+			l := &link.Link{URL: "https://example.com/created"}
+			if err := s.Create(ctx, l); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if n := next.calls.Load(); n != 1 {
+				t.Errorf("recheck GetByCode calls = %d, want 1", n)
+			}
+
+			if tt.wantNegative {
+				if value := rdb.Get(ctx, keyPrefix+code).Val(); value != "null" {
+					t.Errorf("cached value = %q, want null", value)
+				}
+				return
+			}
+			next.get = func(context.Context, string) (*link.Link, error) {
+				t.Error("GetByCode fell through to store after positive cache")
+				return nil, link.ErrNotFound
+			}
+			got, err := s.GetByCode(ctx, code)
+			if err != nil {
+				t.Fatalf("GetByCode: %v", err)
+			}
+			if got.URL != l.URL {
+				t.Errorf("GetByCode URL = %q, want %q", got.URL, l.URL)
+			}
+		})
 	}
-	s := newTestStore(t, next, rdb)
-	l := &link.Link{URL: "https://example.com/created"}
-	if err := s.Create(ctx, l); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if n := next.calls.Load(); n != 0 {
-		t.Errorf("store GetByCode calls = %d, want 0", n)
-	}
-	got, err := s.GetByCode(ctx, code)
-	if err != nil {
-		t.Fatalf("GetByCode: %v", err)
-	}
-	if got.URL != l.URL {
-		t.Errorf("GetByCode URL = %q, want %q", got.URL, l.URL)
-	}
+}
+
+func TestStoreBanIfURLCacheBehavior(t *testing.T) {
+	t.Run("writes negative cache on ban", func(t *testing.T) {
+		rdb := newTestRedis(t)
+		code := newTestCode(t)
+		cleanupTestKey(t, rdb, code)
+		ctx := context.Background()
+
+		banned := &link.Link{
+			ID: 7, Code: code, URL: "https://evil.example/phish",
+			Ban: &link.Ban{At: time.Now().UTC(), Reason: link.BanReasonPhishing, Source: link.BanSourceRisk},
+		}
+		next := &fakeStore{
+			banIfURL: func(_ context.Context, gotCode, gotURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+				if gotCode != code || gotURL != banned.URL || reason != link.BanReasonPhishing || source != link.BanSourceRisk {
+					t.Errorf("BanIfURL(%q, %q, %q, %q)", gotCode, gotURL, reason, source)
+				}
+				return banned, nil
+			},
+		}
+		s := newTestStore(t, next, rdb)
+		if _, err := s.BanIfURL(ctx, code, banned.URL, link.BanReasonPhishing, link.BanSourceRisk); err != nil {
+			t.Fatalf("BanIfURL: %v", err)
+		}
+		if value := rdb.Get(ctx, keyPrefix+code).Val(); value != "null" {
+			t.Errorf("cached value = %q, want null", value)
+		}
+	})
+
+	t.Run("leaves cache untouched on ErrURLChanged", func(t *testing.T) {
+		rdb := newTestRedis(t)
+		code := newTestCode(t)
+		cleanupTestKey(t, rdb, code)
+		ctx := context.Background()
+
+		next := &fakeStore{
+			banIfURL: func(context.Context, string, string, link.BanReason, link.BanSource) (*link.Link, error) {
+				return nil, link.ErrURLChanged
+			},
+		}
+		s := newTestStore(t, next, rdb)
+		if _, err := s.BanIfURL(ctx, code, "https://old.example", link.BanReasonPhishing, link.BanSourceRisk); !errors.Is(err, link.ErrURLChanged) {
+			t.Fatalf("BanIfURL error = %v, want ErrURLChanged", err)
+		}
+		if n := rdb.Exists(ctx, keyPrefix+code).Val(); n != 0 {
+			t.Errorf("BanIfURL wrote cache on ErrURLChanged")
+		}
+	})
 }

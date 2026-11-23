@@ -37,6 +37,7 @@ type fakeStore struct {
 	update   func(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error)
 	deleteFn func(ctx context.Context, tenantID int64, code string) error
 	ban      func(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error)
+	banIfURL func(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error)
 	unban    func(ctx context.Context, code string) (*link.Link, error)
 }
 
@@ -50,7 +51,10 @@ func (f *fakeStore) Create(ctx context.Context, l *link.Link) error {
 
 func (f *fakeStore) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	f.calls.Add(1)
-	return f.get(ctx, code)
+	if f.get != nil {
+		return f.get(ctx, code)
+	}
+	return nil, link.ErrNotFound
 }
 
 func (f *fakeStore) List(context.Context, link.ListOptions) ([]link.AdminLink, error) {
@@ -83,6 +87,14 @@ func (f *fakeStore) Stats(context.Context, int64, string, time.Time, time.Time) 
 
 func (f *fakeStore) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 	f.bans.Add(1)
+	return f.ban(ctx, code, reason, source)
+}
+
+func (f *fakeStore) BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	f.bans.Add(1)
+	if f.banIfURL != nil {
+		return f.banIfURL(ctx, code, expectedURL, reason, source)
+	}
 	return f.ban(ctx, code, reason, source)
 }
 
@@ -542,12 +554,19 @@ func TestStoreCreateWritesThrough(t *testing.T) {
 	code := newTestCode(t)
 	cleanupTestKey(t, rdb, code)
 
-	next := &fakeStore{create: func(l *link.Link) error {
-		l.ID = 5
-		l.Code = code
-		l.CreatedAt = time.Now().Truncate(time.Second)
-		return nil
-	}}
+	var created *link.Link
+	next := &fakeStore{
+		create: func(l *link.Link) error {
+			l.ID = 5
+			l.Code = code
+			l.CreatedAt = time.Now().Truncate(time.Second)
+			created = l
+			return nil
+		},
+		get: func(context.Context, string) (*link.Link, error) {
+			return created, nil
+		},
+	}
 	s := newTestStore(t, next, rdb)
 	ctx := context.Background()
 
@@ -556,6 +575,7 @@ func TestStoreCreateWritesThrough(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
+	callsBefore := next.calls.Load()
 	got, err := s.GetByCode(ctx, code)
 	if err != nil {
 		t.Fatalf("GetByCode: %v", err)
@@ -563,8 +583,8 @@ func TestStoreCreateWritesThrough(t *testing.T) {
 	if got.ID != l.ID || got.URL != l.URL {
 		t.Errorf("GetByCode = %+v, want ID %d URL %q", got, l.ID, l.URL)
 	}
-	if n := next.calls.Load(); n != 0 {
-		t.Errorf("store GetByCode calls = %d, want 0 (cache hit)", n)
+	if n := next.calls.Load() - callsBefore; n != 0 {
+		t.Errorf("store GetByCode calls after create = %d, want 0 (cache hit)", n)
 	}
 	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); got != 1 {
 		t.Errorf("writes{result=success} = %v, want 1", got)

@@ -64,6 +64,13 @@ func (s stubStore) Ban(context.Context, string, link.BanReason, link.BanSource) 
 	return s.link, nil
 }
 
+func (s stubStore) BanIfURL(context.Context, string, string, link.BanReason, link.BanSource) (*link.Link, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.link, nil
+}
+
 func (s stubStore) Unban(context.Context, string) (*link.Link, error) {
 	if s.err != nil {
 		return nil, s.err
@@ -166,6 +173,7 @@ func TestAdminOperationsRecordResult(t *testing.T) {
 		{"not found", link.ErrNotFound, resultNotFound},
 		{"banned", link.ErrBanned, resultBanned},
 		{"wrapped banned", fmt.Errorf("update link: %w", link.ErrBanned), resultBanned},
+		{"url changed", link.ErrURLChanged, resultURLChanged},
 		{"canceled", context.Canceled, resultCanceled},
 		{"timeout", context.DeadlineExceeded, resultTimeout},
 		{"error", errors.New("db down"), resultError},

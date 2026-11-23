@@ -78,6 +78,8 @@ WHERE l.code = $1 AND l.tenant_id = $2`
 		$3/$5/$7 是「有没有传这个字段」，$4/$6/$8 是新值；清空 expires_at 时 $6 是 NULL。
 		重复停用保留第一次的时间；启用把 disabled_at 清成 NULL。
 		WHERE 排除已封禁的行：被封禁的链接对租户只读，修改一律不落库。
+		只有本次修改了 url（$3 为真）且更新成功时，才在同一条多 CTE 语句里入队异步风控（ADR 0020）；
+		只改 expires_at 或 disabled 不入队。
 		RETURNING 只带 links 的列，clicks_today 在 CTE 外面补。
 	*/
 	updateLinkSQL = `WITH updated AS (
@@ -89,6 +91,14 @@ WHERE l.code = $1 AND l.tenant_id = $2`
                            ELSE NULL END
     WHERE code = $1 AND tenant_id = $2 AND banned_at IS NULL
     RETURNING ` + linkColumns + `, clicks
+),
+enqueued AS (
+    INSERT INTO jobs (kind, tenant_id, payload)
+    SELECT 'link.risk_scan',
+           NULLIF(u.tenant_id, 0),
+           jsonb_build_object('link_id', u.id, 'code', u.code, 'url', u.url)
+    FROM updated u
+    WHERE $3
 )
 SELECT u.id, u.code, u.url, u.expires_at, u.created_at, u.tenant_id,
        u.disabled_at, u.banned_at, u.ban_reason, u.ban_source,
@@ -114,6 +124,19 @@ SET banned_at = COALESCE(banned_at, now()),
     ban_source = COALESCE(ban_source, $3)
 WHERE code = $1
 RETURNING ` + linkColumns
+
+	/*
+		banLinkIfURLSQL 给异步风控使用：仅当当前 URL 仍等于送审 URL 时才封禁（ADR 0020）。
+		租户在扫描完成前把违规 URL 改成合规 URL 时，旧扫描任务不会误封新链接。
+	*/
+	banLinkIfURLSQL = `UPDATE links
+SET banned_at = COALESCE(banned_at, now()),
+    ban_reason = COALESCE(ban_reason, $2),
+    ban_source = COALESCE(ban_source, $3)
+WHERE code = $1 AND url = $4
+RETURNING ` + linkColumns
+
+	linkExistsByCodeSQL = `SELECT 1 FROM links WHERE code = $1`
 
 	// Unban 把三个封禁字段一起清空。没被封禁的链接解封是空操作，仍然返回这一行。
 	unbanLinkSQL = `UPDATE links
@@ -326,6 +349,21 @@ reason 和 source 先在 Go 里校验，非法值不落库；数据库 CHECK 兜
 缓存层据此决定解封后写正缓存还是负缓存。
 */
 func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	return s.ban(ctx, code, "", reason, source)
+}
+
+/*
+BanIfURL 仅当链接当前 URL 仍等于 expectedURL 时封禁，用于异步风控防并发改写误封（ADR 0020）。
+链接已删除返回 link.ErrNotFound；链接仍在但 URL 已变更返回 link.ErrURLChanged。
+*/
+func (s *Store) BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	if expectedURL == "" {
+		return nil, errors.New("ban link: expected URL is required")
+	}
+	return s.ban(ctx, code, expectedURL, reason, source)
+}
+
+func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 	if !reason.Valid() {
 		return nil, fmt.Errorf("ban link: invalid reason %q", reason)
 	}
@@ -333,14 +371,33 @@ func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, sou
 		return nil, fmt.Errorf("ban link: invalid source %q", source)
 	}
 
-	got, err := scanLink(s.db.QueryRowContext(ctx, banLinkSQL, code, string(reason), string(source)))
+	var row *sql.Row
+	if expectedURL == "" {
+		row = s.db.QueryRowContext(ctx, banLinkSQL, code, string(reason), string(source))
+	} else {
+		row = s.db.QueryRowContext(ctx, banLinkIfURLSQL, code, string(reason), string(source), expectedURL)
+	}
+	got, err := scanLink(row)
+	if err == nil {
+		return got, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("ban link: %w", err)
+	}
+	if expectedURL == "" {
+		return nil, link.ErrNotFound
+	}
+
+	// 未命中时补查短码是否存在，区分已删除和 URL 已变更。
+	var exists int
+	err = s.db.QueryRowContext(ctx, linkExistsByCodeSQL, code).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ban link: %w", err)
 	}
-	return got, nil
+	return nil, link.ErrURLChanged
 }
 
 /*

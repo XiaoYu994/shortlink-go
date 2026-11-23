@@ -48,6 +48,12 @@ HTTP 层用 errors.Is 映射成 403；跳转视角把它和过期、停用一样
 var ErrBanned = errors.New("link is banned")
 
 /*
+ErrURLChanged 表示按期望 URL 条件封禁时，链接仍在但目标 URL 已被租户改成别的值。
+异步风控据此跳过过期的旧扫描任务，不误封已经改成合规地址的链接（ADR 0020）。
+*/
+var ErrURLChanged = errors.New("link url changed")
+
+/*
 BanReason 是封禁原因的封闭类别集合，不是自由文本。
 它会原样出现在租户的 API 响应里，前端按类别给文案；加类别要同时改这里、
 数据库 CHECK 和迁移。

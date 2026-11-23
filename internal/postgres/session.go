@@ -99,6 +99,17 @@ WHERE s.token_hash = $1
 SET revoked_at = now()
 WHERE token_hash = $1
   AND revoked_at IS NULL`
+
+	// 分批清理已过期或已吊销且超过保留期的会话，复用迁移 007 的 idx_sessions_expires_at 避免长事务锁表。
+	cleanupExpiredSessionsSQL = `DELETE FROM sessions
+WHERE id IN (
+    SELECT id
+    FROM sessions
+    WHERE expires_at < now() - ($1::bigint * interval '1 microsecond')
+       OR (revoked_at IS NOT NULL AND revoked_at < now() - ($1::bigint * interval '1 microsecond'))
+    ORDER BY expires_at, id
+    LIMIT $2
+)`
 )
 
 var errIdentityConflict = errors.New("external identity unique conflict")
@@ -367,4 +378,23 @@ func (s *Store) RevokeSession(ctx context.Context, token string) error {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil
+}
+
+// CleanupExpiredSessions 分批删除过期或吊销时间早于 retention 的服务端会话，返回删除行数。
+func (s *Store) CleanupExpiredSessions(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	if retention < 0 {
+		return 0, errors.New("cleanup expired sessions: retention must not be negative")
+	}
+	if limit <= 0 {
+		return 0, errors.New("cleanup expired sessions: limit must be positive")
+	}
+	res, err := s.db.ExecContext(ctx, cleanupExpiredSessionsSQL, retention.Microseconds(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup expired sessions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("cleanup expired sessions: %w", err)
+	}
+	return n, nil
 }

@@ -29,6 +29,7 @@ const (
 	resultNotFound      = "not_found"
 	resultQuotaExceeded = "quota_exceeded"
 	resultBanned        = "banned"
+	resultURLChanged    = "url_changed"
 	resultCanceled      = "canceled"
 	resultTimeout       = "timeout"
 	resultError         = "error"
@@ -73,6 +74,7 @@ type LinkStats interface {
 // LinkTakedown 是平台封禁和解封。
 type LinkTakedown interface {
 	Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error)
+	BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error)
 	Unban(ctx context.Context, code string) (*link.Link, error)
 }
 
@@ -157,10 +159,17 @@ func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to
 	return got, err
 }
 
-// Ban、Unban 记录平台下架操作的结果；ErrNotFound 和 ErrBanned 沿用 classifyResult。
+// Ban、BanIfURL、Unban 记录平台下架操作的结果；ErrNotFound、ErrBanned 和 ErrURLChanged 沿用 classifyResult。
 func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 	start := time.Now()
 	got, err := s.next.Ban(ctx, code, reason, source)
+	s.observe(operationBan, err, time.Since(start))
+	return got, err
+}
+
+func (s *Store) BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	start := time.Now()
+	got, err := s.next.BanIfURL(ctx, code, expectedURL, reason, source)
 	s.observe(operationBan, err, time.Since(start))
 	return got, err
 }
@@ -180,8 +189,8 @@ func (s *Store) observe(operation string, err error, d time.Duration) {
 
 /*
 classifyResult 把存储错误分成指标结果。
-context 错误、ErrNotFound、配额不足和封禁都是 non-nil，要排在通用错误前面。
-配额不足和封禁都是策略生效，不是存储故障，单独分类才能和真正的失败区分开。
+context 错误、ErrNotFound、配额不足、封禁和 URL 变更都是 non-nil，要排在通用错误前面。
+配额不足、封禁和 URL 变更都是策略生效，不是存储故障，单独分类才能和真正的失败区分开。
 */
 func classifyResult(err error) string {
 	switch {
@@ -193,6 +202,8 @@ func classifyResult(err error) string {
 		return resultQuotaExceeded
 	case errors.Is(err, link.ErrBanned):
 		return resultBanned
+	case errors.Is(err, link.ErrURLChanged):
+		return resultURLChanged
 	case errors.Is(err, context.Canceled):
 		return resultCanceled
 	case errors.Is(err, context.DeadlineExceeded):

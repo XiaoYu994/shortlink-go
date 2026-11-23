@@ -261,13 +261,18 @@ func TestCommittedWriteErrorIsCountedWhenRequestCanceled(t *testing.T) {
 
 	var logs bytes.Buffer
 	reg := prometheus.NewRegistry()
-	s := New(&fakeStore{}, rdb, reg, Options{
+	created := &link.Link{Code: "x", URL: "https://example.com"}
+	s := New(&fakeStore{
+		get: func(context.Context, string) (*link.Link, error) {
+			return created, nil
+		},
+	}, rdb, reg, Options{
 		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := s.Create(ctx, &link.Link{Code: "x", URL: "https://example.com"}); err != nil {
+	if err := s.Create(ctx, created); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

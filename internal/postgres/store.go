@@ -41,13 +41,14 @@ const (
     THEN 0 ELSE link_usage END`
 
 	/*
-		占本月配额和插入链接在同一条语句里完成，两条动作一起提交或一起回滚。
+		占本月配额、插入链接与入队异步风控任务在同一条多 CTE 语句里完成，三条动作一起提交或一起回滚（ADR 0020）。
 		quota 把「本月已创建数」和它所属的月份一起更新：月份过期时先按 0 算再加一；
 		EXISTS (SELECT 1 FROM quota) 靠它的 RETURNING 判断是否拿到了配额，
 		数据修改 CTE 的改动只有 RETURNING 能看到。
 		租户行不存在时照常插入链接，不占配额：这是 ADR 0010 允许的孤儿引用，
 		只会在直接调用存储时出现，HTTP 路径的租户一定来自鉴权。
-		语句失败（例如短码冲突）时配额更新随语句一起回滚，重试不会重复计数。
+		tenant_id 为 0 时用 NULLIF 转成 NULL，避免违反 ck_jobs_tenant_id_positive。
+		语句失败（例如短码冲突）时配额更新和风控入队随语句一起回滚，重试不会重复计数也不留孤儿任务。
 	*/
 	insertLinkSQL = `WITH quota AS (
     UPDATE tenants
@@ -56,12 +57,22 @@ const (
     WHERE id = $4
       AND (` + effectiveUsageSQL + `) < link_quota
     RETURNING 1
+),
+inserted AS (
+    INSERT INTO links (code, url, expires_at, tenant_id)
+    SELECT $1, $2, $3, $4
+    WHERE EXISTS (SELECT 1 FROM quota)
+       OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = $4)
+    RETURNING id, code, url, created_at, tenant_id
+),
+enqueued AS (
+    INSERT INTO jobs (kind, tenant_id, payload)
+    SELECT 'link.risk_scan',
+           NULLIF(i.tenant_id, 0),
+           jsonb_build_object('link_id', i.id, 'code', i.code, 'url', i.url)
+    FROM inserted i
 )
-INSERT INTO links (code, url, expires_at, tenant_id)
-SELECT $1, $2, $3, $4
-WHERE EXISTS (SELECT 1 FROM quota)
-   OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = $4)
-RETURNING id, created_at`
+SELECT id, created_at FROM inserted`
 	/*
 		过期、停用和封禁的行都留在表里，短码继续占着。查询把它们看成找不到。
 		到期时刻本身算过期，界限是 expires_at > now()；

@@ -184,6 +184,68 @@ func TestCacheRecheckClosesTakedownInterleaving(t *testing.T) {
 }
 
 /*
+TestCacheCreateRecheckClosesRiskBanInterleaving 重放 ADR 0020 的创建与风控交错：
+Create 在数据库提交后、console 写正缓存前，风控 worker 已经封禁并写了负缓存；
+console 晚到的正缓存会被 Create 的复查补写负缓存盖回。
+*/
+func TestCacheCreateRecheckClosesRiskBanInterleaving(t *testing.T) {
+	redisURL := os.Getenv("TEST_REDIS_URL")
+	if redisURL == "" {
+		t.Skip("TEST_REDIS_URL is not set")
+	}
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	rdb, err := cache.Open(ctx, redisURL)
+	if err != nil {
+		t.Fatalf("open redis: %v", err)
+	}
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	inner := cache.New(store, rdb, prometheus.NewRegistry(), cache.Options{})
+	outerStore := &createInterleaveStore{Store: store, inner: inner}
+	outer := cache.New(outerStore, rdb, prometheus.NewRegistry(), cache.Options{})
+
+	l := mustLink(t, "https://evil.example/create-interleave", tenantID)
+	if err := outer.Create(ctx, l); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	key := "shortlink:link:" + l.Code
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+
+	if outerStore.banErr != nil {
+		t.Fatalf("interleaved risk BanIfURL: %v", outerStore.banErr)
+	}
+	data, err := rdb.Get(ctx, key).Bytes()
+	if err != nil {
+		t.Fatalf("get cached value: %v", err)
+	}
+	if string(data) != "null" {
+		t.Fatalf("cached value = %q, want null after create recheck", data)
+	}
+	if _, err := outer.GetByCode(ctx, l.Code); !errors.Is(err, link.ErrNotFound) {
+		t.Fatalf("GetByCode error = %v, want ErrNotFound", err)
+	}
+}
+
+type createInterleaveStore struct {
+	*Store
+	inner  *cache.Store
+	once   sync.Once
+	banErr error
+}
+
+func (s *createInterleaveStore) Create(ctx context.Context, l *link.Link) error {
+	if err := s.Store.Create(ctx, l); err != nil {
+		return err
+	}
+	s.once.Do(func() {
+		_, s.banErr = s.inner.BanIfURL(ctx, l.Code, l.URL, link.BanReasonPhishing, link.BanSourceRisk)
+	})
+	return nil
+}
+
+/*
 interleaveStore 在真实 postgres.Store 的 Update 提交之后、cache.Store 写正缓存之前，
 用另一个 cache.Store 完成一次 Ban。只触发一次，避免复查的读也触发。
 */
