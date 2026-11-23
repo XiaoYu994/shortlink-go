@@ -12,7 +12,8 @@ console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 .PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
-	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli
+	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli \
+	web-install web-dev web-build web-lint web-test web-check
 
 help: ## 列出所有命令
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -123,3 +124,21 @@ psql: ## 进入 PostgreSQL 命令行
 
 redis-cli: ## 进入 Redis 命令行
 	docker compose exec redis redis-cli
+
+web-install: ## 安装最小前端控制台依赖（需要 Node.js 与 pnpm）
+	pnpm --dir web install
+
+web-dev: ## 启动前端开发服务器（同源代理到 console 与 redirector）
+	VITE_CONSOLE_ORIGIN=http://127.0.0.1:$(console_port) VITE_REDIRECTOR_ORIGIN=http://127.0.0.1:$(redirector_port) pnpm --dir web dev
+
+web-build: ## 类型检查并构建前端静态产物到 web/dist
+	pnpm --dir web build
+
+web-lint: ## 前端 ESLint 静态检查（含 react-hooks 与 TypeScript 规则）
+	pnpm --dir web lint
+
+web-test: ## 运行前端 Vitest + Testing Library 组件测试
+	pnpm --dir web test
+
+web-check: ## 前端完整检查：tsc + eslint + vitest + build
+	pnpm --dir web check
