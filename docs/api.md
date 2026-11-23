@@ -11,13 +11,24 @@
 | console | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
 | console | `GET` | `/readyz` | 就绪检查，PostgreSQL 能 Ping 通才返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| console | `GET` | `/api/v1/auth/login` | 发起 OIDC 授权码登录（仅配置完整 `OIDC_*` 时注册） |
-| console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（仅配置完整 `OIDC_*` 时注册） |
-| console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（仅配置完整 `OIDC_*` 时注册） |
-| console | `GET` | `/api/v1/me` | 返回当前登录用户信息与所属组织列表（仅配置完整 `OIDC_*` 时注册） |
-| console | `GET` | `/api/v1/members` | 当前组织成员列表（仅配置完整 `OIDC_*` 时注册，需要 `members:read`） |
-| console | `PATCH` | `/api/v1/members/{user_id}` | 修改当前组织成员角色（仅配置完整 `OIDC_*` 时注册，需要 `members:write`） |
-| console | `DELETE` | `/api/v1/members/{user_id}` | 将成员移出当前组织（仅配置完整 `OIDC_*` 时注册，需要 `members:write`） |
+| console | `GET` | `/api/v1/auth/providers` | 查询当前已启用的登录方式（`oidc`、`github`），无需鉴权 |
+| console | `GET` | `/api/v1/auth/login` | 发起 OIDC 授权码登录（支持可选相对路径 `?return_to=/...`，仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（有 `return_to` 时 302 跳转，否则返回 200 JSON；仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/auth/github/login` | 发起 GitHub OAuth 2.0 登录（支持可选 `?return_to=/...`，仅配置完整 `GITHUB_*` 时注册） |
+| console | `GET` | `/api/v1/auth/github/callback` | GitHub 回调并建立服务端会话（仅配置完整 `GITHUB_*` 时注册） |
+| console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（配置 OIDC 或 GitHub 时注册） |
+| console | `GET` | `/api/v1/me` | 返回当前登录用户信息与所属组织列表（配置 OIDC 或 GitHub 时注册） |
+| console | `POST` | `/api/v1/orgs` | 当前登录用户自助创建组织并成为 `owner`（仅会话 + CSRF，不要求 `X-Org-ID`） |
+| console | `GET` | `/api/v1/members` | 当前组织成员列表（配置 OIDC 或 GitHub 时注册，需要 `members:read`） |
+| console | `PATCH` | `/api/v1/members/{user_id}` | 修改当前组织成员角色（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
+| console | `DELETE` | `/api/v1/members/{user_id}` | 将成员移出当前组织（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
+| console | `GET` | `/api/v1/invitations` | 当前组织邀请列表（配置 OIDC 或 GitHub 时注册，需要 `members:read`） |
+| console | `POST` | `/api/v1/invitations` | 发起当前组织邮箱邀请（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
+| console | `DELETE` | `/api/v1/invitations/{id}` | 撤销待兑现邀请（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
+| console | `GET` | `/api/v1/api-keys` | 当前组织 API Key 列表（不含明文，需要 `apikeys:read`，仅 `owner`/`admin` 会话） |
+| console | `POST` | `/api/v1/api-keys` | 为当前组织签发 API Key（明文只返回一次，需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
+| console | `DELETE` | `/api/v1/api-keys/{id}` | 吊销当前组织的 API Key（需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
+| console | `GET` | `/`（及前端路径） | 可选：配置 `WEB_DIST_DIR` 时托管最小前端控制台 SPA，`/api/*`、`/r/*`、运维路径严格保持隔离 |
 | console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
 | console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接（需要 `links:read`） |
@@ -230,6 +241,15 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 - `unique_visitors` 是 `daily_visitors` 之和，按天去重后相加，不是跨天唯一人数。同一访客换 IP、换 User-Agent 或跨天都会算成多个。
 - 统计来自写入时的日聚合，只能看聚合结果，不能回查单次点击。来源、设备、客户端和访客从这一版上线后开始记录；迁移前的历史只有 `total_clicks`。
 
+## 登录方式查询与回调跳转
+
+`GET /api/v1/auth/providers` 始终注册、无需鉴权，返回 `{"oidc":true,"github":false}`，供前端控制台按服务端配置渲染登录按钮。
+
+`/api/v1/auth/login` 与 `/api/v1/auth/github/login` 支持可选查询参数 `?return_to=/...`：
+
+- 仅接受以单个 `/` 开头的相对路径，拒绝 `//`、`\`、控制字符、超过 256 字节以及 `/api`、`/api/*`、`/r`、`/r/*`，不合法返回 `400`。
+- 合法值随 `state`/`nonce` 一起写入 HMAC 签名的流程 Cookie。回调建完会话并写入 `sl_session` 后，若 `return_to` 非空则返回 `302 Found` 跳回该相对路径；省略时维持原样返回 `200 OK` JSON，兼容现有脚本和 `curl` 流程。
+
 ## OIDC 登录
 
 只有在 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_REDIRECT_URL` 四个环境变量全部配置时，console 才注册登录和回调路由；全部为空时这两个路径返回 404，不影响纯 API Key 部署；只配一部分时启动失败。两个端点都不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store`，并且只接受 `GET`（`HEAD` 返回 405，避免探针消费授权码）。
@@ -387,6 +407,39 @@ curl -i -X DELETE -b cookies.txt -H 'X-Org-ID: 1' \
 - 被移出成员的现有会话再带当前组织的 `X-Org-ID` 访问任何管理接口，下一次请求立刻返回 404 `{"error":"organization not found"}`，`GET /api/v1/me` 里也不再包含该组织。
 - 该用户在其他组织中的成员关系和会话访问不受影响。
 - `admin` 不能移出 `owner`（返回 403 `{"error":"forbidden"}`）；不能移出组织最后一名 `owner`（返回 409 `{"error":"organization must have at least one owner"}`）；目标不是当前组织成员返回 404 `{"error":"member not found"}`。
+
+## 租户自助闭环（组织、邀请与 API Key）
+
+配置完整 `OIDC_*` 或 `GITHUB_*` 之一后，console 同时注册以下自助管理接口（详见 [ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）。
+
+### 自助创建组织
+
+```bash
+curl -i -X POST -b cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Corp"}' \
+  localhost:8081/api/v1/orgs
+```
+
+- 只认唯一的 `sl_session` Cookie，不要求 `X-Org-ID`，拒绝带 `Authorization` 头的请求（返回 401）；经过 `http.CrossOriginProtection` 检查，响应带 `Cache-Control: no-store`。
+- 名称去除首尾空白后不能为空且不超过 100 字节（否则 400）；每个用户作为 `owner` 最多拥有 10 个组织（并发加行锁校验，超限返回 409 `{"error":"organization limit exceeded"}`）。
+- 成功在同一事务内创建 `tenants` 与 `memberships(role='owner')`，返回 `201 Created`：`{"id":2,"name":"Acme Corp","role":"owner","created_at":"..."}`。
+
+### 组织邀请管理
+
+三个接口均走管理 API 鉴权链（要求 `sl_session` + `X-Org-ID`，受限流和跨站写保护），权限沿用 `members:read` / `members:write`：
+
+- `GET /api/v1/invitations`（需要 `members:read`）：按 `id` 降序返回当前组织的全部邀请，含派生状态 `status`（`pending`/`accepted`/`revoked`/`expired`）、`invited_by`、`created_at`、`expires_at`、`accepted_at`、`revoked_at`。
+- `POST /api/v1/invitations`（需要 `members:write`）：请求体 `{"email":"bob@example.com","role":"member","expires_at":"..."}`（`expires_at` 可选，须为将来时间）。自动写入 `invited_by = 当前用户 ID`；遵循角色等级（`admin` 不可邀请 `owner`，返回 403）；同组织同邮箱已存在待兑现邀请返回 409。受邀用户随后以该已验证邮箱登录时自动兑现为组织成员。
+- `DELETE /api/v1/invitations/{id}`（需要 `members:write`）：撤销当前组织的待兑现邀请，成功返回 `204 No Content`。跨组织或不存在返回 404；非 `pending` 状态返回 409；`admin` 不可撤销 `owner` 邀请（403）。
+
+### 组织 API Key 自助管理
+
+三个接口均走管理 API 鉴权链，使用新增权限 `apikeys:read` / `apikeys:write`（**仅授 `owner` 与 `admin` 会话**；API Key 永远不能拥有这两个 scope，携带 API Key 调用一律 403），响应一律带 `Cache-Control: no-store`：
+
+- `GET /api/v1/api-keys`（需要 `apikeys:read`）：返回当前组织全部 API Key 的元数据（`id`、`scopes`、`status`、`created_by`、`created_at`、`expires_at`、`revoked_at`），永不返回明文或哈希。
+- `POST /api/v1/api-keys`（需要 `apikeys:write`）：请求体 `{"scopes":["links:read","links:write"],"expires_at":"..."}`（`scopes` 必填且仅允许 `links:read`/`links:write`/`stats:read`，`expires_at` 可选且须为将来时间）。写入 `created_by = 当前用户 ID`，返回 `201 Created` 与仅此一次出现的明文 `"api_key":"slk_..."`。
+- `DELETE /api/v1/api-keys/{id}`（需要 `apikeys:write`）：按 `(id, tenant_id)` 隔离吊销当前组织的 API Key，成功返回 `204 No Content`（立即生效）；其他组织或不存在的 ID 返回 404，已吊销返回 409。
 
 ## 跳转
 

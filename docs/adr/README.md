@@ -37,6 +37,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0018](0018-users-orgs-and-rbac.md) | 用户、组织和权限 | Accepted |
 | [0019](0019-httpapi-package-evolution.md) | 暂不拆分 httpapi，先拆结构体再按依赖分叉拆包 | Accepted |
 | [0020](0020-background-jobs-and-async-risk-scan.md) | 可靠后台任务与异步 URL 风控 | Accepted |
+| [0021](0021-tenant-self-service-and-web-console.md) | 租户自助闭环与最小前端控制台 | Accepted |
 
 ## 模板
 

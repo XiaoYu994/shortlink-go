@@ -126,12 +126,16 @@
 - [x] `internal/cache`：`Create` 写正缓存后补 `recheckAfterPositiveWrite` 与并发交错测试
 - [x] `cmd/console`：`console worker` 子命令、`LoadWorkerConfig`、优雅退出、`make smoke` 端到端自动封禁与压测记录（`BenchmarkEnqueueInCreate`、`SKIP LOCKED` 并发曲线、可控延迟全链路吞吐）
 
-## 阶段 13：租户自助闭环与最小控制台（待立 ADR）
+## 阶段 13：租户自助闭环与最小控制台
 
-开工前先立 ADR，定自助建组织、HTTP 邀请、自助 API Key 管理及前端技术选型与回调流程。
+决策见 [ADR 0021](adr/0021-tenant-self-service-and-web-console.md)（已采纳）。
 
-- [ ] 自助管理 HTTP API：创建组织、发起/撤销组织邀请、组织内签发/查看/吊销 API Key
-- [ ] 最小前端控制台：跑通浏览器 OIDC / GitHub 登录、Cookie 会话、`X-Org-ID` 与短链/成员管理
+- [x] 认证辅助：`GET /api/v1/auth/providers` 与受签名保护的可选 `?return_to=/...` 登录回调跳转
+- [x] 自助创建组织：`POST /api/v1/orgs`（仅会话 + CSRF，同事务建租户与 `owner` 成员，含每用户上限）
+- [x] 组织邀请管理：`GET/POST/DELETE /api/v1/invitations`（写入 `invited_by`，沿用 `members:*` 与角色等级校验）
+- [x] 组织 API Key 管理：`GET/POST/DELETE /api/v1/api-keys`（新增 `apikeys:read`/`write` 仅授 `owner`/`admin`，写入 `created_by`，吊销按租户隔离）
+- [x] 最小前端控制台（`web/`，Vite + TypeScript）与 `console` 可选 `WEB_DIST_DIR` 静态托管及 SPA 路由隔离
+- [x] 集成测试、`make smoke` 自助闭环与文档同步
 
 ## 阶段 14：审计日志（待立 ADR）
 

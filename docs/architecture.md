@@ -13,7 +13,7 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
-| `console` | `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`GET /api/v1/auth/github/login`、`GET /api/v1/auth/github/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`、`GET /api/v1/members`、`PATCH/DELETE /api/v1/members/{user_id}`（配置 OIDC 或 GitHub 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC / GitHub OAuth 2.0 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令和 `worker` 模式还需要 Redis |
+| `console` | `GET /api/v1/auth/providers`、`GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`GET /api/v1/auth/github/login`、`GET /api/v1/auth/github/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`、`POST /api/v1/orgs`、`GET /api/v1/members`、`PATCH/DELETE /api/v1/members/{user_id}`、`GET/POST/DELETE /api/v1/invitations`、`GET/POST/DELETE /api/v1/api-keys`（配置 OIDC 或 GitHub 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、可选 `WEB_DIST_DIR` 前端静态页面（`/`）、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC / GitHub OAuth 2.0 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令和 `worker` 模式还需要 Redis |
 | `console worker` | 无公开业务路由；配置 `WORKER_ADDR` 时暴露 `/healthz`、`/readyz`、`/metrics` | PostgreSQL（`jobs` 队列抢占/回写/清理、`sessions` 定期清理、风控 `BanIfURL`）、Redis（写负缓存与 fail-open 风控结果缓存） |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
@@ -31,7 +31,7 @@ shortlink/
 ├── internal/
 │   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、/healthz、/readyz、/debug/pprof/、ClientIP、优雅启停与 JSON/错误写出
 │   ├── redirector/      # 公开跳转进程 HTTP 层：GET /r/{code}、点击记录与只读 LinkStore、ClickRecorder 接口
-│   ├── console/         # 管理进程 HTTP 层：authHandler、memberHandler、按租户限流、短链 CRUD 与统计；定义 LinkCreator、LinkAdminStore、LinkStatsStore、Authorizer、OIDCClient、GitHubClient、SessionStore、MemberStore
+│   ├── console/         # 管理进程 HTTP 层：authHandler、orgHandler、memberHandler、invitationHandler、apiKeyHandler、webhandler、按租户限流、短链 CRUD 与统计；定义各消费方 Store/Client/Authorizer 接口
 │   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、OIDC 与 GitHub OAuth 2.0 客户端、权限表与成员规则
 │   │   ├── fakegithub/  # 仅测试用：内存版 GitHub OAuth 2.0 与 REST API 提供方（不进入生产二进制）
 │   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
@@ -47,6 +47,7 @@ shortlink/
 │   ├── click/           # 点击元数据分类和异步批量记录（ClickRecorder）
 │   └── config/          # 配置加载
 ├── migrations/          # golang-migrate 的 up/down SQL
+├── web/                 # 独立前端控制台（React 19 + TypeScript + Tailwind v4 + Radix UI + React Router + TanStack Query），产物由 console 通过 WEB_DIST_DIR 可选托管（ADR 0021）
 ├── deploy/              # 本地 Prometheus、Dex OIDC 配置和反向代理
 ├── scripts/             # 测试库准备和冒烟测试脚本
 ├── .github/workflows/   # CI：静态检查、集成测试、冒烟
@@ -181,7 +182,8 @@ GET /api/v1/links/{code}/stats
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
 - `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
-- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URL`：可选，仅 console 使用。三个要么全配、要么全空（只配一部分时启动失败）；可与 OIDC 独立启用或同时启用，两者都为空时不挂载登录、登出、/me 与成员管理路由，只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URL`：可选，仅 console 使用。三个要么全配、要么全空（只配一部分时启动失败）；可与 OIDC 独立启用或同时启用，两者都为空时不挂载登录、登出、/me、自助建组织、成员、邀请与 API Key 管理路由，只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)、[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）
+- `WEB_DIST_DIR`：可选，仅 console 使用。指向 `make web-build` 生成的静态目录后在 `/` 提供最小前端控制台 SPA，同时严格隔离 `/api/*`、`/r/*`、`/healthz`、`/readyz`、`/metrics`（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）
 - `WORKER_ADDR` / `WORKER_CONCURRENCY` / `WORKER_MAX_PER_TENANT` / `WORKER_POLL_INTERVAL` / `WORKER_LEASE_DURATION` / `WORKER_JOB_TIMEOUT` / `WORKER_REAP_INTERVAL` / `WORKER_CLEANUP_INTERVAL` / `WORKER_SESSION_RETENTION` / `WORKER_DONE_JOB_RETENTION` / `RISK_FETCH_TIMEOUT` / `RISK_HOST_RATE_LIMIT` / `RISK_BLOCKED_KEYWORDS`：可选，仅 `console worker` 使用（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)）
 
 ## 退出
@@ -197,4 +199,4 @@ redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007]
 ## 尚未实现
 
 - OpenTelemetry 追踪，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)
-- 前端页面（登录、短链与成员管理界面）；目前仅提供 JSON API 和 OIDC 登录跳转，见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)
+- 审计日志、Webhook 投递、自定义域名、套餐计费与 PostgreSQL RLS，见 [roadmap](roadmap.md) 阶段 14–18

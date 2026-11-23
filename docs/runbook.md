@@ -804,6 +804,33 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
 - 限流在鉴权之后，格式合法但不存在的密钥每次都会查一次 `api_keys`（走 `key_hash` 唯一索引）。256 位密钥无法被猜中，但这是一个能放大数据库查询的入口；防护放在入口层（nginx `limit_req` 或云厂商的 WAF），应用内不做按 IP 的未鉴权限流。
 
+## 最小前端控制台（`web/`）
+
+阶段 13（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）在独立的 `web/` 目录下提供基于 React 19 + TypeScript + Tailwind CSS v4 + Radix UI + React Router + TanStack Query 的前端控制台（详见 [web/README.md](../web/README.md)），Go 构建链路（`make verify`、`make build`）不依赖 Node.js。
+
+方式一：单端口同源运行（推荐本地联调与预览）
+
+```bash
+make web-install
+make web-check    # tsc + eslint + vitest + vite build
+WEB_DIST_DIR=web/dist make run-console
+```
+
+浏览器打开 `http://127.0.0.1:8081`（或 `.env` 中 `CONSOLE_ADDR` 对应端口），即可通过 Dex/GitHub 登录后自助创建组织、管理短链与查看统计、管理成员与邀请、签发与吊销组织 API Key。
+
+方式二：前端热更新开发
+
+```bash
+# 1. 确保 deploy/dex.yaml 已包含 http://127.0.0.1:5173/api/v1/auth/callback，并把 .env 的 OIDC_REDIRECT_URL 指到 5173 端口
+# 2. 启动 redirector 与 console
+make run-redirector
+make run-console
+# 3. 启动 Vite 开发服务器（将 /api 代理到 console、/r 代理到 redirector，保留同源 Host，无需开 CORS）
+make web-dev
+```
+
+浏览器访问 `http://127.0.0.1:5173`。
+
 ## 后台任务与异步 URL 风控（`console worker`）
 
 阶段 12（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)）引入基于 PostgreSQL `jobs` 表的可靠后台任务进程：
