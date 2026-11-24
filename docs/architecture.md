@@ -13,7 +13,7 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis、`ClickRecorder` |
-| `console` | `GET /api/v1/auth/providers`、`GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`GET /api/v1/auth/github/login`、`GET /api/v1/auth/github/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`、`POST /api/v1/orgs`、`GET /api/v1/members`、`PATCH/DELETE /api/v1/members/{user_id}`、`GET/POST/DELETE /api/v1/invitations`、`GET/POST/DELETE /api/v1/api-keys`（配置 OIDC 或 GitHub 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、可选 `WEB_DIST_DIR` 前端静态页面（`/`）、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC / GitHub OAuth 2.0 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令和 `worker` 模式还需要 Redis |
+| `console` | `GET /api/v1/auth/providers`、`GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、`GET /api/v1/auth/github/login`、`GET /api/v1/auth/github/callback`、`POST /api/v1/auth/logout`、`GET /api/v1/me`、`POST /api/v1/orgs`、`GET /api/v1/members`、`PATCH/DELETE /api/v1/members/{user_id}`、`GET/POST/DELETE /api/v1/invitations`、`GET/POST/DELETE /api/v1/api-keys`、`GET /api/v1/audit-logs`（配置 OIDC 或 GitHub 时）、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`、`GET /api/v1/links/{code}/stats`、可选 `WEB_DIST_DIR` 前端静态页面（`/`）、`/healthz`、`/readyz`、`/metrics` | PostgreSQL、Redis（创建、修改、删除、封禁、解封维护缓存）、可选 OIDC / GitHub OAuth 2.0 身份提供方；`key`、`tenant` 和 `member` 命令只连 PostgreSQL，`link` 命令和 `worker` 模式还需要 Redis |
 | `console worker` | 无公开业务路由；配置 `WORKER_ADDR` 时暴露 `/healthz`、`/readyz`、`/metrics` | PostgreSQL（`jobs` 队列抢占/回写/清理、`sessions` 定期清理、风控 `BanIfURL`）、Redis（写负缓存与 fail-open 风控结果缓存） |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
@@ -31,10 +31,11 @@ shortlink/
 ├── internal/
 │   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、/healthz、/readyz、/debug/pprof/、ClientIP、优雅启停与 JSON/错误写出
 │   ├── redirector/      # 公开跳转进程 HTTP 层：GET /r/{code}、点击记录与只读 LinkStore、ClickRecorder 接口
-│   ├── console/         # 管理进程 HTTP 层：authHandler、orgHandler、memberHandler、invitationHandler、apiKeyHandler、webhandler、按租户限流、短链 CRUD 与统计；定义各消费方 Store/Client/Authorizer 接口
+│   ├── console/         # 管理进程 HTTP 层：authHandler、orgHandler、memberHandler、invitationHandler、apiKeyHandler、auditHandler、webhandler、按租户限流、短链 CRUD 与统计；定义各消费方 Store/Client/Authorizer 接口
 │   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、OIDC 与 GitHub OAuth 2.0 客户端、权限表与成员规则
 │   │   ├── fakegithub/  # 仅测试用：内存版 GitHub OAuth 2.0 与 REST API 提供方（不进入生产二进制）
 │   │   └── fakeoidc/    # 仅测试用：内存版标准 OIDC 提供方（不进入生产二进制）
+│   ├── audit/           # 审计日志领域模型、动作枚举与 context 元数据透传（零 PG/HTTP 依赖，ADR 0023）
 │   ├── link/            # 领域模型：Link、AdminLink、校验、列表和统计类型
 │   ├── tenant/          # 租户（组织）领域模型
 │   ├── idgen/           # 随机短码生成
@@ -59,16 +60,17 @@ shortlink/
 
 ```txt
 cmd/redirector -> redirector, httpx, postgres, storemetrics, cache, click, config
-cmd/console    -> console, httpx, identity, job, link, postgres, risk, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令和 worker 模式还要 cache/risk/job
+cmd/console    -> console, httpx, audit, identity, job, link, postgres, risk, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令和 worker 模式还要 cache/risk/job
 cmd/migrate    -> golang-migrate
 config         -> postgres, cache, job, link, risk
 redirector     -> httpx, link, click, idgen, Prometheus
-console        -> httpx, link, click, idgen, identity, tenant, golang.org/x/time/rate, Prometheus
+console        -> httpx, audit, link, click, idgen, identity, tenant, golang.org/x/time/rate, Prometheus
 httpx          -> 标准库、Prometheus
 identity       -> tenant, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
+audit          -> 标准库
 job            -> 标准库、Prometheus
-risk           -> cache, job, link, golang.org/x/time/rate, go-redis, Prometheus
-postgres       -> link, click, idgen, identity, job, tenant
+risk           -> cache, audit, job, link, golang.org/x/time/rate, go-redis, Prometheus
+postgres       -> audit, link, click, idgen, identity, job, tenant
 memorystore    -> link, idgen
 storemetrics   -> link
 cache          -> link
@@ -77,7 +79,7 @@ link           -> 标准库
 idgen          -> 标准库
 ```
 
-`redirector.LinkStore` 与 `console.Store` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`identity.OIDCProvider`、`identity.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
+`redirector.LinkStore` 与 `console.Store` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 与 `audit` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OrgStore`、`InvitationStore`、`APIKeyStore`、`AuditLogStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`identity.OIDCProvider`、`identity.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
 
 ## 请求流程
 
@@ -157,7 +159,7 @@ GET /api/v1/links/{code}/stats
 - `internal/cache`：`GetByCode` 的 Redis 读缓存。值、TTL、singleflight、故障降级和指标见 [ADR 0006](adr/0006-redis-cache-design.md)，冷缓存回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写和回源的两种 `SET` 见 [ADR 0011](adr/0011-link-crud-api.md)，下架后的缓存和复查见 [ADR 0016](adr/0016-link-states-and-takedown.md)。
 - `internal/click`：点击分类和异步批量写出。投递和关停见 [ADR 0007](adr/0007-async-click-recording.md)，日聚合、维度和访客哈希见 [ADR 0012](adr/0012-click-analytics.md)。
 - 进程指标和连接池指标见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。
-- 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs` 的列以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)。
+- 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs`、`audit_logs` 的列以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)，审计日志见 [ADR 0023](adr/0023-audit-logs.md)。
 - 租户配额和限流见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0015](adr/0015-monthly-link-quota.md)。
 - 点击日聚合和统计查询见 [ADR 0012](adr/0012-click-analytics.md)。
 
@@ -200,4 +202,4 @@ redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007]
 ## 尚未实现
 
 - OpenTelemetry 追踪，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)
-- 审计日志、Webhook 投递与 PostgreSQL RLS，见 [roadmap](roadmap.md) 阶段 14–16
+- Webhook 投递与 PostgreSQL RLS，见 [roadmap](roadmap.md) 阶段 15–16

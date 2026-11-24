@@ -443,6 +443,21 @@ curl -i -X POST -b cookies.txt \
 - `POST /api/v1/api-keys`（需要 `apikeys:write`）：请求体 `{"scopes":["links:read","links:write"],"expires_at":"..."}`（`scopes` 必填且仅允许 `links:read`/`links:write`/`stats:read`，`expires_at` 可选且须为将来时间）。写入 `created_by = 当前用户 ID`，返回 `201 Created` 与仅此一次出现的明文 `"api_key":"slk_..."`。
 - `DELETE /api/v1/api-keys/{id}`（需要 `apikeys:write`）：按 `(id, tenant_id)` 隔离吊销当前组织的 API Key，成功返回 `204 No Content`（立即生效）；其他组织或不存在的 ID 返回 404，已吊销返回 409。
 
+### 组织操作审计日志
+
+```bash
+curl -i -b cookies.txt -H 'X-Org-ID: 1' \
+  'localhost:8081/api/v1/audit-logs?limit=20&action=link.ban'
+```
+
+- 需要 `audit:read`（**仅授 `owner` 与 `admin` 会话**；`member`、`viewer` 与任何 API Key 一律返回 403），走管理 API 鉴权链并附带 `Cache-Control: no-store`（详见 [ADR 0023](adr/0023-audit-logs.md)）。
+- 查询参数：
+  - `limit`：每页条数，默认 `20`，最大 `100`，非法值返回 400 `{"error":"invalid limit"}`。
+  - `action`：可选动作过滤，枚举值：`org.create`、`tenant.limits_update`、`link.create`、`link.update`、`link.delete`、`link.ban`、`link.unban`、`member.role_update`、`member.remove`、`invitation.create`、`invitation.revoke`、`invitation.redeem`、`apikey.issue`、`apikey.revoke`；非法值返回 400 `{"error":"invalid action"}`。
+  - `cursor`：可选游标（上一页返回的 `next_cursor`，即最后一条审计记录的正整数 `id`）；非法值返回 400 `{"error":"invalid cursor"}`。
+- 返回 `200 OK`：`{"items":[...],"next_cursor":"..."}`（无下一页时省略 `next_cursor`）。每项包含 `id`、`actor_kind`（`user` / `api_key` / `operator` / `system`）、可选 `actor_id` / `actor_email` / `actor_name`、`action`、`target_type`、`target_id`、可选 `request_id`（HTTP 请求 ID 或 worker `job:<id>`）、非敏感 `metadata` 对象与 `created_at`（UTC RFC3339）。
+- 审计事件与业务变更在同一数据库事务内原子提交，仅记录真实发生的状态变更（重复幂等 `ban`/`unban` 或校验失败的写操作不写入审计行）。
+
 ## 跳转
 
 ```bash

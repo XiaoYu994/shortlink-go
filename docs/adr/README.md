@@ -39,6 +39,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0020](0020-background-jobs-and-async-risk-scan.md) | 可靠后台任务与异步 URL 风控 | Accepted |
 | [0021](0021-tenant-self-service-and-web-console.md) | 租户自助闭环与最小前端控制台 | Accepted |
 | [0022](0022-postgres-query-and-lease-hardening.md) | PostgreSQL 查询路径、索引与后台任务租约加固 | Accepted |
+| [0023](0023-audit-logs.md) | 组织操作审计日志 | Accepted |
 
 ## 模板
 

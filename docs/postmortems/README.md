@@ -17,6 +17,7 @@
 | 日期 | 标题 | 来源 | 关联 |
 | --- | --- | --- | --- |
 | 2026-11-24 | [PostgreSQL 索引失效、队列积压雪崩与租约 ABA 覆盖审查](2026-11-24-postgres-schema-and-query-audit.md) | 架构审查 | [ADR 0022](../adr/0022-postgres-query-and-lease-hardening.md) |
+| 2026-11-24 | [日志体系与可观测性架构审查](2026-11-24-logging-system-audit.md) | 架构审查 | [ADR 0005](../adr/0005-prometheus-before-tracing.md)、[ADR 0023](../adr/0023-audit-logs.md) |
 
 ## 模板
 
