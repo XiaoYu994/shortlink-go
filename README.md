@@ -66,6 +66,7 @@ make selfcheck    # 格式、vet、单测、lint、build、集成测试、冒烟
 | [docs/runbook.md](docs/runbook.md) | 本地启动、数据库、排错 |
 | [docs/roadmap.md](docs/roadmap.md) | 学习路线和进度 |
 | [docs/adr/README.md](docs/adr/README.md) | 架构决策记录 |
+| [docs/postmortems/README.md](docs/postmortems/README.md) | 问题复盘与调优记录 |
 | [web/README.md](web/README.md) | 前端控制台启动、目录与 React 学习指南 |
 
 ## 代码约定

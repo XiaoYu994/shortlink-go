@@ -26,7 +26,11 @@
 - 包注释写在包的主文件顶部（通常是 `<pkg>.go`、`store.go`、`server.go` 或 `main.go`），以 `Package 包名` 开头（main 包以 `Command 命令名` 开头）。
 - TODO 标注对应课程，例如 `// TODO(第 7 课): ...`。
 - 注释写"为什么"和"注意什么"，不重复代码本身已经说清楚的内容。
-- SQL 组织：多行 SQL 语句抽到文件顶部的包级 `const`，避免长 SQL 打断方法主流程；单行短 SQL 可就近内联。
+- SQL 组织与数据库纪律：
+  - 多行 SQL 语句抽到文件顶部的包级 `const`，避免长 SQL 打断方法主流程；单行短 SQL 可就近内联。
+  - 新增索引或改动查询/清理 SQL 时，在合成数据量上跑 `EXPLAIN (ANALYZE, BUFFERS)` 确认真正命中预期索引；禁止用 `OR` 混合有索引列与无索引列导致退化全表扫描。
+  - 后台清理与租约回收 SQL 一律带 `LIMIT` 分批执行；租约回写必须校验单调递增 Fencing Token（如 `jobs.lock_version`），不只依赖进程级 `WorkerID`。
+  - 避免给高频更新计数列（如 `tenants.link_usage`、`link_usage_month`）建索引，保留 PostgreSQL HOT Update 优化。
 
 ### 命名与文件
 
@@ -124,7 +128,7 @@ feat: 实现 Base62 编解码
 ## 文档地图
 
 - `README.md`：项目概览、快速开始、文档入口。
-- `docs/`：架构、API、运行手册、路线图、ADR。
+- `docs/`：架构、API、运行手册、路线图、ADR 与问题复盘（`docs/postmortems/`）。
 - `AGENTS.md`（本文件）：全局协作方式、Go 代码约定与提交规范。
 - `web/AGENTS.md`：前端控制台的分层边界、React/TypeScript 约定与检查要求。
 - `web/README.md`：前端启动命令、目录对照与 React 学习导读。

@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 日期：2026-11-15
+- 修订：按今日点击排序查询与 `device`/`client` 维度读取由 [ADR 0022](0022-postgres-query-and-lease-hardening.md) 加固。
 
 ## 背景
 

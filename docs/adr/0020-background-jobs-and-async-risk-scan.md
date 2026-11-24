@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 日期：2026-11-23
+- 修订：任务公平抢占、最老等待统计、租约 Fencing Token（`lock_version`）、分批回收与会话清理索引由 [ADR 0022](0022-postgres-query-and-lease-hardening.md) 加固。
 
 ## 决策总览
 

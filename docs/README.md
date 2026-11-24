@@ -10,11 +10,13 @@ README 只保留项目概览和入口，架构、接口、运行方式和演进�
 | [api.md](api.md) | HTTP API 契约、请求/响应、错误格式 |
 | [runbook.md](runbook.md) | 本地启动、创建短链、数据库操作、排错 |
 | [roadmap.md](roadmap.md) | 学习路线和阶段进度 |
-| [adr/README.md](adr/README.md) | 架构决策记录索引 |
+| [adr/README.md](adr/README.md) | 架构决策记录索引（向前看的决定） |
+| [postmortems/README.md](postmortems/README.md) | 问题复盘与调优记录（向后看的证据与护栏） |
 
 ## 约定
 
 - 影响架构、存储、协议的决定先写 ADR，再改代码。
+- 涉及索引失效、并发竞态或性能剖析的深度修复，在 `docs/postmortems/` 记录复现证据、根因、对比数据与防再犯护栏；普通小 bug 只写 Commit 正文与回归测试。
 - 路线图变化更新 `roadmap.md`，不在 README 里堆细节。
 - 运行步骤变化更新 `runbook.md`，保证新人能按文档跑起来。
 
