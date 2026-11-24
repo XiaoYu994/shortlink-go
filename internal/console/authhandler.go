@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
 )
@@ -349,7 +350,8 @@ func (h *authHandler) handleCallbackFlow(
 		return
 	}
 
-	issued, err := h.sessions.CreateSessionForIdentity(r.Context(), id, h.sessionTTL)
+	auditCtx := audit.WithMeta(r.Context(), audit.SystemMeta(httpx.RequestIDFrom(r.Context())))
+	issued, err := h.sessions.CreateSessionForIdentity(auditCtx, id, h.sessionTTL)
 	if err != nil {
 		httpx.HandleStoreError(h.logger, w, r, "create session", err)
 		return

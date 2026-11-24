@@ -30,6 +30,10 @@ export function canManageAPIKeys(role: Role): boolean {
   return role === 'owner' || role === 'admin';
 }
 
+export function canReadAuditLogs(role: Role): boolean {
+  return role === 'owner' || role === 'admin';
+}
+
 export const ROLE_LABELS: Record<Role, string> = {
   owner: 'Owner',
   admin: 'Admin',

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/cache"
 	"shortlink/internal/identity"
 	"shortlink/internal/link"
@@ -322,8 +323,10 @@ func TestConsoleTenantShowAndSet(t *testing.T) {
 }
 
 type fakeLink struct {
-	link *link.Link
-	err  error
+	link     *link.Link
+	err      error
+	lastMeta audit.Meta
+	hasMeta  bool
 
 	banCalls   int
 	bannedCode string
@@ -333,15 +336,17 @@ type fakeLink struct {
 	unbanCode  string
 }
 
-func (f *fakeLink) Ban(_ context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+func (f *fakeLink) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 	f.banCalls++
 	f.bannedCode, f.banReason, f.banSource = code, reason, source
+	f.lastMeta, f.hasMeta = audit.MetaFrom(ctx)
 	return f.link, f.err
 }
 
-func (f *fakeLink) Unban(_ context.Context, code string) (*link.Link, error) {
+func (f *fakeLink) Unban(ctx context.Context, code string) (*link.Link, error) {
 	f.unbanCalls++
 	f.unbanCode = code
+	f.lastMeta, f.hasMeta = audit.MetaFrom(ctx)
 	return f.link, f.err
 }
 
@@ -363,6 +368,9 @@ func TestConsoleLinkBanAndUnban(t *testing.T) {
 	if store.bannedCode != "abc12345" || store.banReason != link.BanReasonPhishing || store.banSource != link.BanSourceOperator {
 		t.Fatalf("Ban(%q, %q, %q), want (abc12345, phishing, operator)",
 			store.bannedCode, store.banReason, store.banSource)
+	}
+	if !store.hasMeta || store.lastMeta.ActorKind != audit.ActorOperator || store.lastMeta.ActorID != nil {
+		t.Fatalf("Ban audit meta = (%+v, %v), want operator", store.lastMeta, store.hasMeta)
 	}
 	want := "code\tstatus\tbanned_at\tban_reason\tban_source\n" +
 		"abc12345\tbanned\t2026-11-18T10:00:00Z\tphishing\toperator\n"
@@ -465,6 +473,9 @@ func TestConsoleKeyAndTenantDoNotOpenLinkStore(t *testing.T) {
 	stdout.Reset()
 	if err := run([]string{"member", "invite", "--tenant", "1", "--email", "alice@example.com", "--role", "owner"}, &stdout, &stderr, open, openLink); err != nil {
 		t.Fatalf("member invite: %v", err)
+	}
+	if !store.hasMeta || store.lastMeta.ActorKind != audit.ActorOperator || store.lastMeta.ActorID != nil {
+		t.Fatalf("admin CLI audit meta = (%+v, %v), want operator", store.lastMeta, store.hasMeta)
 	}
 }
 
@@ -580,9 +591,12 @@ type fakeAdmin struct {
 	inviteParams postgres.CreateInvitationParams
 	invitation   identity.Invitation
 	inviteErr    error
+	lastMeta     audit.Meta
+	hasMeta      bool
 }
 
-func (f *fakeAdmin) IssueAPIKey(_ context.Context, p postgres.IssueAPIKeyParams) (postgres.IssuedAPIKey, error) {
+func (f *fakeAdmin) IssueAPIKey(ctx context.Context, p postgres.IssueAPIKeyParams) (postgres.IssuedAPIKey, error) {
+	f.lastMeta, f.hasMeta = audit.MetaFrom(ctx)
 	f.params = p
 	return f.issued, nil
 }
@@ -592,7 +606,8 @@ func (f *fakeAdmin) ListAPIKeys(_ context.Context, tenantID int64) ([]postgres.A
 	return f.keys, nil
 }
 
-func (f *fakeAdmin) RevokeAPIKey(_ context.Context, keyID int64) error {
+func (f *fakeAdmin) RevokeAPIKey(ctx context.Context, keyID int64) error {
+	f.lastMeta, f.hasMeta = audit.MetaFrom(ctx)
 	f.revoked = keyID
 	return nil
 }
@@ -602,13 +617,15 @@ func (f *fakeAdmin) GetTenantLimits(_ context.Context, tenantID int64) (postgres
 	return f.limits, nil
 }
 
-func (f *fakeAdmin) SetTenantLimits(_ context.Context, tenantID int64, p postgres.SetTenantLimitsParams) (postgres.TenantLimits, error) {
+func (f *fakeAdmin) SetTenantLimits(ctx context.Context, tenantID int64, p postgres.SetTenantLimitsParams) (postgres.TenantLimits, error) {
+	f.lastMeta, f.hasMeta = audit.MetaFrom(ctx)
 	f.setTenant = tenantID
 	f.setParams = p
 	return f.limits, nil
 }
 
-func (f *fakeAdmin) CreateInvitation(_ context.Context, p postgres.CreateInvitationParams) (identity.Invitation, error) {
+func (f *fakeAdmin) CreateInvitation(ctx context.Context, p postgres.CreateInvitationParams) (identity.Invitation, error) {
+	f.lastMeta, f.hasMeta = audit.MetaFrom(ctx)
 	f.inviteParams = p
 	return f.invitation, f.inviteErr
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
 )
@@ -102,7 +103,8 @@ func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request, next
 		httpx.WriteError(s.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
+	auditCtx := audit.WithMeta(r.Context(), audit.APIKeyMeta(p.ActorID, httpx.RequestIDFrom(r.Context())))
+	next.ServeHTTP(w, r.WithContext(withPrincipal(auditCtx, p)))
 }
 
 func (s *Server) authenticateSession(w http.ResponseWriter, r *http.Request, next http.Handler) {
@@ -167,7 +169,8 @@ func (s *Server) authenticateSession(w http.ResponseWriter, r *http.Request, nex
 		httpx.WriteError(s.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
+	auditCtx := audit.WithMeta(r.Context(), audit.UserMeta(p.ActorID, httpx.RequestIDFrom(r.Context())))
+	next.ServeHTTP(w, r.WithContext(withPrincipal(auditCtx, p)))
 }
 
 func checkCrossOrigin(logger *slog.Logger, csrf *http.CrossOriginProtection, w http.ResponseWriter, r *http.Request) bool {

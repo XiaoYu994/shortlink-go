@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/identity"
 )
 
@@ -212,6 +214,13 @@ func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRol
 	if err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
 	}
+	if err := insertAuditLogTx(ctx, tx, p.TenantID, audit.UserMeta(p.ActorUserID, ""), audit.ActionMemberRoleUpdate, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
+		"email":         member.Email,
+		"previous_role": string(scope.targetRole),
+		"new_role":      string(member.Role),
+	}); err != nil {
+		return identity.Member{}, fmt.Errorf("update member role: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: commit: %w", err)
 	}
@@ -257,6 +266,11 @@ func (s *Store) RemoveMember(ctx context.Context, p identity.RemoveMemberParams)
 	}
 	if affected != 1 {
 		return fmt.Errorf("remove member: expected 1 row deleted, got %d", affected)
+	}
+	if err := insertAuditLogTx(ctx, tx, p.TenantID, audit.UserMeta(p.ActorUserID, ""), audit.ActionMemberRemove, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
+		"previous_role": string(scope.targetRole),
+	}); err != nil {
+		return fmt.Errorf("remove member: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("remove member: commit: %w", err)

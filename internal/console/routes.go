@@ -45,6 +45,9 @@ func (s *Server) Routes() http.Handler {
 			mux.Handle("POST "+apiV1Prefix+"/api-keys", s.consoleRoute(identity.PermAPIKeysWrite, s.apiKeys.handleIssue))
 			mux.Handle("DELETE "+apiV1Prefix+"/api-keys/{id}", s.consoleRoute(identity.PermAPIKeysWrite, s.apiKeys.handleRevoke))
 		}
+		if s.auditLogs != nil {
+			mux.Handle("GET "+apiV1Prefix+"/audit-logs", s.consoleRoute(identity.PermAuditRead, s.auditLogs.handleList))
+		}
 		mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
 		mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))
 		mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksRead, s.handleGet))

@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/identity"
 )
 
@@ -36,7 +38,7 @@ FROM invitations
 WHERE tenant_id = $1
 ORDER BY id DESC`
 
-	lockInvitationForRevokeSQL = `SELECT role, accepted_at, revoked_at, superseded_at, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+	lockInvitationForRevokeSQL = `SELECT email, role, accepted_at, revoked_at, superseded_at, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
 FROM invitations
 WHERE id = $1 AND tenant_id = $2
 FOR UPDATE`
@@ -99,6 +101,20 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 	inv, err := insertInvitationTx(ctx, tx, p, email)
 	if err != nil {
 		return identity.Invitation{}, err
+	}
+	auditMeta := map[string]any{
+		"email": inv.Email,
+		"role":  string(inv.Role),
+	}
+	if inv.ExpiresAt != nil {
+		auditMeta["expires_at"] = inv.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	fallback := audit.OperatorMeta("")
+	if p.InvitedBy != nil {
+		fallback = audit.UserMeta(*p.InvitedBy, "")
+	}
+	if err := insertAuditLogTx(ctx, tx, inv.TenantID, fallback, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
+		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return identity.Invitation{}, fmt.Errorf("create invitation: commit: %w", err)
@@ -258,6 +274,7 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 	defer func() { _ = tx.Rollback() }()
 
 	var (
+		email        string
 		roleStr      string
 		acceptedAt   sql.NullTime
 		revokedAt    sql.NullTime
@@ -265,7 +282,7 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 		expired      bool
 	)
 	err = tx.QueryRowContext(ctx, lockInvitationForRevokeSQL, p.InvitationID, p.TenantID).Scan(
-		&roleStr, &acceptedAt, &revokedAt, &supersededAt, &expired,
+		&email, &roleStr, &acceptedAt, &revokedAt, &supersededAt, &expired,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.ErrInvitationNotFound
@@ -282,6 +299,12 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 	}
 
 	if _, err := tx.ExecContext(ctx, revokeInvitationSQL, p.InvitationID, p.TenantID); err != nil {
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
+	if err := insertAuditLogTx(ctx, tx, p.TenantID, audit.SystemMeta(""), audit.ActionInvitationRevoke, audit.TargetInvitation, strconv.FormatInt(p.InvitationID, 10), map[string]any{
+		"email": email,
+		"role":  string(targetRole),
+	}); err != nil {
 		return fmt.Errorf("revoke invitation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

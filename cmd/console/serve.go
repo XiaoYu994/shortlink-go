@@ -79,6 +79,7 @@ func runServe() error {
 		orgs        console.OrgStore
 		invitations console.InvitationStore
 		apiKeys     console.APIKeyStore
+		auditLogs   console.AuditLogStore
 	)
 	if oidcClient != nil || githubClient != nil {
 		sessions = pgStore
@@ -86,6 +87,7 @@ func runServe() error {
 		orgs = pgStore
 		invitations = pgStore
 		apiKeys = pgStore
+		auditLogs = pgStore
 	}
 	if cfg.WebDistDir != "" {
 		info, err := os.Stat(cfg.WebDistDir)
@@ -106,6 +108,7 @@ func runServe() error {
 		Orgs:          orgs,
 		Invitations:   invitations,
 		APIKeys:       apiKeys,
+		AuditLogs:     auditLogs,
 		WebDistDir:    cfg.WebDistDir,
 		PublicBaseURL: cfg.PublicBaseURL,
 	})

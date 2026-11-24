@@ -13,9 +13,10 @@ export const ROUTE_PATTERNS = {
   orgLinkStats: '/orgs/:orgId/links/:code',
   orgMembers: '/orgs/:orgId/members',
   orgAPIKeys: '/orgs/:orgId/api-keys',
+  orgAuditLogs: '/orgs/:orgId/audit-logs',
 } as const;
 
-export type OrgSection = 'links' | 'members' | 'api-keys';
+export type OrgSection = 'links' | 'members' | 'api-keys' | 'audit-logs';
 
 export const routes = {
   root: () => ROUTE_PATTERNS.root,
@@ -31,4 +32,5 @@ export const routes = {
   linkStats: (orgId: number, code: string) => `/orgs/${orgId}/links/${encodeURIComponent(code)}`,
   orgMembers: (orgId: number) => `/orgs/${orgId}/members`,
   orgAPIKeys: (orgId: number) => `/orgs/${orgId}/api-keys`,
+  orgAuditLogs: (orgId: number) => `/orgs/${orgId}/audit-logs`,
 } as const;

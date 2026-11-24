@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/identity"
 	"shortlink/internal/tenant"
 )
@@ -43,7 +44,7 @@ RETURNING id, email, name, created_at`
 	insertUserIdentitySQL = `INSERT INTO user_identities (user_id, issuer, subject, email, email_verified)
 VALUES ($1, $2, $3, $4, $5)`
 
-	// 按 id 排序加行锁避免多邀请并发兑现死锁；已是组织成员时 ON CONFLICT 保留原角色，同时关闭待兑现邀请。
+	// 按 id 排序加行锁避免多邀请并发兑现死锁；已是组织成员时 ON CONFLICT 保留原角色，同时关闭待兑现邀请并写入审计。
 	redeemInvitationsSQL = `WITH locked AS (
     SELECT i.id
     FROM invitations i
@@ -62,12 +63,24 @@ redeemed AS (
         accepted_by = $1
     FROM locked l
     WHERE i.id = l.id
-    RETURNING i.tenant_id, i.role
+    RETURNING i.id, i.tenant_id, i.email, i.role
+),
+inserted_memberships AS (
+    INSERT INTO memberships (user_id, tenant_id, role)
+    SELECT $1, r.tenant_id, r.role
+    FROM redeemed r
+    ON CONFLICT (user_id, tenant_id) DO NOTHING
 )
-INSERT INTO memberships (user_id, tenant_id, role)
-SELECT $1, r.tenant_id, r.role
-FROM redeemed r
-ON CONFLICT (user_id, tenant_id) DO NOTHING`
+INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
+SELECT r.tenant_id,
+       'user',
+       $1,
+       'invitation.redeem',
+       'invitation',
+       r.id::text,
+       $3::text,
+       jsonb_build_object('email', r.email, 'role', r.role)
+FROM redeemed r`
 
 	authenticateSessionForOrgSQL = `SELECT u.id,
        t.id, t.external_id, t.rate_limit_per_second,
@@ -263,7 +276,11 @@ func insertExternalUserTx(ctx context.Context, tx *sql.Tx, id identity.ExternalI
 }
 
 func redeemInvitationsTx(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
-	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL, userID, email); err != nil {
+	reqID := ""
+	if m, ok := audit.MetaFrom(ctx); ok {
+		reqID = audit.NormalizeMeta(m).RequestID
+	}
+	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL, userID, email, reqID); err != nil {
 		return fmt.Errorf("create session for identity: redeem invitations: %w", err)
 	}
 	return nil

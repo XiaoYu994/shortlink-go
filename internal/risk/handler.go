@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/cache"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
@@ -84,7 +85,8 @@ func NewHandler(opts HandlerOptions) job.Handler {
 			return nil
 		}
 
-		_, err := opts.Banner.BanIfURL(ctx, p.Code, p.URL, verdict.Reason, link.BanSourceRisk)
+		banCtx := audit.WithMeta(ctx, audit.SystemMeta(fmt.Sprintf("job:%d", j.ID)))
+		_, err := opts.Banner.BanIfURL(banCtx, p.Code, p.URL, verdict.Reason, link.BanSourceRisk)
 		if err == nil {
 			logger.InfoContext(ctx, "risk scan banned link",
 				"code", p.Code, "reason", verdict.Reason, "detail", verdict.Detail)

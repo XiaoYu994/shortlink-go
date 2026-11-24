@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 )
@@ -60,13 +61,29 @@ inserted AS (
     INSERT INTO links (code, url, expires_at, tenant_id)
     SELECT $1, $2, $3, $4
     WHERE EXISTS (SELECT 1 FROM quota)
-    RETURNING id, code, url, created_at, tenant_id
+    RETURNING id, code, url, expires_at, created_at, tenant_id
 ),
 enqueued AS (
     INSERT INTO jobs (kind, tenant_id, payload)
     SELECT 'link.risk_scan',
            i.tenant_id,
            jsonb_build_object('link_id', i.id, 'code', i.code, 'url', i.url)
+    FROM inserted i
+),
+audited AS (
+    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
+    SELECT i.tenant_id,
+           $5::text,
+           $6::bigint,
+           'link.create',
+           'link',
+           i.code,
+           $7::text,
+           jsonb_strip_nulls(jsonb_build_object(
+               'link_id', i.id,
+               'url', i.url,
+               'expires_at', i.expires_at
+           ))
     FROM inserted i
 )
 SELECT id, created_at FROM inserted`
@@ -112,7 +129,8 @@ func DefaultPoolConfig() PoolConfig {
 
 /*
 Store 是 PostgreSQL 存储层门面，隐式实现 redirector.LinkStore、console.Store、
-click.Store、console.APIKeyAuthenticator、console.SessionStore、console.MemberStore
+click.Store、console.APIKeyAuthenticator、console.SessionStore、console.MemberStore、
+console.OrgStore、console.InvitationStore、console.APIKeyStore、console.AuditLogStore
 以及 cmd/console 运维命令所需的存储能力。
 */
 type Store struct {
@@ -159,13 +177,16 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.SystemMeta(""))
 	for range maxCodeAttempts {
 		code, err := s.generate()
 		if err != nil {
 			return fmt.Errorf("generate code: %w", err)
 		}
 
-		err = s.db.QueryRowContext(ctx, insertLinkSQL, code, l.URL, l.ExpiresAt, l.TenantID).Scan(&l.ID, &l.CreatedAt)
+		err = s.db.QueryRowContext(ctx, insertLinkSQL,
+			code, l.URL, l.ExpiresAt, l.TenantID, actorKind, actorID, reqID,
+		).Scan(&l.ID, &l.CreatedAt)
 		if err == nil {
 			l.Code = code
 			return nil

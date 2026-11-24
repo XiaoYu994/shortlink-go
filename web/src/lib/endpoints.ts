@@ -38,4 +38,7 @@ export const ENDPOINTS = {
     listCreate: v1('/api-keys'),
     detail: (id: number) => v1(`/api-keys/${id}`),
   },
+  auditLogs: {
+    list: v1('/audit-logs'),
+  },
 } as const;

@@ -639,6 +639,36 @@ assert_eq "$status" 204 'DELETE /api/v1/api-keys/{id} 吊销 API Key 状态码'
 status=$(request_as "$self_api_key" "$CONSOLE_BASE" GET /api/v1/links)
 assert_eq "$status" 401 '吊销后的自助 API Key 应返回 401'
 
+echo 'smoke: audit logs'
+status=$(request "$CONSOLE_BASE" GET /api/v1/audit-logs)
+assert_eq "$status" 403 'API Key 访问 /api/v1/audit-logs 应返回 403'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/audit-logs")
+assert_eq "$status" 200 'GET /api/v1/audit-logs 状态码'
+assert_eq "$(header Cache-Control)" 'no-store' 'GET /api/v1/audit-logs Cache-Control'
+for act in org.create invitation.create invitation.revoke apikey.issue link.create apikey.revoke; do
+	grep -Fq "\"action\":\"$act\"" "$TMP/body" || fail "自助组织审计日志缺少动作 $act: $(cat "$TMP/body")"
+done
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/audit-logs?action=apikey.issue")
+assert_eq "$status" 200 'GET /api/v1/audit-logs?action=apikey.issue 状态码'
+grep -Fq '"action":"apikey.issue"' "$TMP/body" || fail "action 筛选未返回 apikey.issue: $(cat "$TMP/body")"
+if grep -Fq '"action":"org.create"' "$TMP/body"; then
+	fail "action 筛选返回了其他动作: $(cat "$TMP/body")"
+fi
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/audit-logs?limit=50")
+assert_eq "$status" 200 'smoke 租户 GET /api/v1/audit-logs 状态码'
+for act in invitation.redeem link.ban link.unban; do
+	grep -Fq "\"action\":\"$act\"" "$TMP/body" || fail "smoke 租户审计日志缺少动作 $act: $(cat "$TMP/body")"
+done
+
 # 验证带 ?return_to=/ 的登录回调返回 302 并落到 SPA 首页且写入 sl_session。
 return_cookies=$TMP/return_to_cookies.txt
 return_meta=$(curl -sS --max-time 10 -L \
@@ -730,6 +760,14 @@ grep -q '"ban_reason":"phishing"' "$TMP/body" || fail "风控自动封禁缺少 
 
 status=$(request "$REDIRECTOR_BASE" GET "/r/$risk_code")
 assert_eq "$status" 404 '异步风控封禁后跳转应返回 404'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$return_cookies" "$CONSOLE_BASE/api/v1/audit-logs?action=link.ban")
+assert_eq "$status" 200 '异步风控封禁后 GET /api/v1/audit-logs 状态码'
+grep -Fq '"actor_kind":"system"' "$TMP/body" || fail "异步风控审计日志缺少 actor_kind=system: $(cat "$TMP/body")"
+grep -Fq "\"target_id\":\"$risk_code\"" "$TMP/body" || fail "异步风控审计日志缺少 target_id=$risk_code: $(cat "$TMP/body")"
+grep -Fq '"request_id":"job:' "$TMP/body" || fail "异步风控审计日志缺少 job request_id: $(cat "$TMP/body")"
 
 echo 'smoke: metrics'
 status=$(request "$REDIRECTOR_BASE" GET /metrics)

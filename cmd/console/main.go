@@ -21,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/cache"
 	"shortlink/internal/postgres"
 )
@@ -95,6 +96,7 @@ func run(args []string, stdout, stderr io.Writer,
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	ctx = audit.WithMeta(ctx, audit.OperatorMeta(""))
 	store, closer, err := open(ctx)
 	if err != nil {
 		return err
@@ -112,6 +114,7 @@ func runLink(args []string, stdout, stderr io.Writer, open func(context.Context)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	ctx = audit.WithMeta(ctx, audit.OperatorMeta(""))
 	links, closer, err := open(ctx)
 	if err != nil {
 		return err

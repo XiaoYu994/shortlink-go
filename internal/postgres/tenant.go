@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+
+	"shortlink/internal/audit"
 )
 
 /*
@@ -45,6 +48,8 @@ const (
 	tenantLimitColumns = `id, name, (` + effectiveUsageSQL + `) AS link_usage, link_quota, rate_limit_per_second`
 
 	getTenantLimitsSQL = `SELECT ` + tenantLimitColumns + ` FROM tenants WHERE id = $1`
+
+	lockTenantLimitsSQL = `SELECT link_quota, rate_limit_per_second FROM tenants WHERE id = $1 FOR UPDATE`
 
 	/*
 		和 Update 链接一样用 CASE：没传的字段保持原值，UPDATE 本身是原子的。
@@ -97,6 +102,24 @@ func (s *Store) SetTenantLimits(ctx context.Context, tenantID int64, p SetTenant
 		return TenantLimits{}, err
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TenantLimits{}, fmt.Errorf("set tenant limits: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		prevQuota     int64
+		prevRateLimit int
+	)
+	err = tx.QueryRowContext(ctx, lockTenantLimitsSQL, tenantID).Scan(&prevQuota, &prevRateLimit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TenantLimits{}, ErrTenantNotFound
+	}
+	if err != nil {
+		return TenantLimits{}, fmt.Errorf("set tenant limits: %w", err)
+	}
+
 	var quota, rate any
 	if p.LinkQuota != nil {
 		quota = *p.LinkQuota
@@ -104,13 +127,29 @@ func (s *Store) SetTenantLimits(ctx context.Context, tenantID int64, p SetTenant
 	if p.RateLimit != nil {
 		rate = *p.RateLimit
 	}
-	got, err := scanTenantLimits(s.db.QueryRowContext(ctx, updateTenantLimitsSQL,
+	got, err := scanTenantLimits(tx.QueryRowContext(ctx, updateTenantLimitsSQL,
 		tenantID, p.LinkQuota != nil, quota, p.RateLimit != nil, rate))
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantLimits{}, ErrTenantNotFound
 	}
 	if err != nil {
 		return TenantLimits{}, fmt.Errorf("set tenant limits: %w", err)
+	}
+
+	auditMeta := map[string]any{}
+	if p.LinkQuota != nil {
+		auditMeta["previous_link_quota"] = prevQuota
+		auditMeta["link_quota"] = got.LinkQuota
+	}
+	if p.RateLimit != nil {
+		auditMeta["previous_rate_limit_per_second"] = prevRateLimit
+		auditMeta["rate_limit_per_second"] = got.RateLimit
+	}
+	if err := insertAuditLogTx(ctx, tx, tenantID, audit.OperatorMeta(""), audit.ActionTenantLimitsUpdate, audit.TargetOrg, strconv.FormatInt(tenantID, 10), auditMeta); err != nil {
+		return TenantLimits{}, fmt.Errorf("set tenant limits: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return TenantLimits{}, fmt.Errorf("set tenant limits: commit: %w", err)
 	}
 	return got, nil
 }

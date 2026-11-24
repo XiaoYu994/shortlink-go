@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/identity"
 )
 
@@ -71,6 +73,11 @@ func (s *Store) CreateOrgForUser(ctx context.Context, userID int64, name string,
 	}
 	if _, err := tx.ExecContext(ctx, insertOrgOwnerMembershipSQL, userID, orgID); err != nil {
 		return identity.CreatedOrg{}, fmt.Errorf("create org: insert owner membership: %w", err)
+	}
+	if err := insertAuditLogTx(ctx, tx, orgID, audit.UserMeta(userID, ""), audit.ActionOrgCreate, audit.TargetOrg, strconv.FormatInt(orgID, 10), map[string]any{
+		"name": normName,
+	}); err != nil {
+		return identity.CreatedOrg{}, fmt.Errorf("create org: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return identity.CreatedOrg{}, fmt.Errorf("create org: commit: %w", err)

@@ -10,6 +10,9 @@ func TestMapAuthorizerRoleMatrix(t *testing.T) {
 		PermStatsRead,
 		PermMembersRead,
 		PermMembersWrite,
+		PermAPIKeysRead,
+		PermAPIKeysWrite,
+		PermAuditRead,
 	}
 
 	wantByRole := map[Role]map[Perm]bool{
@@ -19,6 +22,9 @@ func TestMapAuthorizerRoleMatrix(t *testing.T) {
 			PermStatsRead:    true,
 			PermMembersRead:  true,
 			PermMembersWrite: true,
+			PermAPIKeysRead:  true,
+			PermAPIKeysWrite: true,
+			PermAuditRead:    true,
 		},
 		RoleAdmin: {
 			PermLinksRead:    true,
@@ -26,6 +32,9 @@ func TestMapAuthorizerRoleMatrix(t *testing.T) {
 			PermStatsRead:    true,
 			PermMembersRead:  true,
 			PermMembersWrite: true,
+			PermAPIKeysRead:  true,
+			PermAPIKeysWrite: true,
+			PermAuditRead:    true,
 		},
 		RoleMember: {
 			PermLinksRead:    true,
@@ -33,6 +42,9 @@ func TestMapAuthorizerRoleMatrix(t *testing.T) {
 			PermStatsRead:    true,
 			PermMembersRead:  true,
 			PermMembersWrite: false,
+			PermAPIKeysRead:  false,
+			PermAPIKeysWrite: false,
+			PermAuditRead:    false,
 		},
 		RoleViewer: {
 			PermLinksRead:    true,
@@ -40,6 +52,9 @@ func TestMapAuthorizerRoleMatrix(t *testing.T) {
 			PermStatsRead:    true,
 			PermMembersRead:  true,
 			PermMembersWrite: false,
+			PermAPIKeysRead:  false,
+			PermAPIKeysWrite: false,
+			PermAuditRead:    false,
 		},
 	}
 
@@ -98,6 +113,13 @@ func TestMapAuthorizerAPIKeyAndFailClosed(t *testing.T) {
 			authz:     authz,
 			principal: Principal{ActorKind: ActorAPIKey, Scopes: AllAPIKeyScopes()},
 			perm:      PermMembersWrite,
+			want:      false,
+		},
+		{
+			name:      "all api key scopes deny audit read",
+			authz:     authz,
+			principal: Principal{ActorKind: ActorAPIKey, Scopes: AllAPIKeyScopes()},
+			perm:      PermAuditRead,
 			want:      false,
 		},
 		{

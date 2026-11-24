@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router';
 import { APIKeysPage } from '@/features/api-keys/APIKeysPage';
+import { AuditLogsPage } from '@/features/audit/AuditLogsPage';
 import { LoginPage } from '@/features/auth/LoginPage';
 import { LinkStatsPage } from '@/features/links/LinkStatsPage';
 import { LinksPage } from '@/features/links/LinksPage';
@@ -21,6 +22,7 @@ export function AppRouter() {
         <Route path="links/:code" element={<LinkStatsPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="api-keys" element={<APIKeysPage />} />
+        <Route path="audit-logs" element={<AuditLogsPage />} />
       </Route>
 
       <Route path="*" element={<Navigate to={routes.root()} replace />} />

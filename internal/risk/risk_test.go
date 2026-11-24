@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/cache"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
@@ -327,9 +328,13 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 		scanner := &fakeScanner{fn: func(context.Context, string) (Verdict, error) {
 			return Verdict{Unsafe: true, Reason: link.BanReasonPhishing}, nil
 		}}
-		banner := &fakeBanner{fn: func(_ context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+		banner := &fakeBanner{fn: func(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 			if code != "AbC12345" || expectedURL != "https://evil.example/p" || reason != link.BanReasonPhishing || source != link.BanSourceRisk {
 				t.Errorf("unexpected BanIfURL args: %q %q %q %q", code, expectedURL, reason, source)
+			}
+			meta, ok := audit.MetaFrom(ctx)
+			if !ok || meta.ActorKind != audit.ActorSystem || meta.ActorID != nil || meta.RequestID != "job:1" {
+				t.Errorf("audit meta = (%+v, %v), want system job:1", meta, ok)
 			}
 			return &link.Link{Code: code}, nil
 		}}

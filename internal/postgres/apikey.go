@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/identity"
 	"shortlink/internal/tenant"
 )
@@ -26,17 +28,47 @@ FROM api_keys
 WHERE tenant_id = $1
 ORDER BY id`
 
-	revokeAPIKeySQL = `UPDATE api_keys
-SET revoked_at = now()
-WHERE id = $1 AND revoked_at IS NULL
-RETURNING id`
+	revokeAPIKeySQL = `WITH revoked AS (
+    UPDATE api_keys
+    SET revoked_at = now()
+    WHERE id = $1 AND revoked_at IS NULL
+    RETURNING id, tenant_id
+),
+audited AS (
+    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
+    SELECT r.tenant_id,
+           $2::text,
+           $3::bigint,
+           'apikey.revoke',
+           'api_key',
+           r.id::text,
+           $4::text,
+           '{}'::jsonb
+    FROM revoked r
+)
+SELECT id FROM revoked`
 
 	checkAPIKeyRevokedSQL = `SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1`
 
-	revokeAPIKeyForTenantSQL = `UPDATE api_keys
-SET revoked_at = now()
-WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL
-RETURNING id`
+	revokeAPIKeyForTenantSQL = `WITH revoked AS (
+    UPDATE api_keys
+    SET revoked_at = now()
+    WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL
+    RETURNING id, tenant_id
+),
+audited AS (
+    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
+    SELECT r.tenant_id,
+           $3::text,
+           $4::bigint,
+           'apikey.revoke',
+           'api_key',
+           r.id::text,
+           $5::text,
+           '{}'::jsonb
+    FROM revoked r
+)
+SELECT id FROM revoked`
 
 	checkAPIKeyRevokedForTenantSQL = `SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = $1 AND tenant_id = $2`
 
@@ -131,6 +163,19 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 	if err != nil {
 		return IssuedAPIKey{}, err
 	}
+	fallback := audit.OperatorMeta("")
+	if p.CreatedBy != nil {
+		fallback = audit.UserMeta(*p.CreatedBy, "")
+	}
+	if p.TenantID == 0 {
+		orgMeta := map[string]any{"name": p.Name}
+		if p.ExternalID != "" {
+			orgMeta["external_id"] = p.ExternalID
+		}
+		if err := insertAuditLogTx(ctx, tx, tn.ID, fallback, audit.ActionOrgCreate, audit.TargetOrg, strconv.FormatInt(tn.ID, 10), orgMeta); err != nil {
+			return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+		}
+	}
 
 	plaintext, hash, err := identity.APIKeyToken.Generate()
 	if err != nil {
@@ -160,6 +205,15 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 	key.CreatedAt = key.CreatedAt.UTC()
 	if scannedExpires.Valid {
 		key.ExpiresAt = nullTimeUTC(scannedExpires)
+	}
+
+	// 只记录非敏感元数据（scopes 与可选过期时间），绝不写入明文或哈希。
+	keyMeta := map[string]any{"scopes": permsToStrings(scopes)}
+	if key.ExpiresAt != nil {
+		keyMeta["expires_at"] = key.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	if err := insertAuditLogTx(ctx, tx, tn.ID, fallback, audit.ActionAPIKeyIssue, audit.TargetAPIKey, strconv.FormatInt(key.ID, 10), keyMeta); err != nil {
+		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -327,8 +381,9 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID int64) error {
 		return err
 	}
 
+	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.OperatorMeta(""))
 	var id int64
-	err := s.db.QueryRowContext(ctx, revokeAPIKeySQL, keyID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, revokeAPIKeySQL, keyID, actorKind, actorID, reqID).Scan(&id)
 	if err == nil {
 		return nil
 	}
@@ -362,8 +417,9 @@ func (s *Store) RevokeAPIKeyForTenant(ctx context.Context, tenantID, keyID int64
 		return err
 	}
 
+	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.SystemMeta(""))
 	var id int64
-	err := s.db.QueryRowContext(ctx, revokeAPIKeyForTenantSQL, keyID, tenantID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, revokeAPIKeyForTenantSQL, keyID, tenantID, actorKind, actorID, reqID).Scan(&id)
 	if err == nil {
 		return nil
 	}

@@ -8,6 +8,7 @@ import {
   LogOut,
   Menu,
   Plus,
+  ScrollText,
   Users,
   X,
 } from 'lucide-react';
@@ -25,7 +26,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useLogout } from '@/features/auth/api';
-import { canManageAPIKeys, ROLE_LABELS } from '@/features/auth/permissions';
+import { canManageAPIKeys, canReadAuditLogs, ROLE_LABELS } from '@/features/auth/permissions';
 import { setLastOrgId } from '@/features/orgs/api';
 import { CreateOrgDialog } from '@/features/orgs/CreateOrgDialog';
 import { cn } from '@/lib/cn';
@@ -38,15 +39,18 @@ export function ConsoleLayout() {
   const navigate = useNavigate();
   const isMembersRoute = Boolean(useMatch(ROUTE_PATTERNS.orgMembers));
   const isAPIKeysRoute = Boolean(useMatch(ROUTE_PATTERNS.orgAPIKeys));
+  const isAuditLogsRoute = Boolean(useMatch(ROUTE_PATTERNS.orgAuditLogs));
   const logout = useLogout();
   const [createOrgOpen, setCreateOrgOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const keysLocked = !canManageAPIKeys(org.role);
+  const auditLocked = !canReadAuditLogs(org.role);
   const navItems = [
     { to: routes.orgLinks(org.id), label: '短链管理', icon: Link2, locked: false },
     { to: routes.orgMembers(org.id), label: '成员与邀请', icon: Users, locked: false },
     { to: routes.orgAPIKeys(org.id), label: 'API Keys', icon: KeyRound, locked: keysLocked },
+    { to: routes.orgAuditLogs(org.id), label: '审计日志', icon: ScrollText, locked: auditLocked },
   ];
 
   const quotaPct =
@@ -57,7 +61,13 @@ export function ConsoleLayout() {
   function handleSwitchOrg(nextOrgId: number) {
     if (nextOrgId === org.id) return;
     setLastOrgId(nextOrgId);
-    const section: OrgSection = isMembersRoute ? 'members' : isAPIKeysRoute ? 'api-keys' : 'links';
+    const section: OrgSection = isMembersRoute
+      ? 'members'
+      : isAPIKeysRoute
+        ? 'api-keys'
+        : isAuditLogsRoute
+          ? 'audit-logs'
+          : 'links';
     navigate(routes.orgSection(nextOrgId, section));
     setMobileMenuOpen(false);
   }

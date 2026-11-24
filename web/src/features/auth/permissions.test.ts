@@ -4,6 +4,7 @@ import {
   canAssignRole,
   canManageAPIKeys,
   canManageMembers,
+  canReadAuditLogs,
   canWriteLinks,
 } from './permissions';
 
@@ -15,7 +16,7 @@ describe('permissions matrix (mirrors Go identity.MapAuthorizer)', () => {
     expect(canWriteLinks('viewer')).toBe(false);
   });
 
-  it('restricts member and API key management to owner and admin', () => {
+  it('restricts member, API key, and audit management to owner and admin', () => {
     expect(canManageMembers('owner')).toBe(true);
     expect(canManageMembers('admin')).toBe(true);
     expect(canManageMembers('member')).toBe(false);
@@ -25,6 +26,11 @@ describe('permissions matrix (mirrors Go identity.MapAuthorizer)', () => {
     expect(canManageAPIKeys('admin')).toBe(true);
     expect(canManageAPIKeys('member')).toBe(false);
     expect(canManageAPIKeys('viewer')).toBe(false);
+
+    expect(canReadAuditLogs('owner')).toBe(true);
+    expect(canReadAuditLogs('admin')).toBe(true);
+    expect(canReadAuditLogs('member')).toBe(false);
+    expect(canReadAuditLogs('viewer')).toBe(false);
   });
 
   it('prevents admin from assigning or modifying owner role', () => {

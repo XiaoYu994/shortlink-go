@@ -63,6 +63,7 @@ type Options struct {
 	Orgs        OrgStore
 	Invitations InvitationStore
 	APIKeys     APIKeyStore
+	AuditLogs   AuditLogStore
 	// WebDistDir 非空时在 / 挂载前端构建产物（SPA），不拦截 /api/*、/r/* 和运维端点（ADR 0021）。
 	WebDistDir string
 	// PublicBaseURL 是公开短链跳转基地址（如 https://s.example.com），随 /api/v1/auth/providers 下发给前端展示与复制。
@@ -87,6 +88,7 @@ type Server struct {
 	orgs          *orgHandler
 	invitations   *invitationHandler
 	apiKeys       *apiKeyHandler
+	auditLogs     *auditHandler
 	web           http.Handler
 	publicBaseURL string
 	limiter       *tenantRateLimiter
@@ -110,6 +112,7 @@ type serverDeps struct {
 	orgs           OrgStore
 	invitations    InvitationStore
 	apiKeys        APIKeyStore
+	auditLogs      AuditLogStore
 	webDistDir     string
 	publicBaseURL  string
 	sessionTTL     time.Duration
@@ -140,6 +143,7 @@ func New(logger *slog.Logger, store Store, requestTimeout time.Duration, registr
 		orgs:           opts.Orgs,
 		invitations:    opts.Invitations,
 		apiKeys:        opts.APIKeys,
+		auditLogs:      opts.AuditLogs,
 		webDistDir:     opts.WebDistDir,
 		publicBaseURL:  opts.PublicBaseURL,
 		sessionTTL:     opts.SessionTTL,
@@ -172,6 +176,10 @@ func newServer(d serverDeps) *Server {
 	if d.apiKeys != nil {
 		apiKeys = newAPIKeyHandler(logger, d.apiKeys)
 	}
+	var auditLogs *auditHandler
+	if d.auditLogs != nil {
+		auditLogs = newAuditHandler(logger, d.auditLogs)
+	}
 	var web http.Handler
 	if d.webDistDir != "" {
 		web = newWebSPAHandler(d.webDistDir)
@@ -191,6 +199,7 @@ func newServer(d serverDeps) *Server {
 		orgs:          orgs,
 		invitations:   invitations,
 		apiKeys:       apiKeys,
+		auditLogs:     auditLogs,
 		web:           web,
 		publicBaseURL: d.publicBaseURL,
 		limiter:       newTenantRateLimiter(),

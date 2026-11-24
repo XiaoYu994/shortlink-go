@@ -113,6 +113,7 @@ const (
 	PermMembersWrite Perm = "members:write"
 	PermAPIKeysRead  Perm = "apikeys:read"
 	PermAPIKeysWrite Perm = "apikeys:write"
+	PermAuditRead    Perm = "audit:read"
 )
 
 /*

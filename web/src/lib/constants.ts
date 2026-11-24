@@ -3,3 +3,4 @@ export const MAX_ORG_NAME_BYTES = 100;
 export const MAX_OWNED_ORGS = 10;
 export const DEFAULT_ORG_LINK_QUOTA = 1000;
 export const DEFAULT_LINKS_PAGE_SIZE = 20;
+export const DEFAULT_AUDIT_LOGS_PAGE_SIZE = 20;

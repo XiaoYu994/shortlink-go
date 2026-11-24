@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
 )
@@ -100,7 +101,8 @@ func (h *orgHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.orgs.CreateOrgForUser(r.Context(), info.User.ID, req.Name, h.maxOwned)
+	auditCtx := audit.WithMeta(r.Context(), audit.UserMeta(info.User.ID, httpx.RequestIDFrom(r.Context())))
+	created, err := h.orgs.CreateOrgForUser(auditCtx, info.User.ID, req.Name, h.maxOwned)
 	if err != nil {
 		switch {
 		case errors.Is(err, identity.ErrInvalidOrgName):
