@@ -243,7 +243,7 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 
 ## 登录方式查询与回调跳转
 
-`GET /api/v1/auth/providers` 始终注册、无需鉴权，返回 `{"oidc":true,"github":false}`，供前端控制台按服务端配置渲染登录按钮。
+`GET /api/v1/auth/providers` 始终注册、无需鉴权，返回 `{"oidc":true,"github":false,"public_base_url":"http://127.0.0.1:8080"}`（未配置 `PUBLIC_BASE_URL` 时省略 `public_base_url`），供前端控制台按服务端配置渲染登录按钮与公开短链跳转地址。
 
 `/api/v1/auth/login` 与 `/api/v1/auth/github/login` 支持可选查询参数 `?return_to=/...`：
 
@@ -336,7 +336,9 @@ curl -s -b cookies.txt localhost:8081/api/v1/me
     {
       "id": 1,
       "name": "acme",
-      "role": "owner"
+      "role": "owner",
+      "link_usage": 12,
+      "link_quota": 1000
     }
   ]
 }

@@ -79,6 +79,8 @@
 
 - `make verify`：gofmt 校验（只检查、不改文件）、go vet、go test -race（单测）、
   golangci-lint、build，必须全部通过。不依赖 Docker。
+- `make web-check`：改动 `web/` 前端代码时必须通过（Prettier 校验、`tsc --noEmit`、
+  ESLint、Vitest、`vite build`）；前端代码约定详见 `web/AGENTS.md`。
 - `make selfcheck`：重建 `TEST_DATABASE_URL` 的 schema（迁移升到最新、降到空、再升到最新），
   跑完整检查、集成测试和真实进程冒烟测试。需要 PostgreSQL、Redis 和 Dex（OIDC）可连；用项目自带的
   compose 时先跑 `make deps-up`。agent 报告完成前必须跑这一条；只跑 `make verify`
@@ -123,5 +125,7 @@ feat: 实现 Base62 编解码
 
 - `README.md`：项目概览、快速开始、文档入口。
 - `docs/`：架构、API、运行手册、路线图、ADR。
-- `AGENTS.md`（本文件）：协作方式和代码约定。
+- `AGENTS.md`（本文件）：全局协作方式、Go 代码约定与提交规范。
+- `web/AGENTS.md`：前端控制台的分层边界、React/TypeScript 约定与检查要求。
+- `web/README.md`：前端启动命令、目录对照与 React 学习导读。
 - 各包的包注释：这个包做什么、对应哪一课。

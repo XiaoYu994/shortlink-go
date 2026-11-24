@@ -813,7 +813,8 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 ```bash
 make web-install
 make web-check    # tsc + eslint + vitest + vite build
-WEB_DIST_DIR=web/dist make run-console
+# 同时启动 redirector（:8080），并用 PUBLIC_BASE_URL 让前端生成的短链与二维码指向 redirector
+PUBLIC_BASE_URL=http://127.0.0.1:8080 WEB_DIST_DIR=web/dist make run-console
 ```
 
 浏览器打开 `http://127.0.0.1:8081`（或 `.env` 中 `CONSOLE_ADDR` 对应端口），即可通过 Dex/GitHub 登录后自助创建组织、管理短链与查看统计、管理成员与邀请、签发与吊销组织 API Key。

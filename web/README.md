@@ -1,8 +1,8 @@
 # Shortlink Web Console（React 学习与演进指南）
 
-本目录是 Shortlink 的独立前端控制台，采用 **React 19 + TypeScript + Vite + Tailwind CSS v4 + Radix UI（shadcn/ui 风格）+ React Router v7 + TanStack Query v5 + Vitest**。
+本目录是 Shortlink 的独立前端控制台，采用 **React 19 + TypeScript + Vite + Tailwind CSS v4 + Radix UI（shadcn/ui 风格）+ React Router v7 + TanStack Query v5 + Vitest + Prettier**。
 
-它与 Go 后端保持完全解耦（Go 侧 `make verify` 不依赖 Node.js），同时沿用了与本仓库 Go 代码相同的**按业务领域分包、边界清晰、护栏齐全**的工程风格。
+它与 Go 后端保持完全解耦（Go 侧 `make verify` 不依赖 Node.js），同时沿用了与本仓库 Go 代码相同的**按业务领域分包、边界清晰、护栏齐全**的工程风格。前端详细开发规范与架构边界见 [web/AGENTS.md](AGENTS.md)。
 
 ---
 
@@ -12,7 +12,9 @@
 
 ```bash
 make web-install   # 安装前端依赖
-make web-check     # 完整检查：tsc 类型检查 + eslint + vitest 组件测试 + vite build
+make web-fmt       # Prettier 自动格式化 web/ 源码与配置
+make web-fmt-check # 仅校验格式（不修改文件）
+make web-check     # 完整检查：prettier 校验 + tsc 类型检查 + eslint + vitest 测试 + vite build
 make web-lint      # 仅跑 ESLint（含 react-hooks 与 TypeScript 规则）
 make web-test      # 仅跑 Vitest + Testing Library 测试
 make web-build     # 构建静态产物到 web/dist
@@ -33,29 +35,40 @@ WEB_DIST_DIR=web/dist make run-console
 ```txt
 web/src/
 ├── main.tsx                # 启动装配入口（类似 Go cmd/console/serve.go）
+├── env.d.ts                # Vite 客户端环境类型声明
 ├── index.css               # Tailwind v4 入口 + shadcn 语义色变量
-├── lib/                    # 通用基础设施（类似 Go internal/httpx）
-│   ├── api-client.ts       # 同源 fetch 封装、X-Org-ID、AbortSignal、强类型 APIError
+├── lib/                    # 零业务路径耦合的基础设施（类似 Go internal/httpx）
+│   ├── endpoints.ts        # 后端 /api/v1 端点集中注册表（Single Source of Truth）
+│   ├── constants.ts        # 跨模块业务常量（名称字节上限、分页大小等）
+│   ├── api-client.ts       # 同源 fetch 封装、X-Org-ID、AbortSignal、skipAuthRedirect
+│   ├── error-messages.ts   # 后端英文错误码 -> 面向用户的中文提示映射
+│   ├── short-url.ts        # 公开短链 URL 拼接、展示裁剪与短码格式校验
 │   ├── query-client.ts     # TanStack Query 全局配置（4xx 不重试、staleTime）
+│   ├── use-document-title.ts # 浏览器标签页标题 Hook
 │   ├── cn.ts               # clsx + tailwind-merge 样式合并
 │   └── format.ts           # 时间/数字格式化与剪贴板辅助
 ├── components/             # 零业务 UI 原语与通用组件（不 import features/）
-│   ├── ui/                 # shadcn/ui 风格原语（Button/Badge/Card/Dialog/AlertDialog/DropdownMenu...）
+│   ├── ui/                 # shadcn/ui 风格原语（Button/Badge/Card/Dialog/SegmentedControl...）
 │   ├── ErrorBoundary.tsx   # 渲染期异常兜底（类似 Go recoverer 中间件）
+│   ├── ErrorAlert.tsx      # 统一错误横幅与表单错误提示
 │   ├── ConfirmDialog.tsx   # 通用二次确认弹窗（替代 window.confirm）
+│   ├── CopyButton.tsx      # 一键复制按钮 + 状态反馈
+│   ├── QRCodeCard.tsx      # 本地离线二维码渲染与 PNG 下载
+│   ├── QRCodeDialog.tsx    # 二维码独立预览弹窗
 │   ├── EmptyState.tsx      # 统一空状态
 │   └── PageHeader.tsx      # 页面标题与操作区
 ├── app/                    # 应用壳层：路由表、鉴权守卫、侧边栏布局与 OrgContext
+│   ├── routes.ts           # 前端路由模式与类型安全路径构造器（Single Source of Truth）
 │   ├── router.tsx          # 声明式路由（/login、/onboarding、/orgs/:orgId/*）
-│   ├── AuthGuard.tsx       # 会话守卫与租户路由校验（未登录带 ?return_to= 跳登录）
+│   ├── AuthGuard.tsx       # 会话守卫、全局 401 回跳与租户路由校验
 │   ├── org-context.ts      # 当前组织上下文（类似 Go request context 中的 Principal）
-│   └── ConsoleLayout.tsx   # 侧边栏、组织切换下拉、新建组织弹窗、移动端抽屉
+│   └── ConsoleLayout.tsx   # 侧边栏、组织切换下拉、月度配额条、移动端抽屉
 └── features/               # 按业务领域分包（对齐 Go internal/{identity,link,console}）
     ├── auth/               # 登录页、/me 与 /auth/providers、角色权限辅助
     ├── orgs/               # 首次无组织引导页、新建组织弹窗
-    ├── links/              # 短链列表（游标分页）、创建/编辑弹窗、独立点击统计页
-    ├── members/            # 成员列表/改角色/移出、邀请列表/发起/撤销
-    └── api-keys/           # API Key 列表、按 scope 签发（明文一次性展示）、吊销
+    ├── links/              # 短链列表（游标分页/直达查询）、创建成功态+二维码、统计页
+    ├── members/            # 成员列表/改角色/移出、邀请列表/登录入口复制/撤销
+    └── api-keys/           # API Key 列表、按 scope 签发（明文一次性展示+cURL）、吊销
 ```
 
 ---
@@ -83,8 +96,9 @@ web/src/
 
 ## 后续扩展新页面（例如阶段 14 审计日志）怎么加
 
-只需三步，不改现有业务模块：
+只需四步，不改现有业务模块（更多规范见 [web/AGENTS.md](AGENTS.md)）：
 
-1. 新建 `src/features/audit/`，放 `api.ts`（query keys + hooks）与 `AuditLogsPage.tsx`；
-2. 在 `src/app/router.tsx` 的 `/orgs/:orgId` 下新增 `<Route path="audit" element={<AuditLogsPage />} />`；
-3. 在 `src/app/ConsoleLayout.tsx` 的 `navItems` 数组里加一项导航入口。
+1. 在 `src/lib/endpoints.ts` 注册后端端点，在 `src/app/routes.ts` 注册路由模式与构造函数；
+2. 新建 `src/features/audit/`，放 `api.ts`（query keys + hooks）、`AuditLogsPage.tsx` 与对应测试；
+3. 在 `src/app/router.tsx` 的 `/orgs/:orgId` 下挂载路由，并在 `src/app/ConsoleLayout.tsx` 的 `navItems` 数组里加导航入口；
+4. 运行 `make web-check` 校验格式、类型、Lint、测试与构建。
