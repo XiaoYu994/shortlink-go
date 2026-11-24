@@ -1,4 +1,4 @@
-package identity
+package oauth
 
 import (
 	"bytes"
@@ -14,12 +14,13 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/logx"
 )
 
 const (
-	// GitHubIssuer 是放进 user_identities.issuer 的固定标识，与 OIDC 提供方的 issuer 共同组成唯一键。
-	GitHubIssuer = "https://github.com"
+	// GitHubIssuer 是放进 user_identities.issuer 的固定标识，由 identity 领域包统一定义。
+	GitHubIssuer = identity.GitHubIssuer
 
 	defaultGitHubAuthURL    = "https://github.com/login/oauth/authorize"
 	defaultGitHubTokenURL   = "https://github.com/login/oauth/access_token"
@@ -165,26 +166,26 @@ ExchangeAndFetchUser 用授权码和 PKCE code_verifier 向 GitHub 换取 access
 再在线请求 /user 与 /user/emails 构造规范化的 ExternalIdentity（Subject 取不可变的十进制数字用户 ID）。
 access_token 只在本次请求里使用，不持久化也不写入日志。
 */
-func (p *GitHubProvider) ExchangeAndFetchUser(ctx context.Context, code, codeVerifier string) (ExternalIdentity, error) {
+func (p *GitHubProvider) ExchangeAndFetchUser(ctx context.Context, code, codeVerifier string) (identity.ExternalIdentity, error) {
 	if code == "" || codeVerifier == "" {
-		return ExternalIdentity{}, fmt.Errorf("%w: code and code_verifier are required", ErrAuthFailed)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: code and code_verifier are required", identity.ErrAuthFailed)
 	}
 
 	callCtx := context.WithValue(ctx, oauth2.HTTPClient, p.httpClient)
 	token, err := p.oauth.Exchange(callCtx, code, oauth2.VerifierOption(codeVerifier))
 	if err != nil {
-		return ExternalIdentity{}, classifyGitHubExchangeError(ctx, err)
+		return identity.ExternalIdentity{}, classifyGitHubExchangeError(ctx, err)
 	}
 	if token.AccessToken == "" {
-		return ExternalIdentity{}, fmt.Errorf("%w: empty access token", ErrProviderUnavailable)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: empty access token", identity.ErrProviderUnavailable)
 	}
 
 	var user githubUserResponse
 	if err := p.getJSON(ctx, token.AccessToken, p.apiBaseURL+"/user", &user); err != nil {
-		return ExternalIdentity{}, err
+		return identity.ExternalIdentity{}, err
 	}
 	if user.ID <= 0 {
-		return ExternalIdentity{}, fmt.Errorf("%w: invalid github user id %d", ErrAuthFailed, user.ID)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: invalid github user id %d", identity.ErrAuthFailed, user.ID)
 	}
 
 	/*
@@ -193,7 +194,7 @@ func (p *GitHubProvider) ExchangeAndFetchUser(ctx context.Context, code, codeVer
 	*/
 	var emails []githubEmailResponse
 	if err := p.getJSON(ctx, token.AccessToken, p.apiBaseURL+"/user/emails", &emails); err != nil {
-		return ExternalIdentity{}, err
+		return identity.ExternalIdentity{}, err
 	}
 
 	email, verified := pickGitHubEmail(emails)
@@ -202,7 +203,7 @@ func (p *GitHubProvider) ExchangeAndFetchUser(ctx context.Context, code, codeVer
 		displayName = strings.TrimSpace(user.Login)
 	}
 
-	id, err := (ExternalIdentity{
+	id, err := (identity.ExternalIdentity{
 		Issuer:        GitHubIssuer,
 		Subject:       strconv.FormatInt(user.ID, 10),
 		Email:         email,
@@ -210,7 +211,7 @@ func (p *GitHubProvider) ExchangeAndFetchUser(ctx context.Context, code, codeVer
 		Name:          displayName,
 	}).Normalize()
 	if err != nil {
-		return ExternalIdentity{}, fmt.Errorf("%w: %w", ErrAuthFailed, err)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: %w", identity.ErrAuthFailed, err)
 	}
 	return id, nil
 }
@@ -244,7 +245,7 @@ func (p *GitHubProvider) getJSON(ctx context.Context, accessToken, endpoint stri
 		if ctx.Err() != nil {
 			return fmt.Errorf("github api request: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
+		return fmt.Errorf("%w: %w", identity.ErrProviderUnavailable, err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -252,10 +253,10 @@ func (p *GitHubProvider) getJSON(ctx context.Context, accessToken, endpoint stri
 	}()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("%w: github api status %d", ErrAuthFailed, resp.StatusCode)
+		return fmt.Errorf("%w: github api status %d", identity.ErrAuthFailed, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: github api status %d", ErrProviderUnavailable, resp.StatusCode)
+		return fmt.Errorf("%w: github api status %d", identity.ErrProviderUnavailable, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGitHubResponseBytes+1))
@@ -263,13 +264,13 @@ func (p *GitHubProvider) getJSON(ctx context.Context, accessToken, endpoint stri
 		if ctx.Err() != nil {
 			return fmt.Errorf("read github response: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w: read github response: %w", ErrProviderUnavailable, err)
+		return fmt.Errorf("%w: read github response: %w", identity.ErrProviderUnavailable, err)
 	}
 	if len(body) > maxGitHubResponseBytes {
-		return fmt.Errorf("%w: github response exceeds %d bytes", ErrProviderUnavailable, maxGitHubResponseBytes)
+		return fmt.Errorf("%w: github response exceeds %d bytes", identity.ErrProviderUnavailable, maxGitHubResponseBytes)
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("%w: decode github response: %w", ErrProviderUnavailable, err)
+		return fmt.Errorf("%w: decode github response: %w", identity.ErrProviderUnavailable, err)
 	}
 	return nil
 }
@@ -289,12 +290,12 @@ func classifyGitHubExchangeError(ctx context.Context, err error) error {
 		(retrieveErr.Response.StatusCode == http.StatusOK || retrieveErr.Response.StatusCode == http.StatusBadRequest) {
 		switch retrieveErr.ErrorCode {
 		case "bad_verification_code", "invalid_grant", "access_denied", "expired_token", "unverified_user_email", "invalid_request":
-			return fmt.Errorf("%w: %w", ErrAuthFailed, err)
+			return fmt.Errorf("%w: %w", identity.ErrAuthFailed, err)
 		default:
 			// unsupported_grant_type、incorrect_client_credentials、redirect_uri_mismatch、
 			// application_suspended、server_error、temporarily_unavailable 等配置或服务端异常统一归为提供方不可用。
-			return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
+			return fmt.Errorf("%w: %w", identity.ErrProviderUnavailable, err)
 		}
 	}
-	return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
+	return fmt.Errorf("%w: %w", identity.ErrProviderUnavailable, err)
 }

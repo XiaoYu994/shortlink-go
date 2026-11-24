@@ -1,4 +1,4 @@
-package postgres
+package pgredirect
 
 import (
 	"context"
@@ -48,9 +48,7 @@ FROM unnest($1::bigint[], $2::text[], $3::text[]) AS v(link_id, day, hash)
 JOIN links l ON l.id = v.link_id
 ON CONFLICT DO NOTHING`
 
-	/*
-		同一行在 data 里只出现一次，调用方已经按 id 加总。
-	*/
+	// 同一行在 data 里只出现一次，调用方已经按 id 加总。
 	addClicksSQL = `UPDATE links AS l
 SET clicks = l.clicks + data.n
 FROM unnest($1::bigint[], $2::bigint[]) AS data(id, n)
@@ -58,13 +56,13 @@ WHERE l.id = data.id`
 )
 
 /*
-维度名同时用于写入和统计读取；两边共用常量，改名时不会一边改一边漏。
+维度名同时用于写入和统计读取；postgres/stats.go 共用这里导出的常量，改名时不会一边改一边漏。
 取值和迁移里的 CHECK 约束保持一致。
 */
 const (
-	dimensionReferrer      = "referrer"
-	dimensionDevice        = "device"
-	dimensionClient        = "client"
+	DimensionReferrer      = "referrer"
+	DimensionDevice        = "device"
+	DimensionClient        = "client"
 	maxDimensionValueBytes = 255
 )
 
@@ -90,14 +88,7 @@ type clickVisitorKey struct {
 RecordClicks 把一个点击批次写进三张日聚合表和 links.clicks，全部在同一个事务里。
 任何一步失败都回滚，这批点击整体丢掉，和 ADR 0007 的失败语义一致。
 
-加锁顺序和 Delete 一致，不能反过来：先按 id 锁 links，再写
-link_clicks_daily、link_dimension_daily、link_visitors_daily。
-删除是先锁链接再删统计。点击如果先锁日表再锁链接，两边会互相等待，
-PostgreSQL 判死锁后回滚一方：删除变成 500，或者整批点击丢掉。
-后面几步的写入顺序不用再管：能碰到同一行统计数据的两个事务，
-都要先拿到同一条链接的锁，已经被它排成先后。
-
-已经删除的链接锁不到，后面的 JOIN 同样跳过，不会产生统计行。
+先按 id 升序锁 links，再写三张统计表，避免多写入者并发锁序交叉，同时确保已删除链接直接跳过。
 */
 func (s *Store) RecordClicks(ctx context.Context, clicks []click.Click) error {
 	daily, dimensions, visitors, totals := aggregateClicks(clicks)
@@ -160,9 +151,9 @@ func aggregateClicks(clicks []click.Click) (
 		totals[c.LinkID]++
 
 		for _, dim := range [...]struct{ name, value string }{
-			{dimensionReferrer, c.Referrer},
-			{dimensionDevice, c.Device},
-			{dimensionClient, c.Client},
+			{DimensionReferrer, c.Referrer},
+			{DimensionDevice, c.Device},
+			{DimensionClient, c.Client},
 		} {
 			if !validDimensionValue(dim.value) {
 				continue
@@ -181,21 +172,11 @@ func aggregateClicks(clicks []click.Click) (
 	return daily, dimensions, visitors, totals
 }
 
-/*
-validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 maxDimensionValueBytes 字节。
-无效 UTF-8 会让 PostgreSQL 拒绝整批写入，直接在 Go 里跳过这一个维度。
-*/
+// validDimensionValue 挡住空值和超长值；CHECK 约束要求 1 到 maxDimensionValueBytes 字节。
 func validDimensionValue(v string) bool {
 	return v != "" && len(v) <= maxDimensionValueBytes && utf8.ValidString(v)
 }
 
-/*
-lockLinks 按 id 升序锁住这批点击涉及的链接。
-加锁顺序由 SQL 的 ORDER BY 决定，传进去的 id 不用先排序：
-两个批次涉及同一组链接时，都从 id 小的开始锁，只会排队。
-Delete 也是先锁 links，所以删除和点击不会交叉持有对方下一步要的行。
-已经删掉的链接没有行可锁，后面的写入会跳过它。
-*/
 func lockLinks(ctx context.Context, tx *sql.Tx, totals map[int64]int64) error {
 	ids := slices.Collect(maps.Keys(totals))
 	rows, err := tx.QueryContext(ctx,

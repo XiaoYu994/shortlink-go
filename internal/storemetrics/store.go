@@ -43,6 +43,13 @@ const (
 var durationBuckets = prometheus.ExponentialBuckets(0.0001, 2, 18)
 
 /*
+LinkReader 是公开跳转进程所需的只读存储能力，避免只读装饰器强绑定管理、统计与封禁方法（ADR 0024）。
+*/
+type LinkReader interface {
+	GetByCode(ctx context.Context, code string) (*link.Link, error)
+}
+
+/*
 LinkStore 是装饰器需要透传的完整存储能力，按基础、管理、统计和平台下架分组。
 接口由使用方定义，这样 storemetrics 不依赖 redirector 和 console，也不依赖具体的 postgres 实现。
 */
@@ -55,8 +62,8 @@ type LinkStore interface {
 
 // LinkBasics 是创建和跳转查询。
 type LinkBasics interface {
+	LinkReader
 	Create(ctx context.Context, l *link.Link) error
-	GetByCode(ctx context.Context, code string) (*link.Link, error)
 }
 
 // LinkAdmin 是管理接口的列表、详情、修改和删除。
@@ -80,19 +87,17 @@ type LinkTakedown interface {
 }
 
 /*
-Store 包在真正的存储外面，按操作记录耗时和结果。
-找不到、客户端断开、请求超时都是预期内的结束，不算存储故障。
-耗时直方图带上同样的结果标签，慢超时才不会抬高成功查询的 p99。
+Reader 是只读跳转路径的指标装饰器。Store 嵌入 *Reader 复用指标注册与 GetByCode 实现，消除双份代码（ADR 0024）。
 */
-type Store struct {
-	next       LinkStore
+type Reader struct {
+	next       LinkReader
 	operations *prometheus.CounterVec
 	duration   *prometheus.HistogramVec
 }
 
-// New 包装 next，并把指标注册到 registry。registry 由 main 创建，测试每次传新的。
-func New(next LinkStore, registry *prometheus.Registry) *Store {
-	s := &Store{
+// NewReader 包装只读存储 next，并把指标注册到 registry。
+func NewReader(next LinkReader, registry *prometheus.Registry) *Reader {
+	r := &Reader{
 		next: next,
 		operations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: operationsMetricName,
@@ -104,8 +109,40 @@ func New(next LinkStore, registry *prometheus.Registry) *Store {
 			Buckets: durationBuckets,
 		}, []string{"operation", "result"}),
 	}
-	registry.MustRegister(s.operations, s.duration)
-	return s
+	registry.MustRegister(r.operations, r.duration)
+	return r
+}
+
+// GetByCode 记录一次查询操作的耗时和结果，返回值原样返回。
+func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error) {
+	start := time.Now()
+	l, err := r.next.GetByCode(ctx, code)
+	r.observe(operationGet, err, time.Since(start))
+	return l, err
+}
+
+func (r *Reader) observe(operation string, err error, d time.Duration) {
+	result := classifyResult(err)
+	r.operations.WithLabelValues(operation, result).Inc()
+	r.duration.WithLabelValues(operation, result).Observe(d.Seconds())
+}
+
+/*
+Store 包在真正的存储外面，按操作记录耗时和结果。
+找不到、客户端断开、请求超时都是预期内的结束，不算存储故障。
+耗时直方图带上同样的结果标签，慢超时才不会抬高成功查询的 p99。
+*/
+type Store struct {
+	*Reader
+	next LinkStore
+}
+
+// New 包装 next，并把指标注册到 registry。registry 由 main 创建，测试每次传新的。
+func New(next LinkStore, registry *prometheus.Registry) *Store {
+	return &Store{
+		Reader: NewReader(next, registry),
+		next:   next,
+	}
 }
 
 // Create 记录一次创建操作的耗时和结果，错误原样返回。
@@ -114,14 +151,6 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	err := s.next.Create(ctx, l)
 	s.observe(operationCreate, err, time.Since(start))
 	return err
-}
-
-// GetByCode 记录一次查询操作的耗时和结果，返回值原样返回。
-func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
-	start := time.Now()
-	l, err := s.next.GetByCode(ctx, code)
-	s.observe(operationGet, err, time.Since(start))
-	return l, err
 }
 
 // List、GetForTenant、Update、Delete、Stats 同理，只观察，不改写结果。
@@ -180,12 +209,6 @@ func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
 	got, err := s.next.Unban(ctx, code)
 	s.observe(operationUnban, err, time.Since(start))
 	return got, err
-}
-
-func (s *Store) observe(operation string, err error, d time.Duration) {
-	result := classifyResult(err)
-	s.operations.WithLabelValues(operation, result).Inc()
-	s.duration.WithLabelValues(operation, result).Observe(d.Seconds())
 }
 
 /*

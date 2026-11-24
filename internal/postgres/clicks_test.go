@@ -11,6 +11,7 @@ import (
 
 	"shortlink/internal/click"
 	"shortlink/internal/link"
+	"shortlink/internal/pgredirect"
 )
 
 func TestRecordClicksWritesAggregates(t *testing.T) {
@@ -223,7 +224,7 @@ func TestConcurrentRecordClicksAccumulate(t *testing.T) {
 	for _, c := range clicks {
 		assertLinkClicks(t, store, c.LinkID, want)
 		assertDailyClicks(t, store, c.LinkID, "2026-11-16", want)
-		assertDimensionClicks(t, store, c.LinkID, "2026-11-16", dimensionDevice, click.DeviceDesktop, want)
+		assertDimensionClicks(t, store, c.LinkID, "2026-11-16", pgredirect.DimensionDevice, click.DeviceDesktop, want)
 	}
 }
 
@@ -300,19 +301,6 @@ func benchClicks(ids []int64, batch int) []click.Click {
 		})
 	}
 	return clicks
-}
-
-// BenchmarkAggregateClicks 只量 Go 里的去重聚合，不连数据库。
-func BenchmarkAggregateClicks(b *testing.B) {
-	ids := make([]int64, 50)
-	for i := range ids {
-		ids[i] = int64(i + 1)
-	}
-	clicks := benchClicks(ids, 100)
-	b.ReportAllocs()
-	for b.Loop() {
-		aggregateClicks(clicks)
-	}
 }
 
 /*

@@ -98,7 +98,7 @@ var (
 	// ErrExpiresNotFuture 表示签发时给出的到期时间不是将来。
 	ErrExpiresNotFuture = identity.ErrExpiresNotFuture
 	// ErrTenantNotFound 表示租户不存在。
-	ErrTenantNotFound = errors.New("tenant not found")
+	ErrTenantNotFound = tenant.ErrNotFound
 	// ErrAPIKeyNotFound 表示密钥行不存在。
 	ErrAPIKeyNotFound = identity.ErrAPIKeyNotFound
 	// ErrAPIKeyRevoked 表示这把密钥已经吊销过。

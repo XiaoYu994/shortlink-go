@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"shortlink/internal/link"
+	"shortlink/internal/pgredirect"
 )
 
 const readFixedDimensionsSQL = `SELECT dimension, value, sum(clicks)
@@ -105,14 +106,14 @@ readDimensionClicks 分两次读三类维度：
 */
 func readDimensionClicks(ctx context.Context, tx *sql.Tx, linkID int64, from, to string, stats *link.Stats) error {
 	var err error
-	if stats.Referrers, err = readDimension(ctx, tx, linkID, from, to, dimensionReferrer, 10); err != nil {
+	if stats.Referrers, err = readDimension(ctx, tx, linkID, from, to, pgredirect.DimensionReferrer, 10); err != nil {
 		return err
 	}
 	return readFixedDimensions(ctx, tx, linkID, from, to, stats)
 }
 
 func readFixedDimensions(ctx context.Context, tx *sql.Tx, linkID int64, from, to string, stats *link.Stats) error {
-	rows, err := tx.QueryContext(ctx, readFixedDimensionsSQL, linkID, from, to, dimensionDevice, dimensionClient)
+	rows, err := tx.QueryContext(ctx, readFixedDimensionsSQL, linkID, from, to, pgredirect.DimensionDevice, pgredirect.DimensionClient)
 	if err != nil {
 		return fmt.Errorf("link stats dimensions: %w", err)
 	}
@@ -127,9 +128,9 @@ func readFixedDimensions(ctx context.Context, tx *sql.Tx, linkID int64, from, to
 			return fmt.Errorf("link stats dimensions: %w", err)
 		}
 		switch dim {
-		case dimensionDevice:
+		case pgredirect.DimensionDevice:
 			stats.Devices = append(stats.Devices, count)
-		case dimensionClient:
+		case pgredirect.DimensionClient:
 			stats.Clients = append(stats.Clients, count)
 		}
 	}

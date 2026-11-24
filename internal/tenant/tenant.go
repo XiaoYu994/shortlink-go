@@ -5,6 +5,11 @@ API Key 与会话凭证的格式、生成与哈希定义在 identity 包，密�
 */
 package tenant
 
+import "errors"
+
+// ErrNotFound 表示租户不存在。
+var ErrNotFound = errors.New("tenant not found")
+
 /*
 Tenant 是组织（租户）的基本信息与策略快照，鉴权后随 identity.Principal 放进 context。
 ID 是本地主键；ExternalID 留给外部平台租户编号，没有时为空。

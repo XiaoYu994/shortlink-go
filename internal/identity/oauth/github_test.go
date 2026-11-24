@@ -1,4 +1,4 @@
-package identity_test
+package oauth_test
 
 import (
 	"bytes"
@@ -13,11 +13,12 @@ import (
 
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/fakegithub"
+	"shortlink/internal/identity/oauth"
 )
 
-func newTestGitHubProvider(t *testing.T, fake *fakegithub.Server, redirectURL, clientSecret string) *identity.GitHubProvider {
+func newTestGitHubProvider(t *testing.T, fake *fakegithub.Server, redirectURL, clientSecret string) *oauth.GitHubProvider {
 	t.Helper()
-	p, err := identity.NewGitHubProvider(identity.GitHubConfig{
+	p, err := oauth.NewGitHubProvider(oauth.GitHubConfig{
 		ClientID:     "gh-client",
 		ClientSecret: clientSecret,
 		RedirectURL:  redirectURL,
@@ -42,12 +43,12 @@ func mustOAuthFlow(t *testing.T) identity.OAuthFlow {
 }
 
 func TestNewGitHubProviderValidation(t *testing.T) {
-	valid := identity.GitHubConfig{
+	valid := oauth.GitHubConfig{
 		ClientID:     "gh-client",
 		ClientSecret: "gh-secret",
 		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",
 	}
-	p, err := identity.NewGitHubProvider(valid)
+	p, err := oauth.NewGitHubProvider(valid)
 	if err != nil {
 		t.Fatalf("NewGitHubProvider valid defaults: %v", err)
 	}
@@ -57,21 +58,21 @@ func TestNewGitHubProviderValidation(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		mutate func(*identity.GitHubConfig)
+		mutate func(*oauth.GitHubConfig)
 	}{
-		{name: "missing client id", mutate: func(c *identity.GitHubConfig) { c.ClientID = "" }},
-		{name: "missing client secret", mutate: func(c *identity.GitHubConfig) { c.ClientSecret = "" }},
-		{name: "missing redirect url", mutate: func(c *identity.GitHubConfig) { c.RedirectURL = "" }},
-		{name: "relative redirect url", mutate: func(c *identity.GitHubConfig) { c.RedirectURL = "/callback" }},
-		{name: "invalid auth url", mutate: func(c *identity.GitHubConfig) { c.AuthURL = "ftp://github.com/auth" }},
-		{name: "token url with query", mutate: func(c *identity.GitHubConfig) { c.TokenURL = "https://github.com/token?a=1" }},
-		{name: "invalid api base url", mutate: func(c *identity.GitHubConfig) { c.APIBaseURL = "://bad" }},
+		{name: "missing client id", mutate: func(c *oauth.GitHubConfig) { c.ClientID = "" }},
+		{name: "missing client secret", mutate: func(c *oauth.GitHubConfig) { c.ClientSecret = "" }},
+		{name: "missing redirect url", mutate: func(c *oauth.GitHubConfig) { c.RedirectURL = "" }},
+		{name: "relative redirect url", mutate: func(c *oauth.GitHubConfig) { c.RedirectURL = "/callback" }},
+		{name: "invalid auth url", mutate: func(c *oauth.GitHubConfig) { c.AuthURL = "ftp://github.com/auth" }},
+		{name: "token url with query", mutate: func(c *oauth.GitHubConfig) { c.TokenURL = "https://github.com/token?a=1" }},
+		{name: "invalid api base url", mutate: func(c *oauth.GitHubConfig) { c.APIBaseURL = "://bad" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := valid
 			tc.mutate(&cfg)
-			if _, err := identity.NewGitHubProvider(cfg); err == nil {
+			if _, err := oauth.NewGitHubProvider(cfg); err == nil {
 				t.Fatal("NewGitHubProvider = nil, want error")
 			}
 		})
@@ -120,7 +121,7 @@ func TestGitHubProviderHappyPathAndEmailRules(t *testing.T) {
 			t.Fatalf("ExchangeAndFetchUser: %v", err)
 		}
 		want := identity.ExternalIdentity{
-			Issuer:        identity.GitHubIssuer,
+			Issuer:        oauth.GitHubIssuer,
 			Subject:       "424242",
 			Email:         "alice@example.com",
 			EmailVerified: true,
@@ -269,7 +270,7 @@ func TestGitHubProviderClassifiesErrors(t *testing.T) {
 }
 
 func TestGitHubConfigRedactsSecret(t *testing.T) {
-	cfg := identity.GitHubConfig{
+	cfg := oauth.GitHubConfig{
 		ClientID:     "gh-client",
 		ClientSecret: "github-secret-value",
 		RedirectURL:  "https://console.example.com/api/v1/auth/github/callback",

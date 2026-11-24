@@ -917,3 +917,28 @@ func TestStoreGetByCodePopulatesRequestEvent(t *testing.T) {
 		t.Errorf("fallback cache = %q, want %q", got, resultFallback)
 	}
 }
+
+func TestNewReaderGetsAndCachesLink(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	want := &link.Link{ID: 11, Code: code, URL: "https://example.com/reader"}
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		return want, nil
+	}}
+	reg := prometheus.NewRegistry()
+	r := NewReader(next, rdb, reg, Options{})
+
+	got, err := r.GetByCode(context.Background(), code)
+	if err != nil || got.URL != want.URL {
+		t.Fatalf("first GetByCode = (%+v, %v), want URL %q", got, err, want.URL)
+	}
+	got, err = r.GetByCode(context.Background(), code)
+	if err != nil || got.URL != want.URL {
+		t.Fatalf("second GetByCode = (%+v, %v), want URL %q", got, err, want.URL)
+	}
+	if calls := next.calls.Load(); calls != 1 {
+		t.Errorf("origin calls = %d, want 1", calls)
+	}
+}

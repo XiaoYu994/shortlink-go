@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -127,4 +128,50 @@ func TestCanRemoveMember(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestMemberScopeInvariants(t *testing.T) {
+	t.Run("update role", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			scope   MemberScope
+			newRole Role
+			wantErr error
+		}{
+			{name: "missing actor", scope: MemberScope{}, newRole: RoleMember, wantErr: ErrOrgNotFound},
+			{name: "admin cannot assign owner even if target missing", scope: MemberScope{ActorFound: true, ActorRole: RoleAdmin}, newRole: RoleOwner, wantErr: ErrMemberForbidden},
+			{name: "missing target", scope: MemberScope{ActorFound: true, ActorRole: RoleOwner}, newRole: RoleMember, wantErr: ErrMemberNotFound},
+			{name: "last owner preserved", scope: MemberScope{ActorFound: true, ActorRole: RoleOwner, TargetFound: true, TargetRole: RoleOwner, OwnerCount: 1}, newRole: RoleAdmin, wantErr: ErrLastOwner},
+			{name: "two owners can demote", scope: MemberScope{ActorFound: true, ActorRole: RoleOwner, TargetFound: true, TargetRole: RoleOwner, OwnerCount: 2}, newRole: RoleAdmin},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if err := tc.scope.CanUpdateRole(tc.newRole); !errors.Is(err, tc.wantErr) {
+					t.Errorf("CanUpdateRole = %v, want %v", err, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("remove member", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			scope   MemberScope
+			wantErr error
+		}{
+			{name: "missing actor", scope: MemberScope{}, wantErr: ErrOrgNotFound},
+			{name: "member forbidden", scope: MemberScope{ActorFound: true, ActorRole: RoleMember, TargetFound: true, TargetRole: RoleViewer}, wantErr: ErrMemberForbidden},
+			{name: "missing target", scope: MemberScope{ActorFound: true, ActorRole: RoleOwner}, wantErr: ErrMemberNotFound},
+			{name: "admin cannot remove owner", scope: MemberScope{ActorFound: true, ActorRole: RoleAdmin, TargetFound: true, TargetRole: RoleOwner, OwnerCount: 2}, wantErr: ErrMemberForbidden},
+			{name: "last owner preserved", scope: MemberScope{ActorFound: true, ActorRole: RoleOwner, TargetFound: true, TargetRole: RoleOwner, OwnerCount: 1}, wantErr: ErrLastOwner},
+			{name: "owner removes member", scope: MemberScope{ActorFound: true, ActorRole: RoleOwner, TargetFound: true, TargetRole: RoleMember, OwnerCount: 1}},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if err := tc.scope.CanRemove(); !errors.Is(err, tc.wantErr) {
+					t.Errorf("CanRemove = %v, want %v", err, tc.wantErr)
+				}
+			})
+		}
+	})
 }

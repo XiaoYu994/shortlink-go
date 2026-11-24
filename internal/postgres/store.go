@@ -2,6 +2,7 @@
 Package postgres 是存储层的 PostgreSQL 实现。
 
 使用 database/sql 加 pgx 驱动，表名按 PostgreSQL 习惯用复数 links。
+公开跳转与点击写出由 pgredirect 实现并嵌入 Store，管理写、鉴权、任务与审计收敛在本包（ADR 0024）。
 id 由数据库自增，只作内部主键；对外短码由 idgen.GenerateCode 随机生成，遇到唯一约束冲突时重试。
 */
 package postgres
@@ -11,15 +12,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
-
-	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"shortlink/internal/audit"
 	"shortlink/internal/idgen"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/pgdb"
+	"shortlink/internal/pgredirect"
 )
 
 const (
@@ -88,16 +87,6 @@ audited AS (
     FROM inserted i
 )
 SELECT id, created_at FROM inserted`
-	/*
-		过期、停用和封禁的行都留在表里，短码继续占着。查询把它们看成找不到。
-		到期时刻本身算过期，界限是 expires_at > now()；
-		disabled_at 和 banned_at 的过滤和 link.Servable 是同一组条件。
-	*/
-	getLinkSQL = `SELECT id, code, url, expires_at, created_at, tenant_id FROM ` + linksTable + `
-WHERE code = $1
-  AND (expires_at IS NULL OR expires_at > now())
-  AND disabled_at IS NULL
-  AND banned_at IS NULL`
 
 	// quotaExceededSQL 只在插入没有返回行时执行，也用有效已用量区分配额不足和租户不存在。
 	quotaExceededSQL = `SELECT (` + effectiveUsageSQL + `) >= link_quota FROM tenants WHERE id = $1`
@@ -110,23 +99,20 @@ WHERE code = $1
 	maxCodeAttempts = 5
 )
 
-// PoolConfig 是数据库连接池参数。启动时由配置加载填好，再传给 Open。
-type PoolConfig struct {
-	MaxOpenConns    int
-	MaxIdleConns    int
-	ConnMaxLifetime time.Duration
-	ConnMaxIdleTime time.Duration
-}
+// PoolConfig 是数据库连接池参数，别名自 pgdb 保持向后兼容。
+type PoolConfig = pgdb.PoolConfig
 
-// DefaultPoolConfig 返回本地开发的默认连接池参数。
-func DefaultPoolConfig() PoolConfig {
-	return PoolConfig{
-		MaxOpenConns:    10,
-		MaxIdleConns:    5,
-		ConnMaxLifetime: time.Hour,
-		ConnMaxIdleTime: 10 * time.Minute,
-	}
-}
+var (
+	// DefaultPoolConfig 返回本地开发的默认连接池参数。
+	DefaultPoolConfig = pgdb.DefaultPoolConfig
+	// Open 打开 PostgreSQL 连接池并确认能连上。
+	Open = pgdb.Open
+
+	isUniqueViolation           = pgdb.IsUniqueViolation
+	isUniqueConstraintViolation = pgdb.IsUniqueConstraintViolation
+	isConstraintViolation       = pgdb.IsConstraintViolation
+	nullTimeUTC                 = pgdb.NullTimeUTC
+)
 
 /*
 Store 是 PostgreSQL 存储层门面，隐式实现 redirector.LinkStore、console.Store、
@@ -135,6 +121,7 @@ console.OrgStore、console.InvitationStore、console.APIKeyStore、console.Audit
 以及 cmd/console 运维命令所需的存储能力。
 */
 type Store struct {
+	*pgredirect.Store
 	db *sql.DB
 	// generate 可以替换，测试里用来强制制造短码冲突。
 	generate func() (string, error)
@@ -142,28 +129,11 @@ type Store struct {
 
 // NewStore 包装已打开的连接池。
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db, generate: idgen.GenerateCode}
-}
-
-/*
-Open 打开 PostgreSQL 连接池并确认能连上。
-DSN 形如 postgres://user:pass@host:5432/db?sslmode=disable。
-*/
-func Open(ctx context.Context, dsn string, cfg PoolConfig) (*sql.DB, error) {
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open postgres: %w", err)
+	return &Store{
+		Store:    pgredirect.NewStore(db),
+		db:       db,
+		generate: idgen.GenerateCode,
 	}
-	db.SetMaxOpenConns(cfg.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.MaxIdleConns)
-	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
-	db.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
-
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ping postgres: %w", err)
-	}
-	return db, nil
 }
 
 /*
@@ -230,44 +200,4 @@ func (s *Store) checkCreateQuota(ctx context.Context, tenantID int64) (exceeded,
 		return false, false, fmt.Errorf("check link quota: %w", err)
 	}
 	return exceeded, true, nil
-}
-
-/*
-GetByCode 按短码查找可跳转的链接，找不到、已过期、已停用或已封禁都返回 link.ErrNotFound。
-这些行仍留在表里。
-*/
-func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
-	var l link.Link
-	err := s.db.QueryRowContext(ctx, getLinkSQL, code).Scan(
-		&l.ID, &l.Code, &l.URL, &l.ExpiresAt, &l.CreatedAt, &l.TenantID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, link.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get link: %w", err)
-	}
-	return &l, nil
-}
-
-// isUniqueViolation 报告错误是否是 PostgreSQL 的唯一约束冲突（SQLSTATE 23505）。
-func isUniqueViolation(err error) bool {
-	pgErr, ok := errors.AsType[*pgconn.PgError](err)
-	return ok && pgErr.Code == "23505"
-}
-
-func isUniqueConstraintViolation(err error, constraint string) bool {
-	return isConstraintViolation(err, "23505", constraint)
-}
-
-func isConstraintViolation(err error, code, constraint string) bool {
-	pgErr, ok := errors.AsType[*pgconn.PgError](err)
-	return ok && pgErr.Code == code && pgErr.ConstraintName == constraint
-}
-
-func nullTimeUTC(nt sql.NullTime) *time.Time {
-	if !nt.Valid {
-		return nil
-	}
-	t := nt.Time.UTC()
-	return &t
 }

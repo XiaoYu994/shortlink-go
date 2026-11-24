@@ -282,3 +282,21 @@ func assertDurationResult(t *testing.T, reg *prometheus.Registry, operation, res
 	}
 	t.Fatalf("metric %s not found", durationMetricName)
 }
+
+func TestNewReaderRecordsGetMetrics(t *testing.T) {
+	want := &link.Link{Code: "r01", URL: "https://example.com"}
+	reg := prometheus.NewRegistry()
+	r := NewReader(stubStore{link: want}, reg)
+
+	got, err := r.GetByCode(context.Background(), "r01")
+	if err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+	if got != want {
+		t.Fatalf("GetByCode = %v, want %v", got, want)
+	}
+	if v := testutil.ToFloat64(r.operations.WithLabelValues(operationGet, resultSuccess)); v != 1 {
+		t.Errorf("operations{get,success} = %v, want 1", v)
+	}
+	assertDurationResult(t, reg, operationGet, resultSuccess)
+}

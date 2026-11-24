@@ -1,4 +1,4 @@
-package identity_test
+package oauth_test
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/fakeoidc"
+	"shortlink/internal/identity/oauth"
 )
 
 func authorizeAtFake(t *testing.T, authURL string) (code, state string) {
@@ -46,7 +47,7 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 		Name:          " Alice ",
 	})
 
-	httpProvider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+	httpProvider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "secret+value",
@@ -60,7 +61,7 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 		t.Error("SecureCookies() = true for http redirect url, want false")
 	}
 
-	httpsProvider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+	httpsProvider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "secret+value",
@@ -102,7 +103,7 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 
 func TestOIDCProviderRejectsTamperedResponses(t *testing.T) {
 	fake := fakeoidc.Start(t, "shortlink-console", "shortlink-console-secret")
-	provider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+	provider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "shortlink-console-secret",
@@ -149,7 +150,7 @@ func TestOIDCProviderRejectsTamperedResponses(t *testing.T) {
 
 func TestOIDCProviderWrongClientSecretReturnsUnavailable(t *testing.T) {
 	fake := fakeoidc.Start(t, "shortlink-console", "real-secret")
-	provider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+	provider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "wrong-secret",
@@ -183,7 +184,7 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := fakeoidc.Start(t, "shortlink-console", "shortlink-console-secret")
-			provider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+			provider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 				Issuer:       fake.URL(),
 				ClientID:     "shortlink-console",
 				ClientSecret: "shortlink-console-secret",
@@ -211,7 +212,7 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 }
 
 func TestOIDCConfigRedactsSecret(t *testing.T) {
-	cfg := identity.OIDCConfig{
+	cfg := oauth.OIDCConfig{
 		Issuer:       "https://dex.example.com",
 		ClientID:     "shortlink-console",
 		ClientSecret: "oidc-secret-value",

@@ -105,6 +105,13 @@ Ban、Unban 返回这个哨兵时，*link.Link 是数据库里的结果；
 var ErrNotUpdated = errors.New("cache not updated after successful write")
 
 /*
+LinkReader 是公开跳转进程所需的只读存储能力，与管理/下架写路径解耦（ADR 0024）。
+*/
+type LinkReader interface {
+	GetByCode(ctx context.Context, code string) (*link.Link, error)
+}
+
+/*
 LinkStore 是装饰器需要的完整能力，按基础、管理、统计和平台下架分组。
 接口放在使用方，cache 就不依赖 redirector、console 和 postgres。
 Create、Update、Delete、Ban、Unban 除了写库还要维护缓存，其余方法直接透传。
@@ -118,8 +125,8 @@ type LinkStore interface {
 
 // LinkBasics 是创建和跳转查询。
 type LinkBasics interface {
+	LinkReader
 	Create(ctx context.Context, l *link.Link) error
-	GetByCode(ctx context.Context, code string) (*link.Link, error)
 }
 
 // LinkAdmin 是管理接口的列表、详情、修改和删除。
@@ -164,14 +171,12 @@ func (o Options) withDefaults() Options {
 }
 
 /*
-Store 是带 Redis 读缓存的 LinkStore。
-
-Create 成功后写穿，盖掉负缓存，否则新短码会在 TTL 内继续 404。
-必须用指针：singleflight.Group、missSlots 和 fallbackSlots 都是共享状态，
-复制之后就各记各的。
+Reader 是公开跳转路径的只读 Redis 缓存装饰器（ADR 0024）。
+Store 嵌入 *Reader 复用读取、回源保护与缓存写入逻辑，避免双份实现。
+必须用指针：singleflight.Group、missSlots 和 fallbackSlots 都是共享状态。
 */
-type Store struct {
-	next     LinkStore
+type Reader struct {
+	next     LinkReader
 	rdb      *redis.Client
 	group    singleflight.Group // 零值就能用
 	gets     *prometheus.CounterVec
@@ -192,14 +197,14 @@ type Store struct {
 	logger       *slog.Logger
 }
 
-// New 把指标注册到 registry。测试每次传新的，避免重复注册 panic。
-func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts Options) *Store {
+// NewReader 构造只读缓存装饰器并把指标注册到 registry。
+func NewReader(next LinkReader, rdb *redis.Client, registry *prometheus.Registry, opts Options) *Reader {
 	opts = opts.withDefaults()
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	s := &Store{
+	r := &Reader{
 		next:   next,
 		rdb:    rdb,
 		logger: logger,
@@ -224,8 +229,27 @@ func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts 
 		fallbackSlots: make(chan struct{}, fallbackConcurrency),
 		fetchTimeout:  opts.FetchTimeout,
 	}
-	registry.MustRegister(s.gets, s.writes, s.duration, s.shed)
-	return s
+	registry.MustRegister(r.gets, r.writes, r.duration, r.shed)
+	return r
+}
+
+/*
+Store 是带 Redis 读缓存的完整 LinkStore。
+
+Create 成功后写穿，盖掉负缓存，否则新短码会在 TTL 内继续 404。
+必须用指针：嵌入的 *Reader 持有 singleflight.Group 与回源信号量。
+*/
+type Store struct {
+	*Reader
+	next LinkStore
+}
+
+// New 把指标注册到 registry。测试每次传新的，避免重复注册 panic。
+func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts Options) *Store {
+	return &Store{
+		Reader: NewReader(next, rdb, registry, opts),
+		next:   next,
+	}
 }
 
 /*
@@ -258,10 +282,10 @@ GetByCode 未命中或 Redis 故障时回源。负缓存的 value 是 JSON null�
 每个请求按自己的读取结果计数，包括等在 singleflight 里的；计数和耗时都在 readCache 里记。
 被限流的请求按请求计一次 shed，等待者也会收到同一个错误，见 ADR 0008。
 */
-func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) {
+func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	key := keyPrefix + code
 
-	cached, result := s.readCache(ctx, key, code)
+	cached, result := r.readCache(ctx, key, code)
 	if result == resultHit {
 		/*
 			TTL 到点后 GET 读不到这个 key。这里再按 Servable 判断一次：
@@ -271,7 +295,7 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 		if cached == nil || !cached.Servable(time.Now()) {
 			logx.SetCacheResult(ctx, "neg_hit")
 			if cached != nil {
-				_ = s.rdb.Del(ctx, key).Err()
+				_ = r.rdb.Del(ctx, key).Err()
 			}
 			return nil, link.ErrNotFound
 		}
@@ -283,11 +307,11 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 	}
 
 	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数。
-	l, err, _ := doTyped[*link.Link](&s.group, key, func() (*link.Link, error) {
-		fetchCtx, cancel := fetchContext(ctx, s.fetchTimeout)
+	l, err, _ := doTyped[*link.Link](&r.group, key, func() (*link.Link, error) {
+		fetchCtx, cancel := fetchContext(ctx, r.fetchTimeout)
 		defer cancel()
 
-		found, err := s.readStore(fetchCtx, code, result)
+		found, err := r.readStore(fetchCtx, code, result)
 		if err != nil && !errors.Is(err, link.ErrNotFound) {
 			return nil, err // 真正的错误不写缓存，下次请求应该重试
 		}
@@ -300,13 +324,13 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 				回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
 				这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
 			*/
-			s.writeCacheBestEffort(fetchCtx, key, found, writeNX)
+			r.writeCacheBestEffort(fetchCtx, key, found, writeNX)
 		}
 		return found, err
 	})
 	if ctx.Err() == nil {
 		if shedErr, ok := errors.AsType[fetchShedError](err); ok {
-			s.shed.WithLabelValues(shedErr.path).Inc()
+			r.shed.WithLabelValues(shedErr.path).Inc()
 		}
 	}
 	return l, err
@@ -464,21 +488,21 @@ readCache 在调用方 ctx 已结束时返回 resultSkipped，不计数也不记
 坏数据删掉后按未命中，让回源重新写入。合法 JSON 缺字段不会报错，
 字段名也不区分大小写，所以 URL 为空或 Code 对不上也算坏数据。
 */
-func (s *Store) readCache(ctx context.Context, key, code string) (cached *link.Link, result string) {
+func (r *Reader) readCache(ctx context.Context, key, code string) (cached *link.Link, result string) {
 	start := time.Now()
 	defer func() {
 		if result == resultSkipped {
 			return
 		}
-		s.gets.WithLabelValues(result).Inc()
-		s.duration.WithLabelValues(operationGet, result).Observe(time.Since(start).Seconds())
+		r.gets.WithLabelValues(result).Inc()
+		r.duration.WithLabelValues(operationGet, result).Observe(time.Since(start).Seconds())
 	}()
 
-	data, err := s.rdb.Get(ctx, key).Bytes()
+	data, err := r.rdb.Get(ctx, key).Bytes()
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &cached); err != nil || !usableCachedLink(cached, code) {
-			_ = s.rdb.Del(ctx, key).Err()
+			_ = r.rdb.Del(ctx, key).Err()
 			return nil, resultMiss
 		}
 		return cached, resultHit
@@ -510,10 +534,10 @@ writeCommitted 在数据库提交之后尽力更新缓存，失败只记日志�
 WithoutCancel 丢掉取消和 deadline，只留日志要用的 value；
 再套一段独立超时，避免 Redis 卡住时这个 handler 一直不返回。
 */
-func (s *Store) writeCommitted(ctx context.Context, key string, l *link.Link) {
+func (r *Reader) writeCommitted(ctx context.Context, key string, l *link.Link) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
 	defer cancel()
-	s.writeCacheBestEffort(writeCtx, key, l, writeOverwrite)
+	r.writeCacheBestEffort(writeCtx, key, l, writeOverwrite)
 }
 
 /*
@@ -521,16 +545,16 @@ writeCommittedResult 和 writeCommitted 一样脱离请求取消，但把失败�
 Ban、Unban 用它：封禁的对象往往不能再多跳一小时，缓存没写上必须让操作的人知道。
 这条路径不在这里记日志，由调用方处理一次。
 */
-func (s *Store) writeCommittedResult(ctx context.Context, key string, l *link.Link) error {
+func (r *Reader) writeCommittedResult(ctx context.Context, key string, l *link.Link) error {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committedWriteTimeout)
 	defer cancel()
-	return s.writeCache(writeCtx, key, l, writeOverwrite)
+	return r.writeCache(writeCtx, key, l, writeOverwrite)
 }
 
 // writeCacheBestEffort 写失败只记日志和指标，调用方不受影响。
-func (s *Store) writeCacheBestEffort(ctx context.Context, key string, l *link.Link, mode writeMode) {
-	if err := s.writeCache(ctx, key, l, mode); err != nil {
-		s.logger.WarnContext(ctx, "write cache", "key", key, "err", err)
+func (r *Reader) writeCacheBestEffort(ctx context.Context, key string, l *link.Link, mode writeMode) {
+	if err := r.writeCache(ctx, key, l, mode); err != nil {
+		r.logger.WarnContext(ctx, "write cache", "key", key, "err", err)
 	}
 }
 
@@ -548,12 +572,12 @@ SET NX 没写进去说明已经有更新的值，记 skipped 而不是 success�
 
 TTL 向下随机抖动，避免同一批写入的 key 集中过期。
 */
-func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode writeMode) error {
+func (r *Reader) writeCache(ctx context.Context, key string, l *link.Link, mode writeMode) error {
 	if ctx.Err() != nil {
 		if mode == writeNX {
 			return nil
 		}
-		s.writes.WithLabelValues(writeError).Inc()
+		r.writes.WithLabelValues(writeError).Inc()
 		return ctx.Err()
 	}
 
@@ -568,7 +592,7 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 
 	data, marshalErr := json.Marshal(l)
 	if marshalErr != nil {
-		s.writes.WithLabelValues(writeError).Inc()
+		r.writes.WithLabelValues(writeError).Inc()
 		return fmt.Errorf("marshal cache value: %w", marshalErr)
 	}
 
@@ -578,9 +602,9 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 		setErr  error
 	)
 	if mode == writeNX {
-		written, setErr = s.rdb.SetNX(ctx, key, data, jitteredTTL(ttl)).Result()
+		written, setErr = r.rdb.SetNX(ctx, key, data, jitteredTTL(ttl)).Result()
 	} else {
-		setErr = s.rdb.Set(ctx, key, data, jitteredTTL(ttl)).Err()
+		setErr = r.rdb.Set(ctx, key, data, jitteredTTL(ttl)).Err()
 		written = setErr == nil
 	}
 	/*
@@ -597,8 +621,8 @@ func (s *Store) writeCache(ctx context.Context, key string, l *link.Link, mode w
 	case !written:
 		result = writeSkipped
 	}
-	s.writes.WithLabelValues(result).Inc()
-	s.duration.WithLabelValues(operationSet, result).Observe(time.Since(start).Seconds())
+	r.writes.WithLabelValues(result).Inc()
+	r.duration.WithLabelValues(operationSet, result).Observe(time.Since(start).Seconds())
 	if setErr != nil {
 		return fmt.Errorf("set cache: %w", setErr)
 	}
@@ -625,18 +649,18 @@ recheckAfterPositiveWrite 在写完正缓存之后，按跳转查询复查一次
 返回 wroteNegative 表示走了补写负缓存的分支；err 只在补写失败时非 nil。
 读库失败本身只记日志，不算补写失败：负缓存已经写上就是复查选择的最终值。
 */
-func (s *Store) recheckAfterPositiveWrite(ctx context.Context, key, code string) (wroteNegative bool, err error) {
-	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.fetchTimeout)
+func (r *Reader) recheckAfterPositiveWrite(ctx context.Context, key, code string) (wroteNegative bool, err error) {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.fetchTimeout)
 	defer cancel()
-	_, readErr := s.next.GetByCode(readCtx, code)
+	_, readErr := r.next.GetByCode(readCtx, code)
 	switch {
 	case readErr == nil:
 		return false, nil
 	case errors.Is(readErr, link.ErrNotFound):
-		return true, s.writeCommittedResult(ctx, key, nil)
+		return true, r.writeCommittedResult(ctx, key, nil)
 	default:
-		s.logger.WarnContext(ctx, "recheck link after cache write", "code", code, "err", readErr)
-		return true, s.writeCommittedResult(ctx, key, nil)
+		r.logger.WarnContext(ctx, "recheck link after cache write", "code", code, "err", readErr)
+		return true, r.writeCommittedResult(ctx, key, nil)
 	}
 }
 
@@ -664,10 +688,10 @@ Redis 故障不会把正常回源的配额占满。
 让请求快速失败，比把数据库连接池排满后一起超时好。
 许可只包住数据库调用，写缓存不占着它。
 */
-func (s *Store) readStore(ctx context.Context, code, path string) (*link.Link, error) {
-	slots := s.missSlots
+func (r *Reader) readStore(ctx context.Context, code, path string) (*link.Link, error) {
+	slots := r.missSlots
 	if path == resultFallback {
-		slots = s.fallbackSlots
+		slots = r.fallbackSlots
 	} else {
 		// resultSkipped 是 ctx 已取消，仍然按普通回源处理。
 		path = resultMiss
@@ -678,7 +702,7 @@ func (s *Store) readStore(ctx context.Context, code, path string) (*link.Link, e
 	default:
 		return nil, fetchShedError{path: path}
 	}
-	return s.next.GetByCode(ctx, code)
+	return r.next.GetByCode(ctx, code)
 }
 
 /*

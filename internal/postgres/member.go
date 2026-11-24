@@ -42,48 +42,6 @@ RETURNING m.user_id, u.email, u.name, m.role, m.created_at`
 	removeMemberSQL = `DELETE FROM memberships WHERE tenant_id = $1 AND user_id = $2`
 )
 
-type memberScope struct {
-	actorFound  bool
-	actorRole   identity.Role
-	targetFound bool
-	targetRole  identity.Role
-	ownerCount  int
-}
-
-func (s memberScope) canUpdateRole(newRole identity.Role) error {
-	switch {
-	case !s.actorFound:
-		return identity.ErrOrgNotFound
-	case !identity.CanAssignMemberRole(s.actorRole, newRole):
-		return identity.ErrMemberForbidden
-	case !s.targetFound:
-		return identity.ErrMemberNotFound
-	case !identity.CanManageMemberRole(s.actorRole, s.targetRole, newRole):
-		return identity.ErrMemberForbidden
-	case s.targetRole == identity.RoleOwner && newRole != identity.RoleOwner && s.ownerCount <= 1:
-		return identity.ErrLastOwner
-	default:
-		return nil
-	}
-}
-
-func (s memberScope) canRemove() error {
-	switch {
-	case !s.actorFound:
-		return identity.ErrOrgNotFound
-	case !identity.CanManageMembers(s.actorRole):
-		return identity.ErrMemberForbidden
-	case !s.targetFound:
-		return identity.ErrMemberNotFound
-	case !identity.CanRemoveMember(s.actorRole, s.targetRole):
-		return identity.ErrMemberForbidden
-	case s.targetRole == identity.RoleOwner && s.ownerCount <= 1:
-		return identity.ErrLastOwner
-	default:
-		return nil
-	}
-}
-
 /*
 ListMembers 返回指定组织下的成员列表，按 user_id 升序排列。
 复用 idx_memberships_tenant_id 复合索引，JoinedAt 统一返回 UTC。
@@ -139,43 +97,43 @@ lockMemberScopeTx 在事务内按 user_id 升序锁住操作者、目标成员�
 或“并发刚被降权/移出组织的执行者仍按旧角色操作”的 TOCTOU 竞态。
 在运行后续写入前必须先关闭 rows，避免同一事务连接占着结果集导致驱动报错。
 */
-func lockMemberScopeTx(ctx context.Context, tx *sql.Tx, tenantID, actorUserID, targetUserID int64) (memberScope, error) {
+func lockMemberScopeTx(ctx context.Context, tx *sql.Tx, tenantID, actorUserID, targetUserID int64) (identity.MemberScope, error) {
 	rows, err := tx.QueryContext(ctx, lockMemberScopeSQL, tenantID, actorUserID, targetUserID)
 	if err != nil {
-		return memberScope{}, fmt.Errorf("lock member scope: %w", err)
+		return identity.MemberScope{}, fmt.Errorf("lock member scope: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var scope memberScope
+	var scope identity.MemberScope
 	for rows.Next() {
 		var (
 			uid     int64
 			roleStr string
 		)
 		if err := rows.Scan(&uid, &roleStr); err != nil {
-			return memberScope{}, fmt.Errorf("lock member scope: %w", err)
+			return identity.MemberScope{}, fmt.Errorf("lock member scope: %w", err)
 		}
 		role := identity.Role(roleStr)
 		if !role.Valid() {
-			return memberScope{}, fmt.Errorf("lock member scope: invalid role %q for user %d", roleStr, uid)
+			return identity.MemberScope{}, fmt.Errorf("lock member scope: invalid role %q for user %d", roleStr, uid)
 		}
 		if uid == actorUserID {
-			scope.actorFound = true
-			scope.actorRole = role
+			scope.ActorFound = true
+			scope.ActorRole = role
 		}
 		if uid == targetUserID {
-			scope.targetFound = true
-			scope.targetRole = role
+			scope.TargetFound = true
+			scope.TargetRole = role
 		}
 		if role == identity.RoleOwner {
-			scope.ownerCount++
+			scope.OwnerCount++
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return memberScope{}, fmt.Errorf("lock member scope: %w", err)
+		return identity.MemberScope{}, fmt.Errorf("lock member scope: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return memberScope{}, fmt.Errorf("lock member scope: %w", err)
+		return identity.MemberScope{}, fmt.Errorf("lock member scope: %w", err)
 	}
 	return scope, nil
 }
@@ -209,11 +167,11 @@ func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRol
 	if err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
 	}
-	if err := scope.canUpdateRole(p.NewRole); err != nil {
+	if err := scope.CanUpdateRole(p.NewRole); err != nil {
 		return identity.Member{}, err
 	}
 	// 幂等空操作不写数据库、不产生审计日志噪音（ADR 0023）。
-	if scope.targetRole == p.NewRole {
+	if scope.TargetRole == p.NewRole {
 		member, err := scanMember(tx.QueryRowContext(ctx, getMemberSQL, p.TenantID, p.TargetUserID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return identity.Member{}, fmt.Errorf("update member role: user %d missing", p.TargetUserID)
@@ -236,7 +194,7 @@ func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRol
 	}
 	if err := insertAuditLogTx(ctx, tx, p.TenantID, audit.UserMeta(p.ActorUserID, ""), audit.ActionMemberRoleUpdate, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
 		"email":         member.Email,
-		"previous_role": string(scope.targetRole),
+		"previous_role": string(scope.TargetRole),
 		"new_role":      string(member.Role),
 	}); err != nil {
 		return identity.Member{}, fmt.Errorf("update member role: %w", err)
@@ -272,7 +230,7 @@ func (s *Store) RemoveMember(ctx context.Context, p identity.RemoveMemberParams)
 	if err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
-	if err := scope.canRemove(); err != nil {
+	if err := scope.CanRemove(); err != nil {
 		return err
 	}
 
@@ -288,7 +246,7 @@ func (s *Store) RemoveMember(ctx context.Context, p identity.RemoveMemberParams)
 		return fmt.Errorf("remove member: expected 1 row deleted, got %d", affected)
 	}
 	if err := insertAuditLogTx(ctx, tx, p.TenantID, audit.UserMeta(p.ActorUserID, ""), audit.ActionMemberRemove, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
-		"previous_role": string(scope.targetRole),
+		"previous_role": string(scope.TargetRole),
 	}); err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}

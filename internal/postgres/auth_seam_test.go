@@ -20,6 +20,7 @@ import (
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/fakegithub"
 	"shortlink/internal/identity/fakeoidc"
+	"shortlink/internal/identity/oauth"
 )
 
 func TestHTTPOIDCLoginPersistsSession(t *testing.T) {
@@ -490,7 +491,7 @@ func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeo
 		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
 	)
 	fake := fakeoidc.Start(t, clientID, clientSecret)
-	provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+	provider, err := oauth.NewOIDCProvider(ctx, oauth.OIDCConfig{
 		Issuer:       fake.URL(),
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -591,7 +592,7 @@ func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
 	ctx := context.Background()
 
 	fakeOIDC := fakeoidc.Start(t, "shortlink-console", "shortlink-console-secret")
-	oidcProvider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+	oidcProvider, err := oauth.NewOIDCProvider(ctx, oauth.OIDCConfig{
 		Issuer:       fakeOIDC.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "shortlink-console-secret",
@@ -603,7 +604,7 @@ func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
 	}
 
 	fakeGH := fakegithub.Start(t, "gh-console", "gh-console-secret")
-	ghProvider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+	ghProvider, err := oauth.NewGitHubProvider(oauth.GitHubConfig{
 		ClientID:     "gh-console",
 		ClientSecret: "gh-console-secret",
 		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",

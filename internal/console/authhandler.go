@@ -43,7 +43,7 @@ const (
 
 /*
 OIDCClient 封装 OIDC 授权地址构造和授权码兑换/ID Token 校验。
-接口放在使用方，生产由 identity.OIDCProvider 实现（ADR 0018）。
+接口放在使用方，生产由 oauth.OIDCProvider 实现（ADR 0018、ADR 0024）。
 */
 type OIDCClient interface {
 	AuthCodeURL(state, codeVerifier, nonce string) string
@@ -55,7 +55,7 @@ type OIDCClient interface {
 
 /*
 GitHubClient 封装纯 OAuth 2.0 的 GitHub 授权地址构造与在线用户信息获取。
-相比 OIDCClient 刻意不传 nonce（GitHub 不签发 ID Token）。生产由 identity.GitHubProvider 实现。
+相比 OIDCClient 刻意不传 nonce（GitHub 不签发 ID Token）。生产由 oauth.GitHubProvider 实现。
 */
 type GitHubClient interface {
 	AuthCodeURL(state, codeVerifier string) string
@@ -121,18 +121,21 @@ func newAuthHandler(logger *slog.Logger, oidcClient OIDCClient, githubClient Git
 	}
 }
 
-func (h *authHandler) registerRoutes(mux *http.ServeMux) {
+func (h *authHandler) registerRoutes(mux *http.ServeMux, wrap func(http.Handler) http.Handler) {
+	if wrap == nil {
+		wrap = func(next http.Handler) http.Handler { return next }
+	}
 	if h.oidc != nil {
-		mux.HandleFunc("GET "+oidcLoginPath, h.handleLogin)
-		mux.HandleFunc("GET "+oidcCallbackPath, h.handleCallback)
+		mux.Handle("GET "+oidcLoginPath, wrap(http.HandlerFunc(h.handleLogin)))
+		mux.Handle("GET "+oidcCallbackPath, wrap(http.HandlerFunc(h.handleCallback)))
 	}
 	if h.github != nil {
-		mux.HandleFunc("GET "+githubLoginPath, h.handleGitHubLogin)
-		mux.HandleFunc("GET "+githubCallbackPath, h.handleGitHubCallback)
+		mux.Handle("GET "+githubLoginPath, wrap(http.HandlerFunc(h.handleGitHubLogin)))
+		mux.Handle("GET "+githubCallbackPath, wrap(http.HandlerFunc(h.handleGitHubCallback)))
 	}
 	if h.sessions != nil {
-		mux.HandleFunc("POST "+authLogoutPath, h.handleLogout)
-		mux.HandleFunc("GET "+mePath, h.handleMe)
+		mux.Handle("POST "+authLogoutPath, wrap(http.HandlerFunc(h.handleLogout)))
+		mux.Handle("GET "+mePath, wrap(http.HandlerFunc(h.handleMe)))
 	}
 }
 

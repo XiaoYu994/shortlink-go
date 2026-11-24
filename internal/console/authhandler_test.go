@@ -19,6 +19,7 @@ import (
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/fakegithub"
 	"shortlink/internal/identity/fakeoidc"
+	"shortlink/internal/identity/oauth"
 	"shortlink/internal/memorystore"
 )
 
@@ -101,7 +102,7 @@ func newOIDCTestServerWithRegistry(t *testing.T, redirectURL string, sessions Se
 		clientSecret = "shortlink-console-secret"
 	)
 	fake := fakeoidc.Start(t, clientID, clientSecret)
-	provider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+	provider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 		Issuer:       fake.URL(),
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -138,7 +139,7 @@ func newGitHubTestServerWithRegistry(t *testing.T, redirectURL string, sessions 
 		clientSecret = "gh-console-secret"
 	)
 	fake := fakegithub.Start(t, clientID, clientSecret)
-	provider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+	provider, err := oauth.NewGitHubProvider(oauth.GitHubConfig{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		RedirectURL:  redirectURL,
@@ -170,7 +171,7 @@ func newDualAuthTestServer(t *testing.T, sessions SessionStore) (*Server, *fakeo
 	// 故意让两个提供方共用同一把 clientSecret，验证流程 Cookie 仍靠 purpose 前缀做域隔离。
 	const sharedSecret = "shared-console-secret"
 	fakeOIDC := fakeoidc.Start(t, "shortlink-console", sharedSecret)
-	oidcProvider, err := identity.NewOIDCProvider(context.Background(), identity.OIDCConfig{
+	oidcProvider, err := oauth.NewOIDCProvider(context.Background(), oauth.OIDCConfig{
 		Issuer:       fakeOIDC.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: sharedSecret,
@@ -181,7 +182,7 @@ func newDualAuthTestServer(t *testing.T, sessions SessionStore) (*Server, *fakeo
 		t.Fatalf("NewOIDCProvider: %v", err)
 	}
 	fakeGH := fakegithub.Start(t, "gh-console", sharedSecret)
-	ghProvider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+	ghProvider, err := oauth.NewGitHubProvider(oauth.GitHubConfig{
 		ClientID:     "gh-console",
 		ClientSecret: sharedSecret,
 		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",

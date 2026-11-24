@@ -81,3 +81,52 @@ func CanRemoveMember(actorRole, targetRole Role) bool {
 	}
 	return actorRole == RoleOwner || targetRole != RoleOwner
 }
+
+/*
+MemberScope 描述在单次成员变更事务中锁定并读取到的执行者、目标成员及当前 owner 数量快照。
+校验逻辑放在领域层，确保“无组织权限、禁止越权、目标不存在、禁止移除/降级最后一名 owner”
+四条不变量与存储实现解耦（ADR 0024）。
+*/
+type MemberScope struct {
+	ActorFound  bool
+	ActorRole   Role
+	TargetFound bool
+	TargetRole  Role
+	OwnerCount  int
+}
+
+// CanUpdateRole 校验执行者是否允许把目标成员角色更新为 newRole。
+func (s MemberScope) CanUpdateRole(newRole Role) error {
+	switch {
+	case !s.ActorFound:
+		return ErrOrgNotFound
+	case !CanAssignMemberRole(s.ActorRole, newRole):
+		return ErrMemberForbidden
+	case !s.TargetFound:
+		return ErrMemberNotFound
+	case !CanManageMemberRole(s.ActorRole, s.TargetRole, newRole):
+		return ErrMemberForbidden
+	case s.TargetRole == RoleOwner && newRole != RoleOwner && s.OwnerCount <= 1:
+		return ErrLastOwner
+	default:
+		return nil
+	}
+}
+
+// CanRemove 校验执行者是否允许把目标成员移出组织。
+func (s MemberScope) CanRemove() error {
+	switch {
+	case !s.ActorFound:
+		return ErrOrgNotFound
+	case !CanManageMembers(s.ActorRole):
+		return ErrMemberForbidden
+	case !s.TargetFound:
+		return ErrMemberNotFound
+	case !CanRemoveMember(s.ActorRole, s.TargetRole):
+		return ErrMemberForbidden
+	case s.TargetRole == RoleOwner && s.OwnerCount <= 1:
+		return ErrLastOwner
+	default:
+		return nil
+	}
+}

@@ -1,12 +1,11 @@
-package identity
+// Package oauth 封装管理进程使用的外部 OIDC 与 GitHub OAuth 2.0 适配器，将第三方依赖从 identity 领域包中隔离（ADR 0024）。
+package oauth
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,22 +17,11 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"shortlink/internal/identity"
 	"shortlink/internal/logx"
 )
 
-const (
-	defaultProviderHTTPTimeout = 10 * time.Second
-	flowRandomBytes            = 32
-)
-
-var (
-	// ErrAuthFailed 表示授权码兑换被拒绝、访问令牌无效、或 ID Token 校验/身份声明非法。
-	ErrAuthFailed = errors.New("authentication failed")
-	// ErrProviderUnavailable 表示身份提供方不可达、返回 5xx 或客户端凭据配置异常。
-	ErrProviderUnavailable = errors.New("identity provider unavailable")
-	// ErrNonceMismatch 表示 ID Token 里的 nonce 与登录流程 Cookie 中的值不一致。
-	ErrNonceMismatch = errors.New("oidc nonce mismatch")
-)
+const defaultProviderHTTPTimeout = 10 * time.Second
 
 // OIDCConfig 是构造 OIDCProvider 所需的参数。
 type OIDCConfig struct {
@@ -58,62 +46,6 @@ func (c OIDCConfig) LogValue() slog.Value {
 // String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 ClientSecret。
 func (c OIDCConfig) String() string {
 	return c.LogValue().String()
-}
-
-// OAuthFlow 保存纯 OAuth 2.0 授权码登录生成的随机 state 和 PKCE code_verifier（没有 ID Token，所以不需要 nonce）。
-type OAuthFlow struct {
-	State        string
-	CodeVerifier string
-}
-
-// OIDCFlow 保存单次 OIDC 授权码登录生成的三个随机值，由 HTTP 层写入短期 HttpOnly Cookie。
-type OIDCFlow struct {
-	State        string
-	CodeVerifier string
-	Nonce        string
-}
-
-/*
-NewOAuthFlow 生成纯 OAuth 2.0 授权码流程所需的随机 state 和 PKCE code_verifier。
-state 取 32 字节随机数做 base64url 编码；code_verifier 使用 oauth2.GenerateVerifier。
-*/
-func NewOAuthFlow() (OAuthFlow, error) {
-	state, err := randomURLToken(flowRandomBytes)
-	if err != nil {
-		return OAuthFlow{}, fmt.Errorf("generate oauth state: %w", err)
-	}
-	return OAuthFlow{
-		State:        state,
-		CodeVerifier: oauth2.GenerateVerifier(),
-	}, nil
-}
-
-/*
-NewOIDCFlow 生成单次授权码流程所需的随机 state、PKCE code_verifier 和 nonce。
-state 和 nonce 取 32 字节随机数做 base64url 编码；code_verifier 使用 oauth2.GenerateVerifier。
-*/
-func NewOIDCFlow() (OIDCFlow, error) {
-	oauthFlow, err := NewOAuthFlow()
-	if err != nil {
-		return OIDCFlow{}, err
-	}
-	nonce, err := randomURLToken(flowRandomBytes)
-	if err != nil {
-		return OIDCFlow{}, fmt.Errorf("generate oidc nonce: %w", err)
-	}
-	return OIDCFlow{
-		State:        oauthFlow.State,
-		CodeVerifier: oauthFlow.CodeVerifier,
-		Nonce:        nonce,
-	}, nil
-}
-
-func randomURLToken(nBytes int) (string, error) {
-	buf := make([]byte, nBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 /*
@@ -238,30 +170,30 @@ ExchangeAndVerify 用授权码和 PKCE code_verifier 向令牌端点换取令牌
 再校验 ID Token 的签名、iss、aud、exp 和 expectedNonce，返回规范化后的 ExternalIdentity。
 ID Token 只在这里消费一次，不持久化（ADR 0018）。
 */
-func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (ExternalIdentity, error) {
+func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (identity.ExternalIdentity, error) {
 	if code == "" || codeVerifier == "" || expectedNonce == "" {
-		return ExternalIdentity{}, fmt.Errorf("%w: code, code_verifier, and nonce are required", ErrAuthFailed)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: code, code_verifier, and nonce are required", identity.ErrAuthFailed)
 	}
 
 	callCtx := oidc.ClientContext(ctx, p.httpClient)
 	token, err := p.oauth.Exchange(callCtx, code, oauth2.VerifierOption(codeVerifier))
 	if err != nil {
-		return ExternalIdentity{}, classifyExchangeError(ctx, err)
+		return identity.ExternalIdentity{}, classifyExchangeError(ctx, err)
 	}
 
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		return ExternalIdentity{}, fmt.Errorf("%w: missing id_token", ErrAuthFailed)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: missing id_token", identity.ErrAuthFailed)
 	}
 
 	idToken, err := p.verifier.Verify(callCtx, rawIDToken)
 	if err != nil {
-		return ExternalIdentity{}, classifyVerifyError(ctx, err)
+		return identity.ExternalIdentity{}, classifyVerifyError(ctx, err)
 	}
 
 	// go-oidc 只把 nonce 解析到 IDToken.Nonce，不自动比对，这里显式做常量时间比较。
 	if idToken.Nonce == "" || subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(expectedNonce)) != 1 {
-		return ExternalIdentity{}, fmt.Errorf("%w: %w", ErrAuthFailed, ErrNonceMismatch)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: %w", identity.ErrAuthFailed, identity.ErrNonceMismatch)
 	}
 
 	var claims struct {
@@ -270,10 +202,10 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 		Name          string `json:"name"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
-		return ExternalIdentity{}, fmt.Errorf("%w: decode id token claims: %w", ErrAuthFailed, err)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: decode id token claims: %w", identity.ErrAuthFailed, err)
 	}
 
-	id, err := (ExternalIdentity{
+	id, err := (identity.ExternalIdentity{
 		Issuer:        idToken.Issuer,
 		Subject:       idToken.Subject,
 		Email:         claims.Email,
@@ -281,7 +213,7 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 		Name:          claims.Name,
 	}).Normalize()
 	if err != nil {
-		return ExternalIdentity{}, fmt.Errorf("%w: %w", ErrAuthFailed, err)
+		return identity.ExternalIdentity{}, fmt.Errorf("%w: %w", identity.ErrAuthFailed, err)
 	}
 	return id, nil
 }
@@ -299,12 +231,12 @@ func classifyExchangeError(ctx context.Context, err error) error {
 	if retrieveErr, ok := errors.AsType[*oauth2.RetrieveError](err); ok && retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusBadRequest {
 		switch retrieveErr.ErrorCode {
 		case "server_error", "temporarily_unavailable":
-			return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
+			return fmt.Errorf("%w: %w", identity.ErrProviderUnavailable, err)
 		default:
-			return fmt.Errorf("%w: %w", ErrAuthFailed, err)
+			return fmt.Errorf("%w: %w", identity.ErrAuthFailed, err)
 		}
 	}
-	return fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
+	return fmt.Errorf("%w: %w", identity.ErrProviderUnavailable, err)
 }
 
 /*
@@ -317,7 +249,7 @@ func classifyVerifyError(ctx context.Context, err error) error {
 		return fmt.Errorf("verify id token: %w", ctx.Err())
 	}
 	if strings.Contains(err.Error(), "fetching keys") {
-		return fmt.Errorf("%w: verify id token: %w", ErrProviderUnavailable, err)
+		return fmt.Errorf("%w: verify id token: %w", identity.ErrProviderUnavailable, err)
 	}
-	return fmt.Errorf("%w: verify id token: %w", ErrAuthFailed, err)
+	return fmt.Errorf("%w: verify id token: %w", identity.ErrAuthFailed, err)
 }
