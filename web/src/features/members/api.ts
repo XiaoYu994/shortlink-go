@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authKeys, type Role } from '@/features/auth/api';
 import { apiRequest } from '@/lib/api-client';
+import { ENDPOINTS } from '@/lib/endpoints';
 
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
 
@@ -29,13 +30,14 @@ export const memberKeys = {
   invitations: (orgId: number) => ['orgs', orgId, 'invitations'] as const,
 };
 
-export function useMembers(orgId: number) {
+export function useMembers(orgId: number, enabled = true) {
   return useQuery({
     queryKey: memberKeys.members(orgId),
     queryFn: async ({ signal }) => {
-      const res = await apiRequest<{ items: Member[] }>('/api/v1/members', { orgId, signal });
+      const res = await apiRequest<{ items: Member[] }>(ENDPOINTS.members.list, { orgId, signal });
       return res.items;
     },
+    enabled,
   });
 }
 
@@ -43,7 +45,7 @@ export function useUpdateMemberRole(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ userId, role }: { userId: number; role: Role }) =>
-      apiRequest<Member>(`/api/v1/members/${userId}`, {
+      apiRequest<Member>(ENDPOINTS.members.detail(userId), {
         method: 'PATCH',
         orgId,
         body: { role },
@@ -60,7 +62,7 @@ export function useRemoveMember(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (userId: number) =>
-      apiRequest<void>(`/api/v1/members/${userId}`, {
+      apiRequest<void>(ENDPOINTS.members.detail(userId), {
         method: 'DELETE',
         orgId,
       }),
@@ -75,7 +77,7 @@ export function useInvitations(orgId: number) {
   return useQuery({
     queryKey: memberKeys.invitations(orgId),
     queryFn: async ({ signal }) => {
-      const res = await apiRequest<{ items: Invitation[] }>('/api/v1/invitations', {
+      const res = await apiRequest<{ items: Invitation[] }>(ENDPOINTS.invitations.listCreate, {
         orgId,
         signal,
       });
@@ -88,7 +90,7 @@ export function useCreateInvitation(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: { email: string; role: Role; expires_at?: string }) =>
-      apiRequest<Invitation>('/api/v1/invitations', {
+      apiRequest<Invitation>(ENDPOINTS.invitations.listCreate, {
         method: 'POST',
         orgId,
         body: payload,
@@ -103,7 +105,7 @@ export function useRevokeInvitation(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) =>
-      apiRequest<void>(`/api/v1/invitations/${id}`, {
+      apiRequest<void>(ENDPOINTS.invitations.detail(id), {
         method: 'DELETE',
         orgId,
       }),

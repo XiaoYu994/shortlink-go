@@ -57,6 +57,15 @@ export function localDatetimeToISO(value: string): string | undefined {
   return d.toISOString();
 }
 
+// 将 RFC3339 UTC 时间回显为 <input type="datetime-local"> 接受的本地 YYYY-MM-DDTHH:mm 格式。
+export function isoToLocalDatetime(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);

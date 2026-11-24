@@ -4,13 +4,14 @@ import {
   ChevronsUpDown,
   KeyRound,
   Link2,
+  Lock,
   LogOut,
   Menu,
   Plus,
   Users,
   X,
 } from 'lucide-react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { NavLink, Outlet, useMatch, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { MonogramAvatar } from '@/components/MonogramAvatar';
 import { Badge } from '@/components/ui/badge';
@@ -24,36 +25,40 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useLogout } from '@/features/auth/api';
-import { ROLE_LABELS } from '@/features/auth/permissions';
+import { canManageAPIKeys, ROLE_LABELS } from '@/features/auth/permissions';
 import { setLastOrgId } from '@/features/orgs/api';
 import { CreateOrgDialog } from '@/features/orgs/CreateOrgDialog';
 import { cn } from '@/lib/cn';
+import { formatNumber } from '@/lib/format';
 import { useCurrentOrg } from './org-context';
+import { type OrgSection, ROUTE_PATTERNS, routes } from './routes';
 
-/*
-  Linear / Dub.co 风格的 Inset Sidebar Shell（内嵌工作台壳层）：
-  左侧 248px 极浅灰导轨承载组织切换与导航，右侧纯白圆角主画布自带呼吸感与细微边界。
-*/
 export function ConsoleLayout() {
   const { user, org, organizations } = useCurrentOrg();
   const navigate = useNavigate();
-  const location = useLocation();
+  const isMembersRoute = Boolean(useMatch(ROUTE_PATTERNS.orgMembers));
+  const isAPIKeysRoute = Boolean(useMatch(ROUTE_PATTERNS.orgAPIKeys));
   const logout = useLogout();
   const [createOrgOpen, setCreateOrgOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  const keysLocked = !canManageAPIKeys(org.role);
   const navItems = [
-    { to: `/orgs/${org.id}/links`, label: '短链管理', icon: Link2 },
-    { to: `/orgs/${org.id}/members`, label: '成员与邀请', icon: Users },
-    { to: `/orgs/${org.id}/api-keys`, label: 'API Keys', icon: KeyRound },
+    { to: routes.orgLinks(org.id), label: '短链管理', icon: Link2, locked: false },
+    { to: routes.orgMembers(org.id), label: '成员与邀请', icon: Users, locked: false },
+    { to: routes.orgAPIKeys(org.id), label: 'API Keys', icon: KeyRound, locked: keysLocked },
   ];
+
+  const quotaPct =
+    org.link_quota > 0 ? Math.min(100, Math.round((org.link_usage / org.link_quota) * 100)) : 100;
+  const quotaExceeded = org.link_quota === 0 || org.link_usage >= org.link_quota;
+  const quotaNearLimit = !quotaExceeded && quotaPct >= 80;
 
   function handleSwitchOrg(nextOrgId: number) {
     if (nextOrgId === org.id) return;
     setLastOrgId(nextOrgId);
-    const section = location.pathname.split('/')[3];
-    const targetSection = section === 'members' || section === 'api-keys' ? section : 'links';
-    navigate(`/orgs/${nextOrgId}/${targetSection}`);
+    const section: OrgSection = isMembersRoute ? 'members' : isAPIKeysRoute ? 'api-keys' : 'links';
+    navigate(routes.orgSection(nextOrgId, section));
     setMobileMenuOpen(false);
   }
 
@@ -62,7 +67,7 @@ export function ConsoleLayout() {
       await logout.mutateAsync();
       toast.success('已退出登录');
     } finally {
-      navigate('/login', { replace: true });
+      navigate(routes.login(), { replace: true });
     }
   }
 
@@ -90,7 +95,7 @@ export function ConsoleLayout() {
         </button>
       </div>
 
-      {/* 组织切换器（下拉菜单） */}
+      {/* 组织切换器 */}
       <div className="px-3 pb-3">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -117,7 +122,12 @@ export function ConsoleLayout() {
                 className="justify-between gap-2 py-2"
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <MonogramAvatar seed={`org-${item.id}-${item.name}`} label={item.name} size="sm" className="size-6 text-[11px]" />
+                  <MonogramAvatar
+                    seed={`org-${item.id}-${item.name}`}
+                    label={item.name}
+                    size="sm"
+                    className="size-6 text-[11px]"
+                  />
                   <span className="truncate font-medium">{item.name}</span>
                 </span>
                 <span className="flex shrink-0 items-center gap-1.5">
@@ -149,7 +159,7 @@ export function ConsoleLayout() {
               onClick={() => setMobileMenuOpen(false)}
               className={({ isActive }) =>
                 cn(
-                  'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-all',
+                  'group flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all',
                   isActive
                     ? 'bg-white text-zinc-950 shadow-[0_1px_2px_rgba(0,0,0,0.05)] ring-1 ring-zinc-200/80'
                     : 'text-zinc-600 hover:bg-zinc-200/50 hover:text-zinc-950',
@@ -158,13 +168,18 @@ export function ConsoleLayout() {
             >
               {({ isActive }) => (
                 <>
-                  <Icon
-                    className={cn(
-                      'size-4 shrink-0 transition-colors',
-                      isActive ? 'text-brand' : 'text-zinc-400 group-hover:text-zinc-700',
-                    )}
-                  />
-                  {item.label}
+                  <span className="flex items-center gap-2.5">
+                    <Icon
+                      className={cn(
+                        'size-4 shrink-0 transition-colors',
+                        isActive ? 'text-brand' : 'text-zinc-400 group-hover:text-zinc-700',
+                      )}
+                    />
+                    {item.label}
+                  </span>
+                  {item.locked && (
+                    <Lock aria-label="仅管理员可操作" className="size-3.5 shrink-0 text-zinc-400" />
+                  )}
                 </>
               )}
             </NavLink>
@@ -172,8 +187,41 @@ export function ConsoleLayout() {
         })}
       </nav>
 
+      {/* 月度短链配额卡片：透明展示本月用量，不再等撞墙报错才发现 */}
+      <div className="px-3 pb-2">
+        <div className="rounded-xl border border-zinc-200/80 bg-white/80 p-3">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-zinc-700">本月创建配额</span>
+            <span
+              className={cn(
+                'font-mono tabular-nums font-medium',
+                quotaExceeded
+                  ? 'text-red-600'
+                  : quotaNearLimit
+                    ? 'text-amber-700'
+                    : 'text-zinc-600',
+              )}
+            >
+              {formatNumber(org.link_usage)} / {formatNumber(org.link_quota)}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-200/80">
+            <div
+              className={cn(
+                'h-full rounded-full transition-all',
+                quotaExceeded ? 'bg-red-500' : quotaNearLimit ? 'bg-amber-500' : 'bg-brand',
+              )}
+              style={{ width: `${quotaPct}%` }}
+            />
+          </div>
+          <p className="mt-1.5 text-[11px] text-zinc-400">
+            {quotaExceeded ? '本月配额已用完，下月 1 日自动重置' : '按每月创建条数计算，删除不返还'}
+          </p>
+        </div>
+      </div>
+
       {/* 底部当前登录账号 */}
-      <div className="p-3">
+      <div className="p-3 pt-1">
         <div className="flex items-center gap-2.5 rounded-xl border border-zinc-200/70 bg-white/70 px-2.5 py-2">
           <MonogramAvatar
             seed={user.email || `user-${user.id}`}
@@ -204,12 +252,10 @@ export function ConsoleLayout() {
 
   return (
     <div className="flex min-h-screen bg-background">
-      {/* 桌面端极简左侧导轨 */}
       <aside className="hidden w-64 shrink-0 lg:block">
         <div className="sticky top-0 h-screen">{sidebarContent}</div>
       </aside>
 
-      {/* 移动端侧边抽屉 */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           <div
@@ -222,7 +268,6 @@ export function ConsoleLayout() {
         </div>
       )}
 
-      {/* 右侧内嵌纯白主工作区 */}
       <div className="flex min-w-0 flex-1 flex-col lg:py-2.5 lg:pr-2.5">
         <header className="flex h-14 items-center justify-between border-b border-zinc-200/80 bg-white px-4 lg:hidden">
           <button
@@ -248,7 +293,7 @@ export function ConsoleLayout() {
         open={createOrgOpen}
         onOpenChange={setCreateOrgOpen}
         onCreated={(created) => {
-          navigate(`/orgs/${created.id}/links`);
+          navigate(routes.orgLinks(created.id));
         }}
       />
     </div>

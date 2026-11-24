@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/api-client';
+import { ENDPOINTS } from '@/lib/endpoints';
 
 export type Role = 'owner' | 'admin' | 'member' | 'viewer';
 
 export interface AuthProviders {
   oidc: boolean;
   github: boolean;
+  public_base_url?: string;
 }
 
 export interface UserSummary {
@@ -18,6 +20,8 @@ export interface OrgMembership {
   id: number;
   name: string;
   role: Role;
+  link_usage: number;
+  link_quota: number;
 }
 
 export interface MeResponse {
@@ -26,22 +30,30 @@ export interface MeResponse {
   organizations: OrgMembership[];
 }
 
-// Query Key 工厂：类似后端 Redis key 前缀，统一管理缓存失效范围。
 export const authKeys = {
   providers: ['auth', 'providers'] as const,
   me: ['auth', 'me'] as const,
 };
 
 export function fetchProviders(signal?: AbortSignal): Promise<AuthProviders> {
-  return apiRequest<AuthProviders>('/api/v1/auth/providers', { signal });
+  return apiRequest<AuthProviders>(ENDPOINTS.auth.providers, {
+    signal,
+    skipAuthRedirect: true,
+  });
 }
 
 export function fetchMe(signal?: AbortSignal): Promise<MeResponse> {
-  return apiRequest<MeResponse>('/api/v1/me', { signal });
+  return apiRequest<MeResponse>(ENDPOINTS.auth.me, {
+    signal,
+    skipAuthRedirect: true,
+  });
 }
 
 export function postLogout(): Promise<void> {
-  return apiRequest<void>('/api/v1/auth/logout', { method: 'POST' });
+  return apiRequest<void>(ENDPOINTS.auth.logout, {
+    method: 'POST',
+    skipAuthRedirect: true,
+  });
 }
 
 export function useAuthProviders() {
@@ -50,6 +62,12 @@ export function useAuthProviders() {
     queryFn: ({ signal }) => fetchProviders(signal),
     staleTime: 5 * 60_000,
   });
+}
+
+// 读取后端配置的公开短链跳转域名；未配置或加载中时返回 undefined（调用方自动回退当前 origin）。
+export function usePublicBaseUrl(): string | undefined {
+  const { data } = useAuthProviders();
+  return data?.public_base_url;
 }
 
 export function useMe() {
@@ -65,7 +83,6 @@ export function useLogout() {
   return useMutation({
     mutationFn: postLogout,
     onSettled: () => {
-      // 登出后清空全部服务端缓存，避免切换账号时短暂看到上一个用户的组织或短链。
       queryClient.clear();
     },
   });

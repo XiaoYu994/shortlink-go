@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { apiRequest } from '@/lib/api-client';
 import { authKeys, type MeResponse, type Role } from '@/features/auth/api';
+import { apiRequest } from '@/lib/api-client';
+import { DEFAULT_ORG_LINK_QUOTA } from '@/lib/constants';
+import { ENDPOINTS } from '@/lib/endpoints';
 
 export interface CreatedOrg {
   id: number;
@@ -35,7 +37,7 @@ export function setLastOrgId(id: number | null): void {
 }
 
 export function postCreateOrg(name: string): Promise<CreatedOrg> {
-  return apiRequest<CreatedOrg>('/api/v1/orgs', {
+  return apiRequest<CreatedOrg>(ENDPOINTS.orgs.listCreate, {
     method: 'POST',
     body: { name },
   });
@@ -48,8 +50,7 @@ export function useCreateOrg() {
     onSuccess: (created) => {
       /*
         先同步把新组织写入 authKeys.me 缓存，再触发后台 invalidate 校准。
-        这样随后立刻 navigate(`/orgs/${created.id}/links`) 时，路由守卫能瞬间认出新组织，
-        不会因为缓存仍是旧列表而被闪回旧组织。
+        这样随后立刻跳转到新组织页面时，路由守卫能瞬间认出新组织，不会闪回旧组织。
       */
       queryClient.setQueryData<MeResponse>(authKeys.me, (prev) => {
         if (!prev) return prev;
@@ -58,7 +59,13 @@ export function useCreateOrg() {
           ...prev,
           organizations: [
             ...prev.organizations,
-            { id: created.id, name: created.name, role: created.role },
+            {
+              id: created.id,
+              name: created.name,
+              role: created.role,
+              link_usage: 0,
+              link_quota: DEFAULT_ORG_LINK_QUOTA,
+            },
           ],
         };
       });

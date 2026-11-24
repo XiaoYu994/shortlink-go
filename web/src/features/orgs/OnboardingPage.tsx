@@ -2,15 +2,20 @@ import { type FormEvent, useState } from 'react';
 import { ArrowRight, Building2, LogOut } from 'lucide-react';
 import { Navigate, useNavigate } from 'react-router';
 import { toast } from 'sonner';
+import { routes } from '@/app/routes';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input, Label } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useLogout, useMe } from '@/features/auth/api';
 import { getErrorMessage } from '@/lib/api-client';
+import { MAX_ORG_NAME_BYTES } from '@/lib/constants';
+import { useDocumentTitle } from '@/lib/use-document-title';
 import { useCreateOrg } from './api';
 
 export function OnboardingPage() {
+  useDocumentTitle('初始化组织');
   const navigate = useNavigate();
   const meQuery = useMe();
   const createOrg = useCreateOrg();
@@ -27,11 +32,12 @@ export function OnboardingPage() {
   }
 
   if (meQuery.isError || !meQuery.data) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to={routes.login()} replace />;
   }
 
-  if (meQuery.data.organizations.length > 0) {
-    return <Navigate to={`/orgs/${meQuery.data.organizations[0].id}/links`} replace />;
+  const firstOrg = meQuery.data.organizations[0];
+  if (firstOrg) {
+    return <Navigate to={routes.orgLinks(firstOrg.id)} replace />;
   }
 
   async function handleSubmit(e: FormEvent) {
@@ -45,7 +51,7 @@ export function OnboardingPage() {
     try {
       const created = await createOrg.mutateAsync(trimmed);
       toast.success(`欢迎来到 ${created.name}`);
-      navigate(`/orgs/${created.id}/links`, { replace: true });
+      navigate(routes.orgLinks(created.id), { replace: true });
     } catch (err) {
       setFormError(getErrorMessage(err));
     }
@@ -53,7 +59,7 @@ export function OnboardingPage() {
 
   async function handleLogout() {
     await logout.mutateAsync();
-    navigate('/login', { replace: true });
+    navigate(routes.login(), { replace: true });
   }
 
   return (
@@ -90,18 +96,14 @@ export function OnboardingPage() {
                 <Input
                   id="first-org-name"
                   placeholder="例如：Acme Studio"
-                  maxLength={100}
+                  maxLength={MAX_ORG_NAME_BYTES}
                   autoFocus
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                 />
               </div>
-              {formError && (
-                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  {formError}
-                </div>
-              )}
+              {formError && <ErrorAlert compact message={formError} />}
               <Button type="submit" className="w-full" disabled={createOrg.isPending}>
                 {createOrg.isPending ? '创建中…' : '创建组织并进入工作台'}
                 <ArrowRight className="size-4" />

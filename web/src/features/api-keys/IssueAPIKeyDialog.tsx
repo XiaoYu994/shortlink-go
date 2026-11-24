@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from 'react';
 import { toast } from 'sonner';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -12,12 +13,7 @@ import {
 import { Input, Label } from '@/components/ui/input';
 import { getErrorMessage } from '@/lib/api-client';
 import { localDatetimeToISO } from '@/lib/format';
-import {
-  ALL_API_KEY_SCOPES,
-  type APIKeyScope,
-  type IssuedAPIKey,
-  useIssueAPIKey,
-} from './api';
+import { ALL_API_KEY_SCOPES, type APIKeyScope, type IssuedAPIKey, useIssueAPIKey } from './api';
 
 interface IssueAPIKeyDialogProps {
   orgId: number;
@@ -26,12 +22,7 @@ interface IssueAPIKeyDialogProps {
   onIssued: (issued: IssuedAPIKey) => void;
 }
 
-export function IssueAPIKeyDialog({
-  orgId,
-  open,
-  onOpenChange,
-  onIssued,
-}: IssueAPIKeyDialogProps) {
+export function IssueAPIKeyDialog({ orgId, open, onOpenChange, onIssued }: IssueAPIKeyDialogProps) {
   const [scopes, setScopes] = useState<APIKeyScope[]>(['links:read', 'links:write', 'stats:read']);
   const [expiresAt, setExpiresAt] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
@@ -87,10 +78,7 @@ export function IssueAPIKeyDialog({
             <Label>权限范围（Scopes）</Label>
             <div className="space-y-2 rounded-lg border border-border bg-slate-50/70 p-3">
               {ALL_API_KEY_SCOPES.map((item) => (
-                <label
-                  key={item.value}
-                  className="flex items-start gap-2.5 text-sm cursor-pointer"
-                >
+                <label key={item.value} className="flex items-start gap-2.5 text-sm cursor-pointer">
                   <input
                     type="checkbox"
                     className="mt-0.5 size-4 rounded border-input accent-primary"
@@ -118,11 +106,7 @@ export function IssueAPIKeyDialog({
             />
           </div>
 
-          {formError && (
-            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-              {formError}
-            </div>
-          )}
+          {formError && <ErrorAlert compact message={formError} />}
 
           <DialogFooter>
             <Button

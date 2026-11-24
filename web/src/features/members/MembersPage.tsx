@@ -2,8 +2,11 @@ import { useState } from 'react';
 import { Mail, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCurrentOrg } from '@/app/org-context';
+import { routes } from '@/app/routes';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { CopyButton } from '@/components/CopyButton';
 import { EmptyState } from '@/components/EmptyState';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { MonogramAvatar } from '@/components/MonogramAvatar';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
@@ -20,6 +23,7 @@ import {
 import { getErrorMessage } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
 import { formatDateTime, formatRelativeTime } from '@/lib/format';
+import { useDocumentTitle } from '@/lib/use-document-title';
 import {
   type Invitation,
   type InvitationStatus,
@@ -46,6 +50,8 @@ export function MembersPage() {
   const { user, org } = useCurrentOrg();
   const canManage = canManageMembers(org.role);
   const assignableRoles = assignableRolesFor(org.role);
+
+  useDocumentTitle(`成员与邀请 · ${org.name}`);
 
   const [section, setSection] = useState<'members' | 'invitations'>('members');
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -100,7 +106,7 @@ export function MembersPage() {
     <div className="space-y-6">
       <PageHeader
         title="成员与邀请"
-        description="角色调整和移出操作提交后立刻生效；组织最后一名 Owner 受数据库行锁保护。"
+        description="角色调整和移出成员会立即生效；为避免组织无人管理，系统至少会保留一位所有者。"
         actions={
           <>
             <Button
@@ -159,9 +165,7 @@ export function MembersPage() {
             <span
               className={cn(
                 'rounded-full px-2 py-0.5 font-mono text-[11px]',
-                pendingInvCount > 0
-                  ? 'bg-amber-100 text-amber-800'
-                  : 'bg-zinc-100 text-zinc-600',
+                pendingInvCount > 0 ? 'bg-amber-100 text-amber-800' : 'bg-zinc-100 text-zinc-600',
               )}
             >
               {invitationsQuery.data?.length ?? 0}
@@ -173,16 +177,18 @@ export function MembersPage() {
         </div>
 
         <span className="hidden pb-3 text-xs text-zinc-400 sm:inline">
-          你的当前角色：<strong className="font-medium text-zinc-700">{ROLE_LABELS[org.role]}</strong>
+          你的当前角色：
+          <strong className="font-medium text-zinc-700">{ROLE_LABELS[org.role]}</strong>
         </span>
       </div>
 
       {section === 'members' && (
         <div>
           {membersQuery.isError ? (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              加载成员失败：{getErrorMessage(membersQuery.error)}
-            </div>
+            <ErrorAlert
+              message={`加载成员失败：${getErrorMessage(membersQuery.error)}`}
+              onRetry={() => void membersQuery.refetch()}
+            />
           ) : membersQuery.isPending ? (
             <div className="space-y-2.5">
               <Skeleton className="h-16 w-full rounded-xl" />
@@ -215,7 +221,9 @@ export function MembersPage() {
                           )}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
-                          <span className="font-mono">{member.email || `ID #${member.user_id}`}</span>
+                          <span className="font-mono">
+                            {member.email || `ID #${member.user_id}`}
+                          </span>
                           <span className="text-zinc-300">·</span>
                           <span title={formatDateTime(member.joined_at)}>
                             加入于 {formatRelativeTime(member.joined_at)}
@@ -268,9 +276,10 @@ export function MembersPage() {
       {section === 'invitations' && (
         <div>
           {invitationsQuery.isError ? (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              加载邀请记录失败：{getErrorMessage(invitationsQuery.error)}
-            </div>
+            <ErrorAlert
+              message={`加载邀请记录失败：${getErrorMessage(invitationsQuery.error)}`}
+              onRetry={() => void invitationsQuery.refetch()}
+            />
           ) : invitationsQuery.isPending ? (
             <Skeleton className="h-16 w-full rounded-xl" />
           ) : invitationsQuery.data.length === 0 ? (
@@ -330,15 +339,25 @@ export function MembersPage() {
                       </div>
                     </div>
 
-                    {canRevoke && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 self-start text-destructive hover:bg-red-50 hover:text-destructive sm:self-center"
-                        onClick={() => setRevokingInv(inv)}
-                      >
-                        撤销邀请
-                      </Button>
+                    {inv.status === 'pending' && (
+                      <div className="flex items-center gap-2 self-start sm:self-center">
+                        <CopyButton
+                          value={`${window.location.origin}${routes.login()}`}
+                          variant="pill"
+                          label="复制登录入口"
+                          toastMessage="已复制控制台登录入口，可发给受邀同事"
+                        />
+                        {canRevoke && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 text-destructive hover:bg-red-50 hover:text-destructive"
+                            onClick={() => setRevokingInv(inv)}
+                          >
+                            撤销邀请
+                          </Button>
+                        )}
+                      </div>
                     )}
                   </div>
                 );

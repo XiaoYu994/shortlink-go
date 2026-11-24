@@ -6,20 +6,16 @@ import { LinksPage } from '@/features/links/LinksPage';
 import { MembersPage } from '@/features/members/MembersPage';
 import { OnboardingPage } from '@/features/orgs/OnboardingPage';
 import { OrgRouteGuard, RootRedirect } from './AuthGuard';
+import { ROUTE_PATTERNS, routes } from './routes';
 
-/*
-  AppRouter 声明前端全部 URL 路由。
-  搭配后端 internal/console/webhandler.go 的 SPA fallback，
-  直接刷新 /orgs/1/links 或 /orgs/1/links/AbC123xy 都会回到 index.html 并由这里接管渲染。
-*/
 export function AppRouter() {
   return (
     <Routes>
-      <Route path="/" element={<RootRedirect />} />
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/onboarding" element={<OnboardingPage />} />
+      <Route path={ROUTE_PATTERNS.root} element={<RootRedirect />} />
+      <Route path={ROUTE_PATTERNS.login} element={<LoginPage />} />
+      <Route path={ROUTE_PATTERNS.onboarding} element={<OnboardingPage />} />
 
-      <Route path="/orgs/:orgId" element={<OrgRouteGuard />}>
+      <Route path={ROUTE_PATTERNS.orgRoot} element={<OrgRouteGuard />}>
         <Route index element={<Navigate to="links" replace />} />
         <Route path="links" element={<LinksPage />} />
         <Route path="links/:code" element={<LinkStatsPage />} />
@@ -27,7 +23,7 @@ export function AppRouter() {
         <Route path="api-keys" element={<APIKeysPage />} />
       </Route>
 
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to={routes.root()} replace />} />
     </Routes>
   );
 }

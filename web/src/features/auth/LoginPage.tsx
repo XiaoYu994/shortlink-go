@@ -9,9 +9,12 @@ import {
   Zap,
 } from 'lucide-react';
 import { Navigate, useSearchParams } from 'react-router';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getErrorMessage } from '@/lib/api-client';
+import { ENDPOINTS } from '@/lib/endpoints';
+import { useDocumentTitle } from '@/lib/use-document-title';
 import { useAuthProviders, useMe } from './api';
 
 function sanitizeReturnTo(raw: string | null): string {
@@ -21,6 +24,7 @@ function sanitizeReturnTo(raw: string | null): string {
 }
 
 export function LoginPage() {
+  useDocumentTitle('登录');
   const [searchParams] = useSearchParams();
   const returnTo = sanitizeReturnTo(searchParams.get('return_to'));
 
@@ -33,7 +37,6 @@ export function LoginPage() {
 
   const providers = providersQuery.data;
   const hasAnyProvider = Boolean(providers && (providers.oidc || providers.github));
-  const encodedReturn = encodeURIComponent(returnTo);
 
   return (
     <div className="grid min-h-screen bg-white lg:grid-cols-2">
@@ -62,7 +65,8 @@ export function LoginPage() {
               短链管理控制台
             </h1>
             <p className="text-sm leading-relaxed text-zinc-500">
-              从组织隔离、按角色细粒度授权，到 Redis 写穿缓存与异步 URL 风控，一条短链背后的完整工程闭环。
+              从组织隔离、按角色细粒度授权，到 Redis 写穿缓存与异步 URL
+              风控，一条短链背后的完整工程闭环。
             </p>
           </div>
 
@@ -144,9 +148,7 @@ export function LoginPage() {
               <Link2 className="size-5" />
             </div>
             <h2 className="text-2xl font-semibold tracking-tight text-zinc-950">欢迎回来</h2>
-            <p className="mt-1 text-sm text-zinc-500">
-              选择已配置的身份提供方登录你的组织工作区
-            </p>
+            <p className="mt-1 text-sm text-zinc-500">选择已配置的身份提供方登录你的组织工作区</p>
           </div>
 
           <Card className="border-zinc-200/90 shadow-none">
@@ -165,9 +167,10 @@ export function LoginPage() {
               )}
 
               {providersQuery.isError && (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
-                  无法获取登录方式：{getErrorMessage(providersQuery.error)}
-                </div>
+                <ErrorAlert
+                  compact
+                  message={`无法获取登录方式：${getErrorMessage(providersQuery.error)}`}
+                />
               )}
 
               {providers && !hasAnyProvider && (
@@ -180,7 +183,7 @@ export function LoginPage() {
 
               {providers?.oidc && (
                 <a
-                  href={`/api/v1/auth/login?return_to=${encodedReturn}`}
+                  href={ENDPOINTS.auth.oidcLogin(returnTo)}
                   className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white shadow-xs transition-colors hover:bg-zinc-800"
                 >
                   <ShieldCheck className="size-4" />
@@ -190,7 +193,7 @@ export function LoginPage() {
 
               {providers?.github && (
                 <a
-                  href={`/api/v1/auth/github/login?return_to=${encodedReturn}`}
+                  href={ENDPOINTS.auth.githubLogin(returnTo)}
                   className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 text-sm font-medium text-zinc-900 shadow-2xs transition-colors hover:bg-zinc-50"
                 >
                   <Github className="size-4" />
@@ -201,8 +204,7 @@ export function LoginPage() {
           </Card>
 
           <p className="flex items-center justify-center gap-1.5 text-xs text-zinc-400 lg:justify-start">
-            <KeyRound className="size-3.5" />
-            同源 HttpOnly 会话 Cookie · 跨站写请求受 CrossOriginProtection 保护
+            <KeyRound className="size-3.5" />受 HttpOnly 会话与同源安全策略保护
           </p>
         </div>
       </div>

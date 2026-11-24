@@ -18,10 +18,7 @@ export function DialogOverlay({
 }: ComponentProps<typeof DialogPrimitive.Overlay>) {
   return (
     <DialogPrimitive.Overlay
-      className={cn(
-        'fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px]',
-        className,
-      )}
+      className={cn('fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px]', className)}
       {...props}
     />
   );
@@ -67,10 +64,7 @@ export function DialogFooter({ className, ...props }: ComponentProps<'div'>) {
   );
 }
 
-export function DialogTitle({
-  className,
-  ...props
-}: ComponentProps<typeof DialogPrimitive.Title>) {
+export function DialogTitle({ className, ...props }: ComponentProps<typeof DialogPrimitive.Title>) {
   return (
     <DialogPrimitive.Title
       className={cn('text-lg font-semibold leading-none tracking-tight', className)}

@@ -1,10 +1,11 @@
 import { useId, useState } from 'react';
 import { CopyButton } from '@/components/CopyButton';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import { cn } from '@/lib/cn';
 import { formatCompactNumber, formatNumber } from '@/lib/format';
 
 interface AreaTrendChartProps {
-  code: string;
+  shortUrl: string;
   clicks: Array<{ day: string; clicks: number }>;
   visitors: Array<{ day: string; visitors: number }>;
 }
@@ -25,19 +26,21 @@ interface Point {
   保证曲线永远不会向下越过 0 轴（常见三次样条容易出现负数下冲）。
 */
 function buildSmoothLinePath(points: Point[]): string {
-  if (points.length === 0) return '';
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
-  let d = `M ${points[0].x} ${points[0].y}`;
+  const first = points[0];
+  if (!first) return '';
+  if (points.length === 1) return `M ${first.x} ${first.y}`;
+  let d = `M ${first.x} ${first.y}`;
   for (let i = 1; i < points.length; i++) {
     const prev = points[i - 1];
     const curr = points[i];
+    if (!prev || !curr) continue;
     const midX = (prev.x + curr.x) / 2;
     d += ` C ${midX} ${prev.y}, ${midX} ${curr.y}, ${curr.x} ${curr.y}`;
   }
   return d;
 }
 
-export function AreaTrendChart({ code, clicks, visitors }: AreaTrendChartProps) {
+export function AreaTrendChart({ shortUrl, clicks, visitors }: AreaTrendChartProps) {
   const gradientId = useId();
   const [metric, setMetric] = useState<MetricKey>('clicks');
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
@@ -67,18 +70,18 @@ export function AreaTrendChart({ code, clicks, visitors }: AreaTrendChartProps) 
 
   const points: Point[] = series.map((item, i) => {
     const x =
-      series.length <= 1
-        ? padLeft + plotW / 2
-        : padLeft + (i / (series.length - 1)) * plotW;
+      series.length <= 1 ? padLeft + plotW / 2 : padLeft + (i / (series.length - 1)) * plotW;
     const y = padTop + plotH - (item.value / yCeiling) * plotH;
     return { ...item, x, y };
   });
 
   const linePath = buildSmoothLinePath(points);
   const baseY = padTop + plotH;
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
   const areaPath =
-    points.length > 0
-      ? `${linePath} L ${points[points.length - 1].x} ${baseY} L ${points[0].x} ${baseY} Z`
+    firstPoint && lastPoint
+      ? `${linePath} L ${lastPoint.x} ${baseY} L ${firstPoint.x} ${baseY} Z`
       : '';
 
   const yTicks = [0, 0.33, 0.66, 1].map((ratio) => ({
@@ -88,9 +91,8 @@ export function AreaTrendChart({ code, clicks, visitors }: AreaTrendChartProps) 
 
   // 日期标签最多展示 7 个，防止 30 天模式下横轴拥挤重叠。
   const xStep = Math.max(1, Math.ceil(points.length / 7));
-  const hovered = hoveredIdx !== null ? points[hoveredIdx] ?? null : null;
+  const hovered = hoveredIdx !== null ? (points[hoveredIdx] ?? null) : null;
   const strokeColor = metric === 'clicks' ? '#4f46e5' : '#059669';
-  const fullShortUrl = `${window.location.origin}/r/${code}`;
 
   return (
     <div className="space-y-4">
@@ -102,35 +104,20 @@ export function AreaTrendChart({ code, clicks, visitors }: AreaTrendChartProps) 
               metric === 'clicks' ? 'bg-indigo-600' : 'bg-emerald-600',
             )}
           />
-          {metric === 'clicks' ? '按 UTC 日聚合的点击趋势' : '按 UTC 日去重的独立访客趋势'}
+          {metric === 'clicks'
+            ? '每日点击趋势（按世界标准时 UTC 分日）'
+            : '每日去重访客趋势（按世界标准时 UTC 分日）'}
         </div>
 
-        <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 text-xs">
-          <button
-            type="button"
-            onClick={() => setMetric('clicks')}
-            className={cn(
-              'rounded-md px-2.5 py-1 font-medium transition-all cursor-pointer',
-              metric === 'clicks'
-                ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-200/80'
-                : 'text-zinc-500 hover:text-zinc-900',
-            )}
-          >
-            点击次数
-          </button>
-          <button
-            type="button"
-            onClick={() => setMetric('visitors')}
-            className={cn(
-              'rounded-md px-2.5 py-1 font-medium transition-all cursor-pointer',
-              metric === 'visitors'
-                ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-200/80'
-                : 'text-zinc-500 hover:text-zinc-900',
-            )}
-          >
-            独立访客 (UV)
-          </button>
-        </div>
+        <SegmentedControl<MetricKey>
+          ariaLabel="切换趋势指标"
+          value={metric}
+          onChange={setMetric}
+          options={[
+            { value: 'clicks', label: '点击次数' },
+            { value: 'visitors', label: '独立访客 (UV)' },
+          ]}
+        />
       </div>
 
       <div className="relative">
@@ -264,14 +251,16 @@ export function AreaTrendChart({ code, clicks, visitors }: AreaTrendChartProps) 
         {!hasAnyTraffic && (
           <div className="absolute inset-0 flex flex-col items-center justify-center rounded-lg bg-white/75 backdrop-blur-[1px]">
             <p className="text-sm font-medium text-zinc-700">该时间范围内暂无点击记录</p>
-            <p className="mt-1 text-xs text-zinc-500">复制并访问一次短链，约 1 秒后即可看到趋势。</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              复制并访问一次短链，约 1 秒后即可看到趋势。
+            </p>
             <div className="mt-3">
               <CopyButton
-                value={fullShortUrl}
+                value={shortUrl}
                 variant="pill"
                 size="sm"
                 label="复制短链测试"
-                toastMessage={`已复制 ${fullShortUrl}`}
+                toastMessage={`已复制 ${shortUrl}`}
               />
             </div>
           </div>

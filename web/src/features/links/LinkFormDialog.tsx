@@ -1,5 +1,9 @@
 import { type FormEvent, useState } from 'react';
+import { CheckCircle2, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
+import { CopyButton } from '@/components/CopyButton';
+import { ErrorAlert } from '@/components/ErrorAlert';
+import { QRCodeCard } from '@/components/QRCodeCard';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -10,8 +14,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input, Label } from '@/components/ui/input';
+import { usePublicBaseUrl } from '@/features/auth/api';
 import { getErrorMessage } from '@/lib/api-client';
-import { localDatetimeToISO } from '@/lib/format';
+import { isoToLocalDatetime, localDatetimeToISO } from '@/lib/format';
+import { buildShortUrl } from '@/lib/short-url';
 import { type AdminLink, useCreateLink, useUpdateLink } from './api';
 
 interface LinkFormDialogProps {
@@ -22,25 +28,22 @@ interface LinkFormDialogProps {
 }
 
 /*
-  为什么把表单拆成内部组件并通过 key 挂载：
-  React 中推荐用 key 重置表单初始值，而不是在 useEffect 里调用 setState 同步 props。
-  这样逻辑更纯粹，也天然避免旧弹窗输入状态泄漏到下一次打开。
+  用 key 挂载内部表单（而不是在 useEffect 里 setState 同步 props），
+  保证每次打开弹窗都有干净初始值。新建成功后直接切换到「生成成功态」，
+  让用户零跳转完成复制短链与保存二维码。
 */
-export function LinkFormDialog({
-  orgId,
-  open,
-  onOpenChange,
-  editingLink,
-}: LinkFormDialogProps) {
+export function LinkFormDialog({ orgId, open, onOpenChange, editingLink }: LinkFormDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <LinkFormInner
-          key={editingLink ? `edit-${editingLink.code}` : 'create-new'}
-          orgId={orgId}
-          editingLink={editingLink ?? null}
-          onClose={() => onOpenChange(false)}
-        />
+        {open && (
+          <LinkFormInner
+            key={editingLink ? `edit-${editingLink.code}` : 'create-new'}
+            orgId={orgId}
+            editingLink={editingLink ?? null}
+            onClose={() => onOpenChange(false)}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -54,10 +57,14 @@ interface LinkFormInnerProps {
 
 function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
   const isEdit = editingLink !== null;
+  const initialExpires = isoToLocalDatetime(editingLink?.expires_at);
+  const publicBaseUrl = usePublicBaseUrl();
+
   const [url, setUrl] = useState(editingLink?.url ?? '');
-  const [expiresAt, setExpiresAt] = useState('');
+  const [expiresAt, setExpiresAt] = useState(initialExpires);
   const [clearExpires, setClearExpires] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [createdLink, setCreatedLink] = useState<AdminLink | null>(null);
 
   const createLink = useCreateLink(orgId);
   const updateLink = useUpdateLink(orgId);
@@ -67,7 +74,7 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
     e.preventDefault();
     const trimmedUrl = url.trim();
     if (!trimmedUrl) {
-      setFormError('请输入有效的 http/https 目标地址');
+      setFormError('请输入有效的 http 或 https 目标地址');
       return;
     }
     setFormError(null);
@@ -77,7 +84,8 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
         const payload: { url?: string; expires_at?: string | null } = { url: trimmedUrl };
         if (clearExpires) {
           payload.expires_at = null;
-        } else if (expiresAt.trim()) {
+        } else if (expiresAt.trim() && expiresAt !== initialExpires) {
+          // 仅在用户主动改动过过期时间时提交，避免编辑已过期链接的 URL 时把旧的过去时间重新发回后端。
           const iso = localDatetimeToISO(expiresAt);
           if (!iso) {
             setFormError('过期时间格式无效');
@@ -87,6 +95,7 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
         }
         await updateLink.mutateAsync({ code: editingLink.code, payload });
         toast.success(`已更新短链 /r/${editingLink.code}`);
+        onClose();
       } else {
         const iso = localDatetimeToISO(expiresAt);
         const created = await createLink.mutateAsync({
@@ -94,11 +103,67 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
           ...(iso ? { expires_at: iso } : {}),
         });
         toast.success(`已生成短链 /r/${created.code}`);
+        setCreatedLink(created);
       }
-      onClose();
     } catch (err) {
       setFormError(getErrorMessage(err));
     }
+  }
+
+  function handleCreateAnother() {
+    setCreatedLink(null);
+    setUrl('');
+    setExpiresAt('');
+    setClearExpires(false);
+    setFormError(null);
+  }
+
+  if (createdLink) {
+    const shortUrl = buildShortUrl(createdLink.code, publicBaseUrl);
+    return (
+      <>
+        <DialogHeader>
+          <div className="flex items-center gap-2 text-emerald-700">
+            <CheckCircle2 className="size-5" />
+            <DialogTitle>短链已生成</DialogTitle>
+          </div>
+          <DialogDescription>
+            短链已生效，你可以立即复制链接或保存二维码用于分享。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
+            <a
+              href={shortUrl}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="created-short-url"
+              className="min-w-0 flex-1 truncate font-mono text-sm font-semibold text-brand hover:underline"
+            >
+              {shortUrl}
+            </a>
+            <ExternalLink className="size-3.5 shrink-0 text-zinc-400" />
+            <CopyButton
+              value={shortUrl}
+              variant="pill"
+              size="sm"
+              label="复制短链"
+              toastMessage={`已复制 ${shortUrl}`}
+            />
+          </div>
+
+          <QRCodeCard url={shortUrl} code={createdLink.code} />
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={handleCreateAnother}>
+            继续创建下一条
+          </Button>
+          <Button onClick={onClose}>完成</Button>
+        </DialogFooter>
+      </>
+    );
   }
 
   return (
@@ -107,8 +172,8 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
         <DialogTitle>{isEdit ? `编辑短链 /r/${editingLink.code}` : '创建短链'}</DialogTitle>
         <DialogDescription>
           {isEdit
-            ? '修改目标 URL 后会自动写穿缓存并触发一次异步风控扫描。'
-            : '只支持 http/https 绝对 URL，提交后立刻生成 8 位随机短码。'}
+            ? '保存后新地址立即生效，系统会在后台自动复检目标链接安全性。'
+            : '支持 http / https 网址，提交后即刻生成随机短码与分享二维码。'}
         </DialogDescription>
       </DialogHeader>
 
@@ -128,7 +193,7 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
 
         <div className="space-y-2">
           <Label htmlFor="link-expires">
-            {isEdit ? '新过期时间（留空保持不变）' : '过期时间（可选，留空永不过期）'}
+            {isEdit ? '过期时间（可调整，留空保持不变）' : '过期时间（可选，留空永不过期）'}
           </Label>
           <Input
             id="link-expires"
@@ -150,11 +215,7 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
           )}
         </div>
 
-        {formError && (
-          <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-            {formError}
-          </div>
-        )}
+        {formError && <ErrorAlert compact message={formError} />}
 
         <DialogFooter>
           <Button variant="outline" disabled={isPending} onClick={onClose}>

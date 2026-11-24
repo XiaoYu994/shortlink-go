@@ -23,7 +23,12 @@ export default defineConfig({
           if (!id.includes('node_modules')) return undefined;
           if (id.includes('react-router')) return 'vendor-router';
           if (id.includes('@tanstack/react-query')) return 'vendor-query';
-          if (id.includes('@radix-ui') || id.includes('lucide-react') || id.includes('sonner')) {
+          if (
+            id.includes('@radix-ui') ||
+            id.includes('lucide-react') ||
+            id.includes('sonner') ||
+            id.includes('qrcode')
+          ) {
             return 'vendor-ui';
           }
           if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) {

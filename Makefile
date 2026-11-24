@@ -13,7 +13,7 @@ export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 .PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
 	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli \
-	web-install web-dev web-build web-lint web-test web-check
+	web-install web-dev web-build web-fmt web-fmt-check web-lint web-test web-check
 
 help: ## 列出所有命令
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -134,11 +134,17 @@ web-dev: ## 启动前端开发服务器（同源代理到 console 与 redirector
 web-build: ## 类型检查并构建前端静态产物到 web/dist
 	pnpm --dir web build
 
+web-fmt: ## 使用 Prettier 格式化前端代码
+	pnpm --dir web fmt
+
+web-fmt-check: ## 检查前端代码格式（不修改文件）
+	pnpm --dir web fmt:check
+
 web-lint: ## 前端 ESLint 静态检查（含 react-hooks 与 TypeScript 规则）
 	pnpm --dir web lint
 
 web-test: ## 运行前端 Vitest + Testing Library 组件测试
 	pnpm --dir web test
 
-web-check: ## 前端完整检查：tsc + eslint + vitest + build
+web-check: ## 前端完整检查：prettier + tsc + eslint + vitest + build
 	pnpm --dir web check

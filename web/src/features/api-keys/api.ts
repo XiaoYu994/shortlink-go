@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/api-client';
+import { ENDPOINTS } from '@/lib/endpoints';
 
 export type APIKeyStatus = 'active' | 'revoked' | 'expired';
 export type APIKeyScope = 'links:read' | 'links:write' | 'stats:read';
@@ -36,7 +37,10 @@ export function useAPIKeys(orgId: number, enabled: boolean) {
   return useQuery({
     queryKey: apiKeyKeys.list(orgId),
     queryFn: async ({ signal }) => {
-      const res = await apiRequest<{ items: APIKeyInfo[] }>('/api/v1/api-keys', { orgId, signal });
+      const res = await apiRequest<{ items: APIKeyInfo[] }>(ENDPOINTS.apiKeys.listCreate, {
+        orgId,
+        signal,
+      });
       return res.items;
     },
     enabled,
@@ -47,7 +51,7 @@ export function useIssueAPIKey(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: { scopes: APIKeyScope[]; expires_at?: string }) =>
-      apiRequest<IssuedAPIKey>('/api/v1/api-keys', {
+      apiRequest<IssuedAPIKey>(ENDPOINTS.apiKeys.listCreate, {
         method: 'POST',
         orgId,
         body: payload,
@@ -62,7 +66,7 @@ export function useRevokeAPIKey(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) =>
-      apiRequest<void>(`/api/v1/api-keys/${id}`, {
+      apiRequest<void>(ENDPOINTS.apiKeys.detail(id), {
         method: 'DELETE',
         orgId,
       }),

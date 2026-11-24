@@ -29,15 +29,10 @@ interface MonogramAvatarProps {
   确定性单字母圆形徽标：根据域名或邮箱哈希映射柔和配色，
   在短链列表和成员列表中充当视觉锚点，且完全不依赖第三方 favicon 服务（无隐私泄漏与裂图风险）。
 */
-export function MonogramAvatar({
-  seed,
-  label,
-  size = 'md',
-  className,
-}: MonogramAvatarProps) {
+export function MonogramAvatar({ seed, label, size = 'md', className }: MonogramAvatarProps) {
   const clean = (label || seed || '?').trim();
   const initial = clean.slice(0, 1).toUpperCase();
-  const tone = PALETTE[hashString(seed.toLowerCase()) % PALETTE.length];
+  const tone = PALETTE[hashString(seed.toLowerCase()) % PALETTE.length] ?? PALETTE[0];
 
   return (
     <span

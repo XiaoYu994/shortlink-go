@@ -1,27 +1,23 @@
-import { useState } from 'react';
-import {
-  KeyRound,
-  Lock,
-  Plus,
-  RefreshCw,
-  ShieldAlert,
-  Terminal,
-  Trash2,
-} from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { KeyRound, Lock, Plus, RefreshCw, ShieldAlert, Terminal, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCurrentOrg } from '@/app/org-context';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { CopyButton } from '@/components/CopyButton';
 import { EmptyState } from '@/components/EmptyState';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { canManageAPIKeys, ROLE_LABELS } from '@/features/auth/permissions';
+import { useMembers } from '@/features/members/api';
 import { getErrorMessage } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
+import { ENDPOINTS } from '@/lib/endpoints';
 import { formatDateTime, formatRelativeTime } from '@/lib/format';
+import { useDocumentTitle } from '@/lib/use-document-title';
 import {
   type APIKeyInfo,
   type APIKeyStatus,
@@ -44,6 +40,8 @@ export function APIKeysPage() {
   const { org } = useCurrentOrg();
   const allowed = canManageAPIKeys(org.role);
 
+  useDocumentTitle(`API Keys · ${org.name}`);
+
   const [issueOpen, setIssueOpen] = useState(false);
   const [issuedSecret, setIssuedSecret] = useState<{ orgId: number; key: IssuedAPIKey } | null>(
     null,
@@ -52,6 +50,15 @@ export function APIKeysPage() {
   const visibleSecret = issuedSecret && issuedSecret.orgId === org.id ? issuedSecret.key : null;
 
   const keysQuery = useAPIKeys(org.id, allowed);
+  // 复用成员列表，把 created_by（数字 ID）翻译为真实成员姓名或邮箱；未命中时安全回退为 user #id。
+  const membersQuery = useMembers(org.id, allowed);
+  const memberNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const m of membersQuery.data ?? []) {
+      map.set(m.user_id, m.name || m.email || `用户 #${m.user_id}`);
+    }
+    return map;
+  }, [membersQuery.data]);
   const revokeKey = useRevokeAPIKey(org.id);
 
   async function handleConfirmRevoke() {
@@ -79,14 +86,14 @@ export function APIKeysPage() {
   }
 
   const curlSnippet = visibleSecret
-    ? `curl -sS -X POST ${window.location.origin}/api/v1/links \\\n  -H 'Authorization: Bearer ${visibleSecret.api_key}' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"url":"https://example.com"}'`
+    ? `curl -sS -X POST ${window.location.origin}${ENDPOINTS.links.listCreate} \\\n  -H 'Authorization: Bearer ${visibleSecret.api_key}' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"url":"https://example.com"}'`
     : '';
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="API Keys"
-        description="服务端仅保存 SHA-256 哈希，明文只在签发瞬间返回一次；吊销后立刻返回 401。"
+        description="明文密钥只在签发成功时展示一次，系统仅保存不可逆摘要；吊销后立即失效。"
         actions={
           <>
             <Button
@@ -170,12 +177,10 @@ export function APIKeysPage() {
       )}
 
       {keysQuery.isError && (
-        <div className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <span>加载 API Key 失败：{getErrorMessage(keysQuery.error)}</span>
-          <Button variant="outline" size="sm" onClick={() => void keysQuery.refetch()}>
-            重试
-          </Button>
-        </div>
+        <ErrorAlert
+          message={`加载 API Key 失败：${getErrorMessage(keysQuery.error)}`}
+          onRetry={() => void keysQuery.refetch()}
+        />
       )}
 
       {keysQuery.isPending ? (
@@ -213,12 +218,17 @@ export function APIKeysPage() {
                       <span className="font-mono text-sm font-semibold text-zinc-950">
                         #{key.id}
                       </span>
-                      <Badge variant={statusMeta.variant} className="gap-1.5 px-2 py-0.5 text-[11px]">
+                      <Badge
+                        variant={statusMeta.variant}
+                        className="gap-1.5 px-2 py-0.5 text-[11px]"
+                      >
                         <span className={`size-1.5 rounded-full ${statusMeta.dot}`} />
                         {statusMeta.label}
                       </Badge>
-                      <span className="font-mono text-xs text-zinc-400">
-                        {key.created_by ? `由 user #${key.created_by} 签发` : '由运维 CLI 签发'}
+                      <span className="text-xs text-zinc-400">
+                        {key.created_by
+                          ? `由 ${memberNameById.get(key.created_by) ?? `用户 #${key.created_by}`} 签发`
+                          : '由管理员 CLI 签发'}
                       </span>
                     </div>
 
@@ -288,7 +298,7 @@ export function APIKeysPage() {
           if (!open) setRevokingKey(null);
         }}
         title={`吊销 API Key #${revokingKey?.id ?? ''}？`}
-        description="吊销后使用该密钥的请求将立刻返回 401，且操作不可撤销。"
+        description="吊销后使用该密钥的自动化任务或脚本将立即失效且无法恢复。"
         confirmLabel="确认吊销"
         pending={revokeKey.isPending}
         onConfirm={handleConfirmRevoke}

@@ -71,7 +71,8 @@ export function CopyButton({
       className={cn(
         'inline-flex items-center justify-center rounded-full border border-transparent text-zinc-400 transition-all hover:border-zinc-200 hover:bg-zinc-100 hover:text-zinc-700 cursor-pointer',
         size === 'xs' ? 'size-6' : 'size-7',
-        copied && 'border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-600',
+        copied &&
+          'border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-600',
         className,
       )}
     >

@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from 'react';
 import { toast } from 'sonner';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -11,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input, Label } from '@/components/ui/input';
 import { getErrorMessage } from '@/lib/api-client';
+import { MAX_ORG_NAME_BYTES, MAX_OWNED_ORGS } from '@/lib/constants';
 import { type CreatedOrg, useCreateOrg } from './api';
 
 interface CreateOrgDialogProps {
@@ -65,19 +67,17 @@ export function CreateOrgDialog({ open, onOpenChange, onCreated }: CreateOrgDial
             <Input
               id="create-org-name"
               placeholder="例如：Acme Corp"
-              maxLength={100}
+              maxLength={MAX_ORG_NAME_BYTES}
               autoFocus
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">每个账号最多作为 Owner 拥有 10 个组织。</p>
+            <p className="text-xs text-muted-foreground">
+              每个账号最多作为 Owner 拥有 {MAX_OWNED_ORGS} 个组织。
+            </p>
           </div>
-          {formError && (
-            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-              {formError}
-            </div>
-          )}
+          {formError && <ErrorAlert compact message={formError} />}
           <DialogFooter>
             <Button
               variant="outline"

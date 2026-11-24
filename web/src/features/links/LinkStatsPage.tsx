@@ -6,8 +6,10 @@ import {
   ExternalLink,
   Globe,
   HelpCircle,
+  Info,
   Monitor,
   MousePointerClick,
+  QrCode,
   Smartphone,
   Tablet,
   Terminal,
@@ -16,14 +18,20 @@ import {
 } from 'lucide-react';
 import { Link, useParams } from 'react-router';
 import { useCurrentOrg } from '@/app/org-context';
+import { routes } from '@/app/routes';
 import { CopyButton } from '@/components/CopyButton';
+import { ErrorAlert } from '@/components/ErrorAlert';
 import { MonogramAvatar } from '@/components/MonogramAvatar';
+import { QRCodeDialog } from '@/components/QRCodeDialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Skeleton } from '@/components/ui/skeleton';
+import { usePublicBaseUrl } from '@/features/auth/api';
 import { getErrorMessage } from '@/lib/api-client';
-import { cn } from '@/lib/cn';
 import { extractHost, formatDateTime, formatNumber } from '@/lib/format';
+import { buildShortUrl, formatShortLabel } from '@/lib/short-url';
+import { useDocumentTitle } from '@/lib/use-document-title';
 import { useLinkDetail, useLinkStats } from './api';
 import { AreaTrendChart } from './AreaTrendChart';
 import { BreakdownBarList } from './BreakdownBarList';
@@ -47,21 +55,25 @@ const CLIENT_ICONS = {
 export function LinkStatsPage() {
   const { org } = useCurrentOrg();
   const { code = '' } = useParams();
+  const publicBaseUrl = usePublicBaseUrl();
   const [days, setDays] = useState<7 | 30>(7);
   const [dimTab, setDimTab] = useState<'devices' | 'clients'>('devices');
+  const [qrOpen, setQrOpen] = useState(false);
+
+  useDocumentTitle(`/r/${code} 统计 · ${org.name}`);
 
   const detailQuery = useLinkDetail(org.id, code);
   const statsQuery = useLinkStats(org.id, code, days);
 
-  const fullShortUrl = `${window.location.origin}/r/${code}`;
+  const fullShortUrl = buildShortUrl(code, publicBaseUrl);
+  const shortLabel = formatShortLabel(code, publicBaseUrl);
   const host = detailQuery.data ? extractHost(detailQuery.data.url) : code;
 
   return (
     <div className="space-y-6">
-      {/* 顶部面包屑 + 短链信息头 */}
       <div className="space-y-4">
         <Link
-          to={`/orgs/${org.id}/links`}
+          to={routes.orgLinks(org.id)}
           className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-950"
         >
           <ArrowLeft className="size-3.5" />
@@ -74,7 +86,7 @@ export function LinkStatsPage() {
             <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="font-mono text-xl font-semibold tracking-tight text-zinc-950">
-                  /r/{code}
+                  {shortLabel}
                 </h1>
                 {detailQuery.data && (
                   <LinkStatusBadge
@@ -88,8 +100,17 @@ export function LinkStatsPage() {
                   label="复制"
                   toastMessage={`已复制 ${fullShortUrl}`}
                 />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2.5 text-xs"
+                  onClick={() => setQrOpen(true)}
+                >
+                  <QrCode className="size-3.5" />
+                  二维码
+                </Button>
                 <a
-                  href={`/r/${code}`}
+                  href={fullShortUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-brand hover:bg-indigo-50"
@@ -107,33 +128,25 @@ export function LinkStatsPage() {
             </div>
           </div>
 
-          <div className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 text-xs">
-            {([7, 30] as const).map((windowDays) => (
-              <button
-                key={windowDays}
-                type="button"
-                className={cn(
-                  'rounded-md px-3 py-1.5 font-medium transition-all cursor-pointer',
-                  days === windowDays
-                    ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-200/80'
-                    : 'text-zinc-500 hover:text-zinc-900',
-                )}
-                onClick={() => setDays(windowDays)}
-              >
-                近 {windowDays} 天
-              </button>
-            ))}
-          </div>
+          <SegmentedControl<7 | 30>
+            ariaLabel="统计时间窗口"
+            size="md"
+            className="shrink-0"
+            value={days}
+            onChange={setDays}
+            options={[
+              { value: 7, label: '近 7 天' },
+              { value: 30, label: '近 30 天' },
+            ]}
+          />
         </div>
       </div>
 
       {statsQuery.isError && (
-        <div className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <span>加载统计失败：{getErrorMessage(statsQuery.error)}</span>
-          <Button variant="outline" size="sm" onClick={() => void statsQuery.refetch()}>
-            重试
-          </Button>
-        </div>
+        <ErrorAlert
+          message={`加载统计失败：${getErrorMessage(statsQuery.error)}`}
+          onRetry={() => void statsQuery.refetch()}
+        />
       )}
 
       {statsQuery.isPending ? (
@@ -147,11 +160,10 @@ export function LinkStatsPage() {
         </div>
       ) : statsQuery.data ? (
         <>
-          {/* 3 个核心 KPI 卡片 */}
           <div className="grid gap-4 sm:grid-cols-3">
             <Card>
               <CardHeader className="flex-row items-center justify-between pb-1">
-                <CardDescription className="text-xs font-medium">终身累计点击</CardDescription>
+                <CardDescription className="text-xs font-medium">历史总点击</CardDescription>
                 <span className="flex size-7 items-center justify-center rounded-lg bg-indigo-50 text-brand">
                   <MousePointerClick className="size-3.5" />
                 </span>
@@ -177,7 +189,15 @@ export function LinkStatsPage() {
             </Card>
             <Card>
               <CardHeader className="flex-row items-center justify-between pb-1">
-                <CardDescription className="text-xs font-medium">按天去重访客之和</CardDescription>
+                <CardDescription className="flex items-center gap-1 text-xs font-medium">
+                  近 {days} 天访客（日去重累计）
+                  <span
+                    title="按每个自然日（UTC）独立去重后相加，不记录原始 IP；同一访客跨天访问会分别计入。"
+                    className="inline-flex text-zinc-400 cursor-help"
+                  >
+                    <Info className="size-3.5" />
+                  </span>
+                </CardDescription>
                 <span className="flex size-7 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
                   <Users className="size-3.5" />
                 </span>
@@ -190,27 +210,29 @@ export function LinkStatsPage() {
             </Card>
           </div>
 
-          {/* 主面积趋势折线图 */}
           <Card>
             <CardHeader>
               <CardTitle>访问趋势</CardTitle>
-              <CardDescription>鼠标移到曲线上可查看每日点击数与独立访客数。</CardDescription>
+              <CardDescription>
+                鼠标移到曲线上可查看每天的点击数与访客数（点击约 1 秒内异步更新）。
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <AreaTrendChart
-                code={code}
+                shortUrl={fullShortUrl}
                 clicks={statsQuery.data.clicks}
                 visitors={statsQuery.data.daily_visitors}
               />
             </CardContent>
           </Card>
 
-          {/* 来源 + 设备/客户端明细（Dub.co 行内占比条） */}
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>Top 来源域名（Referer）</CardTitle>
-                <CardDescription>按点击量降序展示前 10 个流量来源。</CardDescription>
+                <CardTitle>主要来源网站</CardTitle>
+                <CardDescription>
+                  按点击量降序展示前 10 个引流来源（直接访问记为 direct）。
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 <BreakdownBarList
@@ -232,32 +254,15 @@ export function LinkStatsPage() {
                   <CardTitle>访问环境分布</CardTitle>
                   <CardDescription>按终端设备或客户端类型拆分。</CardDescription>
                 </div>
-                <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setDimTab('devices')}
-                    className={cn(
-                      'rounded-md px-2.5 py-1 font-medium transition-all cursor-pointer',
-                      dimTab === 'devices'
-                        ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-200/80'
-                        : 'text-zinc-500 hover:text-zinc-900',
-                    )}
-                  >
-                    设备
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDimTab('clients')}
-                    className={cn(
-                      'rounded-md px-2.5 py-1 font-medium transition-all cursor-pointer',
-                      dimTab === 'clients'
-                        ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-200/80'
-                        : 'text-zinc-500 hover:text-zinc-900',
-                    )}
-                  >
-                    客户端
-                  </button>
-                </div>
+                <SegmentedControl<'devices' | 'clients'>
+                  ariaLabel="切换访问环境维度"
+                  value={dimTab}
+                  onChange={setDimTab}
+                  options={[
+                    { value: 'devices', label: '设备' },
+                    { value: 'clients', label: '客户端' },
+                  ]}
+                />
               </CardHeader>
               <CardContent>
                 {dimTab === 'devices' ? (
@@ -271,8 +276,7 @@ export function LinkStatsPage() {
                         key: d.device,
                         label: d.device,
                         count: d.clicks,
-                        icon:
-                          DEVICE_ICONS[d.device as keyof typeof DEVICE_ICONS] ?? HelpCircle,
+                        icon: DEVICE_ICONS[d.device as keyof typeof DEVICE_ICONS] ?? HelpCircle,
                       }))}
                   />
                 ) : (
@@ -286,8 +290,7 @@ export function LinkStatsPage() {
                         key: c.client,
                         label: c.client,
                         count: c.clicks,
-                        icon:
-                          CLIENT_ICONS[c.client as keyof typeof CLIENT_ICONS] ?? HelpCircle,
+                        icon: CLIENT_ICONS[c.client as keyof typeof CLIENT_ICONS] ?? HelpCircle,
                       }))}
                   />
                 )}
@@ -296,6 +299,14 @@ export function LinkStatsPage() {
           </div>
         </>
       ) : null}
+
+      <QRCodeDialog
+        open={qrOpen}
+        onOpenChange={setQrOpen}
+        code={code}
+        shortUrl={fullShortUrl}
+        targetUrl={detailQuery.data?.url}
+      />
     </div>
   );
 }

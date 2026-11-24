@@ -9,10 +9,12 @@ import {
   MousePointerClick,
   Pencil,
   Power,
+  QrCode,
   Trash2,
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 import { toast } from 'sonner';
+import { routes } from '@/app/routes';
 import { CopyButton } from '@/components/CopyButton';
 import { MonogramAvatar } from '@/components/MonogramAvatar';
 import {
@@ -31,6 +33,7 @@ import {
   formatNumber,
   formatRelativeTime,
 } from '@/lib/format';
+import { buildShortUrl, formatShortLabel } from '@/lib/short-url';
 import type { AdminLink } from './api';
 import { LinkStatusBadge } from './LinkStatusBadge';
 
@@ -39,34 +42,33 @@ export type LinksViewMode = 'cards' | 'rows';
 interface LinkCardProps {
   orgId: number;
   link: AdminLink;
+  publicBaseUrl?: string;
   view: LinksViewMode;
   writable: boolean;
   mutating?: boolean;
   onEdit: (link: AdminLink) => void;
+  onShowQRCode: (link: AdminLink) => void;
   onToggleDisable: (link: AdminLink) => void;
   onDelete: (link: AdminLink) => void;
 }
 
-/*
-  对标 Dub.co 的短链条目设计：
-  - 左侧：目标域名单字母彩色徽标作为视觉锚点；
-  - 中间：主短链 + 一键复制微交互，下方 ↳ 目标地址 + 相对时间；
-  - 右侧：可点击直达统计的「点击胶囊」+ 收纳次要动作的 ··· 溢出菜单。
-*/
 export function LinkCard({
   orgId,
   link,
+  publicBaseUrl,
   view,
   writable,
   mutating = false,
   onEdit,
+  onShowQRCode,
   onToggleDisable,
   onDelete,
 }: LinkCardProps) {
   const navigate = useNavigate();
   const host = extractHost(link.url);
-  const fullShortUrl = `${window.location.origin}/r/${link.code}`;
-  const statsPath = `/orgs/${orgId}/links/${encodeURIComponent(link.code)}`;
+  const fullShortUrl = buildShortUrl(link.code, publicBaseUrl);
+  const shortLabel = formatShortLabel(link.code, publicBaseUrl);
+  const statsPath = routes.linkStats(orgId, link.code);
   const isBanned = link.status === 'banned';
   const compact = view === 'rows';
 
@@ -84,7 +86,6 @@ export function LinkCard({
           : 'rounded-xl border border-zinc-200/90 px-4 py-3.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:border-zinc-300 hover:shadow-[0_2px_8px_rgba(0,0,0,0.04)]',
       )}
     >
-      {/* 左侧 + 中间主体 */}
       <div className="flex min-w-0 flex-1 items-center gap-3.5">
         <MonogramAvatar seed={host} label={host} size={compact ? 'sm' : 'md'} />
 
@@ -94,15 +95,14 @@ export function LinkCard({
             compact ? 'flex flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-3' : 'space-y-1',
           )}
         >
-          {/* 第一行：短链 + 复制按钮 + 状态 */}
           <div className="flex shrink-0 items-center gap-1.5">
             <a
-              href={`/r/${link.code}`}
+              href={fullShortUrl}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 font-mono text-sm font-semibold text-zinc-950 transition-colors hover:text-brand"
             >
-              /r/{link.code}
+              {shortLabel}
               <ExternalLink className="size-3 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100" />
             </a>
             <CopyButton
@@ -113,7 +113,6 @@ export function LinkCard({
             <LinkStatusBadge status={link.status} banReason={link.ban_reason} compact />
           </div>
 
-          {/* 第二行：目标 URL + 元数据 */}
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-zinc-500">
             <CornerDownRight className="size-3 shrink-0 text-zinc-400" />
             <a
@@ -148,7 +147,6 @@ export function LinkCard({
         </div>
       </div>
 
-      {/* 右侧：点击胶囊 + 更多操作菜单 */}
       <div className="flex shrink-0 items-center gap-2">
         <Link
           to={statsPath}
@@ -183,6 +181,10 @@ export function LinkCard({
             <DropdownMenuItem onSelect={() => void handleMenuCopy()}>
               <Copy className="size-4 text-zinc-500" />
               复制完整短链
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onShowQRCode(link)}>
+              <QrCode className="size-4 text-zinc-500" />
+              查看二维码
             </DropdownMenuItem>
             {writable && (
               <>

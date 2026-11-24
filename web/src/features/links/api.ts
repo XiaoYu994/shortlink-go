@@ -1,5 +1,8 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { authKeys } from '@/features/auth/api';
 import { apiRequest } from '@/lib/api-client';
+import { DEFAULT_LINKS_PAGE_SIZE } from '@/lib/constants';
+import { ENDPOINTS } from '@/lib/endpoints';
 
 export type LinkStatus = 'active' | 'disabled' | 'expired' | 'banned';
 export type LinkSort = 'id' | 'clicks' | 'clicks_today';
@@ -54,7 +57,7 @@ export function fetchLinks(
   if (params.sort) q.set('sort', params.sort);
   if (params.cursor) q.set('cursor', params.cursor);
   const suffix = q.toString() ? `?${q.toString()}` : '';
-  return apiRequest<ListLinksResponse>(`/api/v1/links${suffix}`, { orgId, signal });
+  return apiRequest<ListLinksResponse>(`${ENDPOINTS.links.listCreate}${suffix}`, { orgId, signal });
 }
 
 export function fetchLinkDetail(
@@ -62,7 +65,7 @@ export function fetchLinkDetail(
   code: string,
   signal?: AbortSignal,
 ): Promise<AdminLink> {
-  return apiRequest<AdminLink>(`/api/v1/links/${encodeURIComponent(code)}`, { orgId, signal });
+  return apiRequest<AdminLink>(ENDPOINTS.links.detail(code), { orgId, signal });
 }
 
 export function fetchLinkStats(
@@ -77,7 +80,7 @@ export function fetchLinkStats(
     from: from.toISOString(),
     to: to.toISOString(),
   });
-  return apiRequest<LinkStats>(`/api/v1/links/${encodeURIComponent(code)}/stats?${q.toString()}`, {
+  return apiRequest<LinkStats>(`${ENDPOINTS.links.stats(code)}?${q.toString()}`, {
     orgId,
     signal,
   });
@@ -92,7 +95,7 @@ export function useInfiniteLinks(orgId: number, sort: LinkSort) {
     queryKey: linkKeys.list(orgId, sort),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam, signal }) =>
-      fetchLinks(orgId, { limit: 20, sort, cursor: pageParam }, signal),
+      fetchLinks(orgId, { limit: DEFAULT_LINKS_PAGE_SIZE, sort, cursor: pageParam }, signal),
     getNextPageParam: (lastPage) => lastPage.next_cursor,
   });
 }
@@ -117,13 +120,15 @@ export function useCreateLink(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: { url: string; expires_at?: string | null }) =>
-      apiRequest<AdminLink>('/api/v1/links', {
+      apiRequest<AdminLink>(ENDPOINTS.links.listCreate, {
         method: 'POST',
         orgId,
         body: payload,
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: linkKeys.all(orgId) });
+      // 同步刷新 /me 让侧边栏与概览区的本月配额用量实时更新。
+      void queryClient.invalidateQueries({ queryKey: authKeys.me });
     },
   });
 }
@@ -138,7 +143,7 @@ export function useUpdateLink(orgId: number) {
       code: string;
       payload: { url?: string; expires_at?: string | null; disabled?: boolean };
     }) =>
-      apiRequest<AdminLink | undefined>(`/api/v1/links/${encodeURIComponent(code)}`, {
+      apiRequest<AdminLink | undefined>(ENDPOINTS.links.detail(code), {
         method: 'PATCH',
         orgId,
         body: payload,
@@ -153,7 +158,7 @@ export function useDeleteLink(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (code: string) =>
-      apiRequest<void>(`/api/v1/links/${encodeURIComponent(code)}`, {
+      apiRequest<void>(ENDPOINTS.links.detail(code), {
         method: 'DELETE',
         orgId,
       }),
