@@ -9,12 +9,17 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 const maxRequestIDLen = 128
+
+// ErrMissingMeta 表示写事务缺少有效的审计执行主体元数据（ADR 0025 fail-closed）。
+var ErrMissingMeta = errors.New("audit metadata missing or invalid")
 
 // ActorKind 区分审计事件的执行主体类型：人（会话用户）、机器密钥、运维 CLI 或后台系统任务。
 type ActorKind string
@@ -180,6 +185,29 @@ func MetaFrom(ctx context.Context) (Meta, bool) {
 		return Meta{}, false
 	}
 	return cloneMeta(m), true
+}
+
+/*
+ValidateMeta 校验审计元数据是否满足执行主体一致性约束（fail-closed）：
+  - ActorKind 必须是已定义枚举；
+  - user / api_key 必须带有正整数 ActorID；
+  - operator / system 禁止携带 ActorID。
+*/
+func ValidateMeta(m Meta) error {
+	if !m.ActorKind.Valid() {
+		return fmt.Errorf("%w: invalid actor kind %q", ErrMissingMeta, m.ActorKind)
+	}
+	switch m.ActorKind {
+	case ActorUser, ActorAPIKey:
+		if m.ActorID == nil || *m.ActorID <= 0 {
+			return fmt.Errorf("%w: %s requires positive actor id", ErrMissingMeta, m.ActorKind)
+		}
+	case ActorOperator, ActorSystem:
+		if m.ActorID != nil {
+			return fmt.Errorf("%w: %s must not set actor id", ErrMissingMeta, m.ActorKind)
+		}
+	}
+	return nil
 }
 
 /*

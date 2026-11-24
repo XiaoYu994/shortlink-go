@@ -15,10 +15,11 @@ Fields 保存要自动注入到每一条带 context 日志的关联字段。
 各层通过 WithRequestID、WithTenantID、WithJob 增量追加，由根 logger 的 contextHandler 统一提取。
 */
 type Fields struct {
-	RequestID string
-	TenantID  int64
-	JobID     int64
-	JobKind   string
+	RequestID       string
+	ClientRequestID string
+	TenantID        int64
+	JobID           int64
+	JobKind         string
 }
 
 // FieldsFrom 返回 ctx 中挂载的日志关联字段；ctx 为 nil 或未设置时返回零值。
@@ -43,6 +44,21 @@ func WithRequestID(ctx context.Context, id string) context.Context {
 // RequestIDFrom 从 ctx 读取请求编号；不存在时返回空字符串。
 func RequestIDFrom(ctx context.Context) string {
 	return FieldsFrom(ctx).RequestID
+}
+
+// WithClientRequestID 将调用方传入且通过字符校验的 X-Request-ID 记录到 client_request_id（不覆盖服务端签发编号）。
+func WithClientRequestID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	f := FieldsFrom(ctx)
+	f.ClientRequestID = id
+	return context.WithValue(ctx, fieldsContextKey{}, f)
+}
+
+// ClientRequestIDFrom 从 ctx 读取调用方传入的 client_request_id；未传入或非法时返回空字符串。
+func ClientRequestIDFrom(ctx context.Context) string {
+	return FieldsFrom(ctx).ClientRequestID
 }
 
 // WithTenantID 将租户编号写入 ctx，保留已有的其他日志字段。
@@ -115,7 +131,7 @@ func (h contextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h contextHandler) Handle(ctx context.Context, rec slog.Record) error {
-	var buf [4]slog.Attr
+	var buf [5]slog.Attr
 	ctxAttrs := appendContextAttrs(buf[:0], FieldsFrom(ctx))
 	if len(ctxAttrs) == 0 {
 		return h.fast.Handle(ctx, rec)
@@ -170,6 +186,9 @@ func (h contextHandler) WithGroup(name string) slog.Handler {
 func appendContextAttrs(dst []slog.Attr, f Fields) []slog.Attr {
 	if f.RequestID != "" {
 		dst = append(dst, slog.String("request_id", f.RequestID))
+	}
+	if f.ClientRequestID != "" {
+		dst = append(dst, slog.String("client_request_id", f.ClientRequestID))
 	}
 	if f.TenantID > 0 {
 		dst = append(dst, slog.Int64("tenant_id", f.TenantID))

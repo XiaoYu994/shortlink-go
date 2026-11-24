@@ -11,10 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"shortlink/internal/audit"
 	"shortlink/internal/identity"
 	"shortlink/internal/idgen"
 	"shortlink/internal/link"
 )
+
+func testAuditCtx(ctx context.Context) context.Context {
+	return audit.WithMeta(ctx, audit.SystemMeta("test"))
+}
 
 /*
 newTestStore 每次测试前清空测试库里的租户、密钥和链接，再插入一个租户。
@@ -36,7 +41,7 @@ func newTestStore(t testing.TB) (*Store, int64) {
 		t.Fatalf("refusing to truncate non-test database %q: name must end with _test", dbName)
 	}
 
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	db, err := Open(ctx, dsn, DefaultPoolConfig())
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
@@ -82,7 +87,7 @@ func mustLink(t testing.TB, rawURL string, tenantID int64) *link.Link {
 
 func TestStoreCreateAndGetByCode(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	l := mustLink(t, "https://example.com/path?q=1", tenantID)
 	if err := store.Create(ctx, l); err != nil {
@@ -109,7 +114,7 @@ func TestStoreCreateAndGetByCode(t *testing.T) {
 
 func TestGetByCodeHonorsExpiresAt(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	// timestamptz 的精度是微秒，纳秒会在往返里丢掉。
 	future := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
@@ -150,7 +155,7 @@ func TestStoreGetByCodeNotFound(t *testing.T) {
 
 func TestStoreCreateRetriesOnCollision(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	codes := []string{"collis01", "collis01", "collis02"}
 	store.generate = func() (string, error) {
@@ -177,7 +182,7 @@ func TestStoreCreateRetriesOnCollision(t *testing.T) {
 
 func TestStoreConcurrentCreate(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	const n = 50
 
 	links := make([]*link.Link, n)
@@ -225,7 +230,7 @@ func TestStoreContextCanceled(t *testing.T) {
 
 func TestAuthenticate(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	plaintext, hash, err := identity.APIKeyToken.Generate()
 	if err != nil {
@@ -267,7 +272,7 @@ TestTenantReferenceShape 锁住 ADR 0010 的表结构。
 */
 func TestTenantReferenceShape(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var foreignKeys int
 	if err := store.db.QueryRowContext(ctx, `

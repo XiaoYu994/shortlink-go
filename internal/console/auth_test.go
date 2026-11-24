@@ -654,6 +654,10 @@ func TestAuthenticateInjectsTenantIDIntoLogContext(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
+	serverReqID := rec.Header().Get("X-Request-ID")
+	if serverReqID == "" || serverReqID == "req-tenant-77" {
+		t.Fatalf("server X-Request-ID = %q, want generated server id != inbound", serverReqID)
+	}
 
 	var sawDownstream, sawAccess bool
 	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
@@ -664,12 +668,12 @@ func TestAuthenticateInjectsTenantIDIntoLogContext(t *testing.T) {
 		switch entry["msg"] {
 		case "cache fallback":
 			sawDownstream = true
-			if entry["request_id"] != "req-tenant-77" || entry["tenant_id"] != float64(77) || entry["service"] != "console" {
+			if entry["request_id"] != serverReqID || entry["client_request_id"] != "req-tenant-77" || entry["tenant_id"] != float64(77) || entry["service"] != "console" {
 				t.Errorf("downstream log = %+v", entry)
 			}
 		case "request":
 			sawAccess = true
-			if entry["request_id"] != "req-tenant-77" || entry["tenant_id"] != float64(77) ||
+			if entry["request_id"] != serverReqID || entry["client_request_id"] != "req-tenant-77" || entry["tenant_id"] != float64(77) ||
 				entry["actor"] != "api_key:10" || entry["route"] != "GET /probe" {
 				t.Errorf("access log missing enriched fields: %+v", entry)
 			}

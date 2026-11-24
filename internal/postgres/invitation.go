@@ -112,6 +112,13 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 	if err := ctx.Err(); err != nil {
 		return identity.Invitation{}, err
 	}
+	var explicitUserID int64
+	if p.InvitedBy != nil {
+		explicitUserID = *p.InvitedBy
+	}
+	if _, _, _, err := requireAuditMetaOrUser(ctx, explicitUserID); err != nil {
+		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -141,11 +148,7 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 	if inv.ExpiresAt != nil {
 		auditMeta["expires_at"] = inv.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
-	fallback := audit.OperatorMeta("")
-	if p.InvitedBy != nil {
-		fallback = audit.UserMeta(*p.InvitedBy, "")
-	}
-	if err := insertAuditLogTx(ctx, tx, inv.TenantID, fallback, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
+	if err := insertAuditLogTx(ctx, tx, inv.TenantID, explicitUserID, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
 		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -298,6 +301,9 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -333,7 +339,7 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 	if _, err := tx.ExecContext(ctx, revokeInvitationSQL, p.InvitationID, p.TenantID); err != nil {
 		return fmt.Errorf("revoke invitation: %w", err)
 	}
-	if err := insertAuditLogTx(ctx, tx, p.TenantID, audit.SystemMeta(""), audit.ActionInvitationRevoke, audit.TargetInvitation, strconv.FormatInt(p.InvitationID, 10), map[string]any{
+	if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionInvitationRevoke, audit.TargetInvitation, strconv.FormatInt(p.InvitationID, 10), map[string]any{
 		"email": email,
 		"role":  string(targetRole),
 	}); err != nil {

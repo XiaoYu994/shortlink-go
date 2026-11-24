@@ -162,6 +162,13 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 	if err := ctx.Err(); err != nil {
 		return IssuedAPIKey{}, err
 	}
+	var explicitUserID int64
+	if p.CreatedBy != nil {
+		explicitUserID = *p.CreatedBy
+	}
+	if _, _, _, err := requireAuditMetaOrUser(ctx, explicitUserID); err != nil {
+		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -173,16 +180,12 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 	if err != nil {
 		return IssuedAPIKey{}, err
 	}
-	fallback := audit.OperatorMeta("")
-	if p.CreatedBy != nil {
-		fallback = audit.UserMeta(*p.CreatedBy, "")
-	}
 	if p.TenantID == 0 {
 		orgMeta := map[string]any{"name": p.Name}
 		if p.ExternalID != "" {
 			orgMeta["external_id"] = p.ExternalID
 		}
-		if err := insertAuditLogTx(ctx, tx, tn.ID, fallback, audit.ActionOrgCreate, audit.TargetOrg, strconv.FormatInt(tn.ID, 10), orgMeta); err != nil {
+		if err := insertAuditLogTx(ctx, tx, tn.ID, explicitUserID, audit.ActionOrgCreate, audit.TargetOrg, strconv.FormatInt(tn.ID, 10), orgMeta); err != nil {
 			return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 		}
 	}
@@ -222,7 +225,7 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 	if key.ExpiresAt != nil {
 		keyMeta["expires_at"] = key.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
-	if err := insertAuditLogTx(ctx, tx, tn.ID, fallback, audit.ActionAPIKeyIssue, audit.TargetAPIKey, strconv.FormatInt(key.ID, 10), keyMeta); err != nil {
+	if err := insertAuditLogTx(ctx, tx, tn.ID, explicitUserID, audit.ActionAPIKeyIssue, audit.TargetAPIKey, strconv.FormatInt(key.ID, 10), keyMeta); err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
 
@@ -391,9 +394,12 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID int64) error {
 		return err
 	}
 
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.OperatorMeta(""))
+	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
 	var alreadyRevoked bool
-	err := s.db.QueryRowContext(ctx, revokeAPIKeySQL,
+	err = s.db.QueryRowContext(ctx, revokeAPIKeySQL,
 		keyID, actorKind, actorID, reqID,
 		string(audit.ActionAPIKeyRevoke), string(audit.TargetAPIKey)).Scan(&alreadyRevoked)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -420,9 +426,12 @@ func (s *Store) RevokeAPIKeyForTenant(ctx context.Context, tenantID, keyID int64
 		return err
 	}
 
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.SystemMeta(""))
+	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
 	var alreadyRevoked bool
-	err := s.db.QueryRowContext(ctx, revokeAPIKeyForTenantSQL,
+	err = s.db.QueryRowContext(ctx, revokeAPIKeyForTenantSQL,
 		keyID, tenantID, actorKind, actorID, reqID,
 		string(audit.ActionAPIKeyRevoke), string(audit.TargetAPIKey)).Scan(&alreadyRevoked)
 	if errors.Is(err, sql.ErrNoRows) {

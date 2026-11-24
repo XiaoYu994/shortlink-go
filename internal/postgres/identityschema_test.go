@@ -12,7 +12,7 @@ import (
 
 func TestMigration007APIKeyDefaultsAndConstraints(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
@@ -70,7 +70,7 @@ func TestMigration008APIKeyScopesHasNoDefault(t *testing.T) {
 
 func TestMigration007UsersAndIdentitiesConstraints(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var user1, user2 int64
 	if err := store.db.QueryRowContext(ctx,
@@ -139,7 +139,7 @@ func TestMigration007UsersAndIdentitiesConstraints(t *testing.T) {
 
 func TestMigration007MembershipsAndSessionsConstraints(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var userID int64
 	if err := store.db.QueryRowContext(ctx,
@@ -213,7 +213,7 @@ func TestMigration007MembershipsAndSessionsConstraints(t *testing.T) {
 
 func TestMigration007InvitationsConstraints(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	tests := []struct {
@@ -303,7 +303,7 @@ func TestMigration007InvitationsConstraints(t *testing.T) {
 
 func TestMigration010IndexesAndConstraints(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	for _, idx := range []string{
 		"idx_sessions_revoked_at",

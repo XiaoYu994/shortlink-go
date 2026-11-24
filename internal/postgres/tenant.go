@@ -101,6 +101,9 @@ func (s *Store) SetTenantLimits(ctx context.Context, tenantID int64, p SetTenant
 	if err := ctx.Err(); err != nil {
 		return TenantLimits{}, err
 	}
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
+		return TenantLimits{}, fmt.Errorf("set tenant limits: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -145,7 +148,7 @@ func (s *Store) SetTenantLimits(ctx context.Context, tenantID int64, p SetTenant
 		auditMeta["previous_rate_limit_per_second"] = prevRateLimit
 		auditMeta["rate_limit_per_second"] = got.RateLimit
 	}
-	if err := insertAuditLogTx(ctx, tx, tenantID, audit.OperatorMeta(""), audit.ActionTenantLimitsUpdate, audit.TargetOrg, strconv.FormatInt(tenantID, 10), auditMeta); err != nil {
+	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionTenantLimitsUpdate, audit.TargetOrg, strconv.FormatInt(tenantID, 10), auditMeta); err != nil {
 		return TenantLimits{}, fmt.Errorf("set tenant limits: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

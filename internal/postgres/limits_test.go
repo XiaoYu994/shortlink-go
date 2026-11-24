@@ -78,7 +78,7 @@ func TestCreateResetsStaleMonth(t *testing.T) {
 	setTenantQuota(t, store, tenantID, 2)
 	setTenantUsage(t, store, tenantID, 2, -1)
 
-	if err := store.Create(context.Background(), mustLink(t, "https://example.com/new-month", tenantID)); err != nil {
+	if err := store.Create(testAuditCtx(context.Background()), mustLink(t, "https://example.com/new-month", tenantID)); err != nil {
 		t.Fatalf("Create after month rollover: %v", err)
 	}
 	usage, month := readTenantUsage(t, store, tenantID)
@@ -96,7 +96,7 @@ func TestCreateDoesNotResetFutureMonth(t *testing.T) {
 	setTenantQuota(t, store, tenantID, 10)
 	setTenantUsage(t, store, tenantID, 3, 1)
 
-	if err := store.Create(context.Background(), mustLink(t, "https://example.com/future-month", tenantID)); err != nil {
+	if err := store.Create(testAuditCtx(context.Background()), mustLink(t, "https://example.com/future-month", tenantID)); err != nil {
 		t.Fatalf("Create with future month: %v", err)
 	}
 	usage, month := readTenantUsage(t, store, tenantID)
@@ -130,7 +130,7 @@ func TestCreateRejectsExhaustedQuota(t *testing.T) {
 			setTenantUsage(t, store, tenantID, tt.usage, tt.monthOffset)
 			beforeUsage, beforeMonth := readTenantUsage(t, store, tenantID)
 
-			err := store.Create(context.Background(), mustLink(t, "https://example.com/over-quota", tenantID))
+			err := store.Create(testAuditCtx(context.Background()), mustLink(t, "https://example.com/over-quota", tenantID))
 			if !errors.Is(err, link.ErrQuotaExceeded) {
 				t.Fatalf("Create error = %v, want ErrQuotaExceeded", err)
 			}
@@ -153,7 +153,7 @@ TestDeleteDoesNotReleaseQuota 验证删除不返还配额：
 */
 func TestDeleteDoesNotReleaseQuota(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	setTenantQuota(t, store, tenantID, 2)
 
 	first := createLink(t, store, tenantID, "https://example.com/first")
@@ -182,7 +182,7 @@ func TestDeleteDoesNotReleaseQuota(t *testing.T) {
 // TestDeleteDoesNotTouchUsage 验证删除事务不再改写租户行：外部把用量改小后，删除也保持原值。
 func TestDeleteDoesNotTouchUsage(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	l := createLink(t, store, tenantID, "https://example.com/floor")
 	setTenantUsage(t, store, tenantID, 0, -1)
@@ -204,7 +204,7 @@ TestCreateConcurrentRespectsMonthlyQuota 用 20 个并发创建撞一个上个�
 */
 func TestCreateConcurrentRespectsMonthlyQuota(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	const quota = 5
 	setTenantQuota(t, store, tenantID, quota)
 	setTenantUsage(t, store, tenantID, quota, -1)
@@ -256,7 +256,7 @@ func TestCreateConcurrentRespectsMonthlyQuota(t *testing.T) {
 
 func TestAuthenticateReturnsRateLimit(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	if _, err := store.db.Exec(`UPDATE tenants SET rate_limit_per_second = 42 WHERE id = $1`, tenantID); err != nil {
 		t.Fatalf("set rate limit: %v", err)
 	}
@@ -286,7 +286,7 @@ Get 和 Set 的回显都用有效已用量，月份过期时返回 0，而不是
 */
 func TestTenantLimits(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	got, err := store.GetTenantLimits(ctx, tenantID)
 	if err != nil {

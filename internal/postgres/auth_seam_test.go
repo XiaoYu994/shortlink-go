@@ -25,7 +25,7 @@ import (
 
 func TestHTTPOIDCLoginPersistsSession(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	_, handler := newOIDCSeamHandler(t, ctx, store)
 	firstCookie, firstUserID, firstEmail := loginViaFakeOIDC(t, handler)
@@ -74,7 +74,7 @@ TestHTTPSessionAuthOrgSwitchAndLogoutImmediateEffect 端到端验证：
 */
 func TestHTTPSessionAuthOrgSwitchAndLogoutImmediateEffect(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2 int64
 	if err := store.db.QueryRowContext(ctx,
@@ -186,7 +186,7 @@ TestHTTPOIDCLoginRedeemsVerifiedInvitationOnly 端到端验证 Step 5：
 */
 func TestHTTPOIDCLoginRedeemsVerifiedInvitationOnly(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2 int64
 	if err := store.db.QueryRowContext(ctx,
@@ -298,7 +298,7 @@ TestHTTPMemberManagementImmediateEffect 端到端验证 Step 6（ADR 0018）：
 */
 func TestHTTPMemberManagementImmediateEffect(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2 int64
 	if err := store.db.QueryRowContext(ctx,
@@ -589,7 +589,7 @@ func loginViaProvider(t *testing.T, handler http.Handler, loginPath, flowCookieN
 
 func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	fakeOIDC := fakeoidc.Start(t, "shortlink-console", "shortlink-console-secret")
 	oidcProvider, err := oauth.NewOIDCProvider(ctx, oauth.OIDCConfig{

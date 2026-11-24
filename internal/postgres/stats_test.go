@@ -13,7 +13,7 @@ import (
 
 func TestStatsAggregates(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	otherTenant := insertTenant(t, store, "other")
 
 	l := createLink(t, store, tenantID, "https://example.com/stats")
@@ -85,7 +85,7 @@ func TestStatsAggregates(t *testing.T) {
 
 func TestStatsReferrersTopTen(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	l := createLink(t, store, tenantID, "https://example.com/top")
 
 	day := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
@@ -128,7 +128,7 @@ func TestStatsReferrersTopTen(t *testing.T) {
 
 func TestStatsIncludesExpiredLink(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	l := createLink(t, store, tenantID, "https://example.com/expired-stats")
 
 	day := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)

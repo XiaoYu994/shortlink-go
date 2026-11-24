@@ -14,7 +14,7 @@ import (
 
 func TestCreateInvitation(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	future := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Microsecond)
 	inv, err := store.CreateInvitation(ctx, CreateInvitationParams{
@@ -110,7 +110,7 @@ func TestCreateInvitation(t *testing.T) {
 
 func TestCreateInvitationValidation(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	past := time.Now().UTC().Add(-time.Minute)
 	badInviter := int64(0)
 
@@ -165,7 +165,7 @@ func TestCreateInvitationValidation(t *testing.T) {
 
 func TestCreateSessionForIdentityRedeemsInvitations(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2, tenant3, tenant4 int64
 	for _, pair := range []struct {
@@ -344,7 +344,7 @@ func TestCreateSessionForIdentityRedeemsInvitations(t *testing.T) {
 
 func TestCreateSessionForIdentityRedeemConcurrent(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	inv, err := store.CreateInvitation(ctx, CreateInvitationParams{
 		TenantID: tenant1,

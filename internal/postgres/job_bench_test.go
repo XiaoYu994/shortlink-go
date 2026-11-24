@@ -27,7 +27,7 @@ BenchmarkEnqueueInCreate 对比「创建链接 + 同语句入队风控任务」�
 */
 func BenchmarkEnqueueInCreate(b *testing.B) {
 	store, tenantID := newTestStore(b)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	highQuota := int64(1_000_000)
 	if _, err := store.SetTenantLimits(ctx, tenantID, SetTenantLimitsParams{LinkQuota: &highQuota}); err != nil {
 		b.Fatalf("SetTenantLimits: %v", err)
@@ -85,7 +85,7 @@ func BenchmarkJobClaimSkipLocked(b *testing.B) {
 	for _, workers := range []int{8, 32, 64} {
 		b.Run(fmt.Sprintf("workers_%d", workers), func(b *testing.B) {
 			store, tenantID := newTestStore(b)
-			ctx := context.Background()
+			ctx := testAuditCtx(context.Background())
 
 			// 批量预置 b.N 条待执行任务，去掉单条入队循环的准备耗时。
 			if _, err := store.db.ExecContext(ctx, `INSERT INTO jobs (kind, tenant_id, payload)
@@ -163,7 +163,7 @@ func BenchmarkRiskScanEndToEnd(b *testing.B) {
 		}
 		b.Run(name, func(b *testing.B) {
 			store, tenantID := newTestStore(b)
-			ctx := context.Background()
+			ctx := testAuditCtx(context.Background())
 
 			rdb, err := cache.Open(ctx, redisURL)
 			if err != nil {

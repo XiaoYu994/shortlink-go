@@ -13,7 +13,7 @@ import (
 
 func TestCreateOrgForUserAndLimitConcurrency(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	sess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "https://dex.example",
@@ -74,7 +74,7 @@ func TestCreateOrgForUserAndLimitConcurrency(t *testing.T) {
 
 func TestOrgInvitationsListAndRevoke(t *testing.T) {
 	store, tenantA := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	issuedB, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "other-org", Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
@@ -138,7 +138,7 @@ func TestOrgInvitationsListAndRevoke(t *testing.T) {
 
 func TestOrgAPIKeysCreatedByAndTenantIsolation(t *testing.T) {
 	store, tenantA := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	issuedB, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "other-org", Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {

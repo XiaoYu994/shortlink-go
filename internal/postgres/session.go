@@ -276,9 +276,9 @@ func insertExternalUserTx(ctx context.Context, tx *sql.Tx, id identity.ExternalI
 }
 
 func redeemInvitationsTx(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
-	reqID := ""
-	if m, ok := audit.MetaFrom(ctx); ok {
-		reqID = audit.NormalizeMeta(m).RequestID
+	_, _, reqID, err := requireAuditMetaOrUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("create session for identity: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL,
 		userID, email, reqID,

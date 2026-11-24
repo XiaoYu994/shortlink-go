@@ -80,7 +80,7 @@ func TestIssueAPIKeyRejectsBadParams(t *testing.T) {
 
 func TestIssueListRevokeAPIKey(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	future := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
 
 	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{

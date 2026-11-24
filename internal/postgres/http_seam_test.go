@@ -24,7 +24,7 @@ TestHTTPListCursorRoundTrip 把列表游标从 HTTP 响应送回下一次查询�
 */
 func TestHTTPListCursorRoundTrip(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	first := createLink(t, store, tenantID, "https://example.com/cursor-1")
 	second := createLink(t, store, tenantID, "https://example.com/cursor-2")
 	third := createLink(t, store, tenantID, "https://example.com/cursor-3")
@@ -70,7 +70,7 @@ Authenticate 已经覆盖这两种状态；这里确认中间件把它们写成 
 */
 func TestHTTPRejectsExpiredAndRevokedAPIKeys(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	handler := newConsoleHandler(store)
 
 	expired, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{TenantID: tenantID, Scopes: identity.AllAPIKeyScopes()})
@@ -115,7 +115,7 @@ Authenticate、Principal 和 MapAuthorizer 真正约束每个管理端点。
 */
 func TestHTTPAPIKeyScopesEnforced(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	existing := createLink(t, store, tenantID, "https://example.com/scoped")
 	handler := newConsoleHandler(store)
 	// 默认每秒 10 次。这里连续打完整张权限表，测的是 scope，不是限流。

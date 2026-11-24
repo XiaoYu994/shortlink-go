@@ -216,7 +216,7 @@ func TestAuditMetaPropagationInMiddlewareAndOrgCreate(t *testing.T) {
 		Orgs:       orgs,
 	}).Routes()
 
-	// 会话创建短链：ActorUser + ActorID=7 + RequestID。
+	// 会话创建短链：ActorUser + ActorID=7 + 服务端签发 RequestID（忽略伪造 X-Request-ID）。
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/a"}`))
 	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: sessionTok})
 	req.Header.Set("X-Org-ID", "1")
@@ -226,11 +226,15 @@ func TestAuditMetaPropagationInMiddlewareAndOrgCreate(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("session create = %d (%s)", rec.Code, rec.Body.String())
 	}
-	if !capture.hasMeta || capture.createMeta.ActorKind != audit.ActorUser || capture.createMeta.ActorID == nil || *capture.createMeta.ActorID != 7 || capture.createMeta.RequestID != "req-session-create" {
-		t.Fatalf("session create audit meta = (%+v, %v)", capture.createMeta, capture.hasMeta)
+	sessReqID := rec.Header().Get("X-Request-ID")
+	if sessReqID == "" || sessReqID == "req-session-create" {
+		t.Fatalf("server X-Request-ID = %q", sessReqID)
+	}
+	if !capture.hasMeta || capture.createMeta.ActorKind != audit.ActorUser || capture.createMeta.ActorID == nil || *capture.createMeta.ActorID != 7 || capture.createMeta.RequestID != sessReqID {
+		t.Fatalf("session create audit meta = (%+v, %v), want RequestID=%q", capture.createMeta, capture.hasMeta, sessReqID)
 	}
 
-	// API Key 创建短链：ActorAPIKey + ActorID=99 + RequestID。
+	// API Key 创建短链：ActorAPIKey + ActorID=99 + 服务端签发 RequestID。
 	capture.hasMeta = false
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/links", strings.NewReader(`{"url":"https://example.com/b"}`))
 	req.Header.Set("Authorization", "Bearer "+apiKeyTok)
@@ -240,11 +244,15 @@ func TestAuditMetaPropagationInMiddlewareAndOrgCreate(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("api key create = %d (%s)", rec.Code, rec.Body.String())
 	}
-	if !capture.hasMeta || capture.createMeta.ActorKind != audit.ActorAPIKey || capture.createMeta.ActorID == nil || *capture.createMeta.ActorID != 99 || capture.createMeta.RequestID != "req-key-create" {
-		t.Fatalf("api key create audit meta = (%+v, %v)", capture.createMeta, capture.hasMeta)
+	keyReqID := rec.Header().Get("X-Request-ID")
+	if keyReqID == "" || keyReqID == "req-key-create" {
+		t.Fatalf("server X-Request-ID = %q", keyReqID)
+	}
+	if !capture.hasMeta || capture.createMeta.ActorKind != audit.ActorAPIKey || capture.createMeta.ActorID == nil || *capture.createMeta.ActorID != 99 || capture.createMeta.RequestID != keyReqID {
+		t.Fatalf("api key create audit meta = (%+v, %v), want RequestID=%q", capture.createMeta, capture.hasMeta, keyReqID)
 	}
 
-	// 自助建组织：ActorUser + ActorID=7 + RequestID。
+	// 自助建组织：ActorUser + ActorID=7 + 服务端签发 RequestID。
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/orgs", strings.NewReader(`{"name":"Meta Org"}`))
 	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: sessionTok})
 	req.Header.Set("X-Request-ID", "req-org-create")
@@ -253,7 +261,11 @@ func TestAuditMetaPropagationInMiddlewareAndOrgCreate(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create org = %d (%s)", rec.Code, rec.Body.String())
 	}
-	if !hasOrgMeta || orgMeta.ActorKind != audit.ActorUser || orgMeta.ActorID == nil || *orgMeta.ActorID != 7 || orgMeta.RequestID != "req-org-create" {
-		t.Fatalf("org create audit meta = (%+v, %v)", orgMeta, hasOrgMeta)
+	orgReqID := rec.Header().Get("X-Request-ID")
+	if orgReqID == "" || orgReqID == "req-org-create" {
+		t.Fatalf("server X-Request-ID = %q", orgReqID)
+	}
+	if !hasOrgMeta || orgMeta.ActorKind != audit.ActorUser || orgMeta.ActorID == nil || *orgMeta.ActorID != 7 || orgMeta.RequestID != orgReqID {
+		t.Fatalf("org create audit meta = (%+v, %v), want RequestID=%q", orgMeta, hasOrgMeta, orgReqID)
 	}
 }

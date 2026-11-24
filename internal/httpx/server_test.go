@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,5 +63,12 @@ func TestLoggerIncludesRequestID(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
-	assertLogsShareRequestID(t, &buf, "req-test-01", "inside handler", "request")
+	serverReqID := rec.Header().Get(requestIDHeader)
+	if serverReqID == "" || serverReqID == "req-test-01" {
+		t.Fatalf("response %s = %q, want server-generated id", requestIDHeader, serverReqID)
+	}
+	assertLogsShareRequestID(t, &buf, serverReqID, "inside handler", "request")
+	if !strings.Contains(buf.String(), `"client_request_id":"req-test-01"`) {
+		t.Fatalf("logs missing client_request_id: %s", buf.String())
+	}
 }

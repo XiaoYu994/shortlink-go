@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -171,5 +172,29 @@ func TestNormalizeMeta(t *testing.T) {
 				t.Fatalf("ActorID = %d, want %d", *got.ActorID, *tt.wantID)
 			}
 		})
+	}
+}
+
+func TestValidateMeta(t *testing.T) {
+	pos := int64(5)
+	zero := int64(0)
+	invalid := []Meta{
+		{},
+		{ActorKind: ActorKind("unknown")},
+		{ActorKind: ActorUser},
+		{ActorKind: ActorUser, ActorID: &zero},
+		{ActorKind: ActorAPIKey},
+		{ActorKind: ActorOperator, ActorID: &pos},
+		{ActorKind: ActorSystem, ActorID: &pos},
+	}
+	for _, m := range invalid {
+		if err := ValidateMeta(m); !errors.Is(err, ErrMissingMeta) {
+			t.Errorf("ValidateMeta(%+v) = %v, want ErrMissingMeta", m, err)
+		}
+	}
+	for _, m := range []Meta{UserMeta(5, "r"), APIKeyMeta(6, "r"), OperatorMeta("cli"), SystemMeta("job:1")} {
+		if err := ValidateMeta(m); err != nil {
+			t.Errorf("ValidateMeta(%+v) = %v, want nil", m, err)
+		}
 	}
 }

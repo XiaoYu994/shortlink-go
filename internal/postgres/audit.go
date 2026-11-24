@@ -50,22 +50,46 @@ ORDER BY a.id DESC
 LIMIT $4`
 )
 
-func resolveAuditMeta(ctx context.Context, fallback audit.Meta) (string, sql.NullInt64, string) {
-	chosen := fallback
-	if m, ok := audit.MetaFrom(ctx); ok {
-		if m.ActorKind == "" {
-			chosen = fallback
-			chosen.RequestID = m.RequestID
-		} else {
-			chosen = m
-		}
-	}
-	norm := audit.NormalizeMeta(chosen)
+func auditMetaTuple(m audit.Meta) (string, sql.NullInt64, string) {
+	norm := audit.NormalizeMeta(m)
 	var actorID sql.NullInt64
 	if norm.ActorID != nil {
 		actorID = sql.NullInt64{Int64: *norm.ActorID, Valid: true}
 	}
 	return string(norm.ActorKind), actorID, norm.RequestID
+}
+
+// requireAuditMeta 强制校验 ctx 携带合法审计元数据（fail-closed，见 ADR 0025）。
+func requireAuditMeta(ctx context.Context) (string, sql.NullInt64, string, error) {
+	m, ok := audit.MetaFrom(ctx)
+	if !ok {
+		return "", sql.NullInt64{}, "", audit.ErrMissingMeta
+	}
+	if err := audit.ValidateMeta(m); err != nil {
+		return "", sql.NullInt64{}, "", err
+	}
+	kind, actorID, reqID := auditMetaTuple(m)
+	return kind, actorID, reqID, nil
+}
+
+/*
+requireAuditMetaOrUser 优先校验 ctx 中的审计元数据；
+当方法签名已显式传入操作者 userID（如成员变更、自助建组织、带发起人的邀请、邀请兑现）
+且 ctx 未注入审计元数据时，回退到显式 userID，绝不伪造 system 或 operator。
+*/
+func requireAuditMetaOrUser(ctx context.Context, userID int64) (string, sql.NullInt64, string, error) {
+	if m, ok := audit.MetaFrom(ctx); ok {
+		if err := audit.ValidateMeta(m); err != nil {
+			return "", sql.NullInt64{}, "", err
+		}
+		kind, actorID, reqID := auditMetaTuple(m)
+		return kind, actorID, reqID, nil
+	}
+	if userID > 0 {
+		kind, actorID, reqID := auditMetaTuple(audit.UserMeta(userID, ""))
+		return kind, actorID, reqID, nil
+	}
+	return "", sql.NullInt64{}, "", audit.ErrMissingMeta
 }
 
 func marshalAuditMetadata(fields map[string]any) ([]byte, error) {
@@ -79,7 +103,7 @@ func insertAuditLogTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	tenantID int64,
-	fallback audit.Meta,
+	explicitUserID int64,
 	action audit.Action,
 	targetType audit.TargetType,
 	targetID string,
@@ -97,11 +121,14 @@ func insertAuditLogTx(
 	if targetID == "" {
 		return fmt.Errorf("insert audit log: empty target_id")
 	}
+	actorKind, actorID, reqID, err := requireAuditMetaOrUser(ctx, explicitUserID)
+	if err != nil {
+		return fmt.Errorf("insert audit log: %w", err)
+	}
 	metaJSON, err := marshalAuditMetadata(metadata)
 	if err != nil {
 		return fmt.Errorf("insert audit log: marshal metadata: %w", err)
 	}
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, fallback)
 	if _, err := tx.ExecContext(ctx, insertAuditLogSQL,
 		tenantID, actorKind, actorID, string(action), string(targetType), targetID, reqID, string(metaJSON),
 	); err != nil {

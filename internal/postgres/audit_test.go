@@ -335,3 +335,126 @@ func TestAuditLogsLifecycleAndIsolation(t *testing.T) {
 		t.Fatalf("audit count after failed mutations = %d, want %d", len(afterEvents), beforeCount+1)
 	}
 }
+
+/*
+TestAuditFailClosedMissingOrInvalidMeta 验证存储写方法不再静默降级为 system/operator（ADR 0025）：
+  - 缺少 audit.Meta 的上下文直接返回 audit.ErrMissingMeta，不落库；
+  - 携带非法 Meta（如 ActorUser 缺少正数 ActorID，或 ActorSystem 携带 ActorID）同样失败，
+    即使方法签名显式传入了 userID 也不绕过校验。
+*/
+func TestAuditFailClosedMissingOrInvalidMeta(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	bareCtx := context.Background()
+	opCtx := audit.WithMeta(bareCtx, audit.OperatorMeta("seed-op"))
+
+	seeded := mustLink(t, "https://example.com/audit-fail-closed", tenantID)
+	if err := store.Create(opCtx, seeded); err != nil {
+		t.Fatalf("seed link: %v", err)
+	}
+	issuedKey, err := store.IssueAPIKey(opCtx, IssueAPIKeyParams{
+		TenantID: tenantID,
+		Name:     "",
+		Scopes:   identity.AllAPIKeyScopes(),
+	})
+	if err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+	inv, err := store.CreateInvitation(opCtx, CreateInvitationParams{
+		TenantID: tenantID,
+		Email:    "pending-failclosed@example.com",
+		Role:     identity.RoleMember,
+	})
+	if err != nil {
+		t.Fatalf("seed invitation: %v", err)
+	}
+
+	newURL := "https://example.com/should-fail"
+	quota := int64(99)
+	checks := []struct {
+		name string
+		fn   func(ctx context.Context) error
+	}{
+		{"Create", func(ctx context.Context) error {
+			return store.Create(ctx, mustLink(t, "https://example.com/no-meta", tenantID))
+		}},
+		{"Update", func(ctx context.Context) error {
+			_, err := store.Update(ctx, tenantID, seeded.Code, link.Update{URL: &newURL})
+			return err
+		}},
+		{"Delete", func(ctx context.Context) error {
+			return store.Delete(ctx, tenantID, seeded.Code)
+		}},
+		{"Ban", func(ctx context.Context) error {
+			_, err := store.Ban(ctx, seeded.Code, link.BanReasonSpam, link.BanSourceOperator)
+			return err
+		}},
+		{"BanIfURL", func(ctx context.Context) error {
+			_, err := store.BanIfURL(ctx, seeded.Code, seeded.URL, link.BanReasonSpam, link.BanSourceRisk)
+			return err
+		}},
+		{"Unban", func(ctx context.Context) error {
+			_, err := store.Unban(ctx, seeded.Code)
+			return err
+		}},
+		{"SetTenantLimits", func(ctx context.Context) error {
+			_, err := store.SetTenantLimits(ctx, tenantID, SetTenantLimitsParams{LinkQuota: &quota})
+			return err
+		}},
+		{"IssueAPIKey", func(ctx context.Context) error {
+			_, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "Should Not Create", Scopes: identity.AllAPIKeyScopes()})
+			return err
+		}},
+		{"RevokeAPIKey", func(ctx context.Context) error {
+			return store.RevokeAPIKey(ctx, issuedKey.Key.ID)
+		}},
+		{"RevokeAPIKeyForTenant", func(ctx context.Context) error {
+			return store.RevokeAPIKeyForTenant(ctx, tenantID, issuedKey.Key.ID)
+		}},
+		{"CreateInvitation", func(ctx context.Context) error {
+			_, err := store.CreateInvitation(ctx, CreateInvitationParams{
+				TenantID: tenantID,
+				Email:    "blocked-invite@example.com",
+				Role:     identity.RoleMember,
+			})
+			return err
+		}},
+		{"RevokeInvitation", func(ctx context.Context) error {
+			return store.RevokeInvitation(ctx, identity.RevokeInvitationParams{
+				TenantID:     tenantID,
+				InvitationID: inv.ID,
+				ActorRole:    identity.RoleOwner,
+			})
+		}},
+	}
+	for _, tc := range checks {
+		t.Run("missing/"+tc.name, func(t *testing.T) {
+			err := tc.fn(bareCtx)
+			if !errors.Is(err, audit.ErrMissingMeta) {
+				t.Fatalf("%s(bareCtx) err = %v, want audit.ErrMissingMeta", tc.name, err)
+			}
+		})
+	}
+
+	// 非法 Meta（哪怕带有显式 userID 的路径）也必须 fail-closed 拒绝。
+	ownerSess, err := store.CreateSessionForIdentity(bareCtx, identity.ExternalIdentity{
+		Issuer:        "https://dex.example",
+		Subject:       "failclosed-owner",
+		Email:         "failclosed-owner@example.com",
+		EmailVerified: true,
+		Name:          "FailClosed Owner",
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("seed owner session: %v", err)
+	}
+	badActorID := int64(42)
+	invalidMetas := []audit.Meta{
+		{ActorKind: audit.ActorUser, ActorID: nil},
+		{ActorKind: audit.ActorSystem, ActorID: &badActorID},
+	}
+	for i, badMeta := range invalidMetas {
+		badCtx := audit.WithMeta(bareCtx, badMeta)
+		if _, err := store.CreateOrgForUser(badCtx, ownerSess.User.ID, "Bad Org", 5); !errors.Is(err, audit.ErrMissingMeta) {
+			t.Fatalf("case %d CreateOrgForUser(badMeta) err = %v, want audit.ErrMissingMeta", i, err)
+		}
+	}
+}

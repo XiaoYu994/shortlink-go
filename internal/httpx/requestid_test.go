@@ -14,20 +14,40 @@ import (
 	"shortlink/internal/logx"
 )
 
-func TestRequestIDKeepsValidInboundHeader(t *testing.T) {
-	srv := newTestServer()
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+func TestRequestIDGeneratesServerIDAndTracksValidClientHeader(t *testing.T) {
+	var buf bytes.Buffer
+	srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+	var gotServerID, gotClientID string
+	handler := srv.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /check", func(w http.ResponseWriter, r *http.Request) {
+			gotServerID = RequestIDFrom(r.Context())
+			gotClientID = ClientRequestIDFrom(r.Context())
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/check", nil)
 	req.Header.Set(requestIDHeader, "gw.7_abc-01")
-
 	rec := httptest.NewRecorder()
-	srv.Handler(nil).ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 
-	if got := rec.Header().Get(requestIDHeader); got != "gw.7_abc-01" {
-		t.Errorf("%s = %q, want %q", requestIDHeader, got, "gw.7_abc-01")
+	respID := rec.Header().Get(requestIDHeader)
+	if !validRequestID(respID) || respID == "gw.7_abc-01" {
+		t.Fatalf("%s = %q, want newly generated server id != inbound header", requestIDHeader, respID)
+	}
+	if gotServerID != respID {
+		t.Errorf("RequestIDFrom(ctx) = %q, want %q", gotServerID, respID)
+	}
+	if gotClientID != "gw.7_abc-01" {
+		t.Errorf("ClientRequestIDFrom(ctx) = %q, want gw.7_abc-01", gotClientID)
+	}
+	entry := oneLogEntry(t, &buf)
+	if entry["request_id"] != respID || entry["client_request_id"] != "gw.7_abc-01" {
+		t.Errorf("access log = %+v, want request_id=%q client_request_id=gw.7_abc-01", entry, respID)
 	}
 }
 
-func TestRequestIDReplacesUnsafeInboundHeader(t *testing.T) {
+func TestRequestIDRejectsUnsafeInboundClientHeader(t *testing.T) {
 	tests := []struct {
 		name    string
 		inbound string
@@ -37,11 +57,18 @@ func TestRequestIDReplacesUnsafeInboundHeader(t *testing.T) {
 		{"slash", "bad/id"},
 		{"too long", strings.Repeat("a", maxRequestIDLen+1)},
 	}
+	var gotClientID string
 	srv := newTestServer()
-	handler := srv.Handler(nil)
+	handler := srv.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /check", func(w http.ResponseWriter, r *http.Request) {
+			gotClientID = ClientRequestIDFrom(r.Context())
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			gotClientID = "stale"
+			req := httptest.NewRequest(http.MethodGet, "/check", nil)
 			req.Header.Set(requestIDHeader, tt.inbound)
 
 			rec := httptest.NewRecorder()
@@ -50,6 +77,9 @@ func TestRequestIDReplacesUnsafeInboundHeader(t *testing.T) {
 			got := rec.Header().Get(requestIDHeader)
 			if got == tt.inbound || !validRequestID(got) {
 				t.Errorf("%s = %q, want a generated id", requestIDHeader, got)
+			}
+			if gotClientID != "" {
+				t.Errorf("ClientRequestIDFrom = %q, want empty for invalid header", gotClientID)
 			}
 		})
 	}
@@ -150,8 +180,8 @@ func TestNewWithLogxLoggerDoesNotDuplicateRequestID(t *testing.T) {
 		t.Fatalf("log lines = %d, want 2:\n%s", len(lines), buf.String())
 	}
 	for _, line := range lines {
-		if count := strings.Count(string(line), `"request_id"`); count != 1 {
-			t.Errorf("request_id appeared %d times in line: %s", count, line)
+		if count := strings.Count(string(line), `"request_id":`); count != 1 {
+			t.Errorf(`"request_id": appeared %d times in line: %s`, count, line)
 		}
 	}
 }

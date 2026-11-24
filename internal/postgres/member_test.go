@@ -13,7 +13,7 @@ import (
 
 func createTestMember(t *testing.T, store *Store, tenantID int64, sub, email string, role identity.Role) int64 {
 	t.Helper()
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	issued, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       sub,
@@ -35,7 +35,7 @@ func createTestMember(t *testing.T, store *Store, tenantID int64, sub, email str
 
 func TestListMembers(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2, emptyTenant int64
 	if err := store.db.QueryRowContext(ctx, `INSERT INTO tenants (name) VALUES ('org-two') RETURNING id`).Scan(&tenant2); err != nil {
@@ -89,7 +89,7 @@ func TestListMembers(t *testing.T) {
 
 func TestUpdateMemberRole(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2 int64
 	if err := store.db.QueryRowContext(ctx, `INSERT INTO tenants (name) VALUES ('org-two') RETURNING id`).Scan(&tenant2); err != nil {
@@ -173,7 +173,7 @@ func TestUpdateMemberRole(t *testing.T) {
 
 func TestRemoveMember(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2 int64
 	if err := store.db.QueryRowContext(ctx, `INSERT INTO tenants (name) VALUES ('org-two') RETURNING id`).Scan(&tenant2); err != nil {
@@ -256,7 +256,7 @@ func TestRemoveMember(t *testing.T) {
 func TestLastOwnerProtectionConcurrent(t *testing.T) {
 	t.Run("remove", func(t *testing.T) {
 		store, tenant1 := newTestStore(t)
-		ctx := context.Background()
+		ctx := testAuditCtx(context.Background())
 		ownerA := createTestMember(t, store, tenant1, "owner-a", "a@example.com", identity.RoleOwner)
 		ownerB := createTestMember(t, store, tenant1, "owner-b", "b@example.com", identity.RoleOwner)
 
@@ -280,7 +280,7 @@ func TestLastOwnerProtectionConcurrent(t *testing.T) {
 
 	t.Run("demote", func(t *testing.T) {
 		store, tenant1 := newTestStore(t)
-		ctx := context.Background()
+		ctx := testAuditCtx(context.Background())
 		ownerA := createTestMember(t, store, tenant1, "owner-a", "a@example.com", identity.RoleOwner)
 		ownerB := createTestMember(t, store, tenant1, "owner-b", "b@example.com", identity.RoleOwner)
 

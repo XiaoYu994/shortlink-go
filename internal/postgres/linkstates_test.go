@@ -37,7 +37,7 @@ func TestLinkStatesJumpAndAdminView(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store, tenantID := newTestStore(t)
-			ctx := context.Background()
+			ctx := testAuditCtx(context.Background())
 			l := createLink(t, store, tenantID, "https://example.com/states")
 
 			if tt.expired {
@@ -120,7 +120,7 @@ func TestLinkStatesJumpAndAdminView(t *testing.T) {
 
 func TestUpdateDisabled(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	l := createLink(t, store, tenantID, "https://example.com/disable")
 
 	first, err := store.Update(ctx, tenantID, l.Code, link.Update{Disabled: boolPtr(true)})
@@ -175,7 +175,7 @@ func TestUpdateDisabled(t *testing.T) {
 
 func TestUpdateAndDeleteBanned(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	otherTenant := insertTenant(t, store, "other")
 	l := createLink(t, store, tenantID, "https://example.com/banned-write")
 
@@ -216,7 +216,7 @@ func TestUpdateAndDeleteBanned(t *testing.T) {
 
 func TestBanAndUnban(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	future := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
 	l, err := link.NewLink("https://example.com/ban", &future)
 	if err != nil {
@@ -331,7 +331,7 @@ TestBanCheckConstraints 验证数据库 CHECK 兜底：
 */
 func TestBanCheckConstraints(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	l := createLink(t, store, tenantID, "https://example.com/constraints")
 	now := time.Now()
 

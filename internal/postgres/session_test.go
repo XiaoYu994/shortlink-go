@@ -15,7 +15,7 @@ import (
 
 func TestCreateSessionForIdentityFirstAndRepeatLogin(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	first, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
@@ -100,7 +100,7 @@ func TestCreateSessionForIdentityFirstAndRepeatLogin(t *testing.T) {
 
 func TestCreateSessionForIdentityConcurrentFirstLogin(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	id := identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
@@ -161,7 +161,7 @@ func TestCreateSessionForIdentityConcurrentFirstLogin(t *testing.T) {
 
 func TestCreateSessionForIdentityValidation(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	if _, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer:  "http://127.0.0.1:5556/dex",
@@ -180,7 +180,7 @@ func TestCreateSessionForIdentityValidation(t *testing.T) {
 
 func TestCreateSessionForIdentityKeepsProfileWhenClaimsAreAbsent(t *testing.T) {
 	store, _ := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	id := identity.ExternalIdentity{
 		Issuer:        "http://127.0.0.1:5556/dex",
 		Subject:       "sub-keep",
@@ -234,7 +234,7 @@ func TestCreateSessionForIdentityKeepsProfileWhenClaimsAreAbsent(t *testing.T) {
 
 func TestAuthenticateSessionForOrg(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	if _, err := store.db.ExecContext(ctx,
 		`UPDATE tenants SET external_id = 'acme-ext', rate_limit_per_second = 25 WHERE id = $1`,
@@ -369,7 +369,7 @@ func TestAuthenticateSessionForOrg(t *testing.T) {
 
 func TestGetSessionInfoAndRevokeSession(t *testing.T) {
 	store, tenant1 := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	var tenant2 int64
 	if err := store.db.QueryRowContext(ctx,

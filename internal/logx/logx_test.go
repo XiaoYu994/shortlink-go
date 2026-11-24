@@ -19,7 +19,7 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 	// 无字段的普通 context 不输出空属性。
 	logger.InfoContext(context.Background(), "plain")
 	plain := decodeSingleJSON(t, buf.Bytes())
-	for _, key := range []string{"request_id", "tenant_id", "job_id", "job_kind"} {
+	for _, key := range []string{"request_id", "client_request_id", "tenant_id", "job_id", "job_kind"} {
 		if _, ok := plain[key]; ok {
 			t.Errorf("unexpected %s in plain log: %+v", key, plain)
 		}
@@ -30,6 +30,7 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 
 	buf.Reset()
 	ctx := WithRequestID(context.Background(), "req-42")
+	ctx = WithClientRequestID(ctx, "gw-77")
 	ctx = WithTenantID(ctx, 7)
 	ctx = WithJob(ctx, 99, "link.risk_scan", 7)
 
@@ -40,6 +41,9 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 	entry := decodeSingleJSON(t, buf.Bytes())
 	if entry["request_id"] != "req-42" {
 		t.Errorf("request_id = %v, want req-42", entry["request_id"])
+	}
+	if entry["client_request_id"] != "gw-77" {
+		t.Errorf("client_request_id = %v, want gw-77", entry["client_request_id"])
 	}
 	if entry["tenant_id"] != float64(7) {
 		t.Errorf("tenant_id = %v, want 7", entry["tenant_id"])

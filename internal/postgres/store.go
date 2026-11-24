@@ -148,7 +148,10 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.SystemMeta(""))
+	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if err != nil {
+		return fmt.Errorf("create link: %w", err)
+	}
 	for range maxCodeAttempts {
 		code, err := s.generate()
 		if err != nil {
