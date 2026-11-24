@@ -40,13 +40,16 @@ func TestServeDrainsBeforeShutdown(t *testing.T) {
 		})
 	}()
 
-	client := &http.Client{Timeout: time.Second}
+	tr := &http.Transport{DisableKeepAlives: true}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Timeout: time.Second, Transport: tr}
 	baseURL := "http://" + ln.Addr().String()
 
 	resp, err := client.Get(baseURL + "/readyz")
 	if err != nil {
 		t.Fatalf("GET /readyz before cancel: %v", err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/readyz before cancel = %d, want 200", resp.StatusCode)
@@ -66,6 +69,7 @@ func TestServeDrainsBeforeShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz during drain: %v", err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("/readyz during drain = %d, want 503", resp.StatusCode)
@@ -75,6 +79,7 @@ func TestServeDrainsBeforeShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz during drain: %v", err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/healthz during drain = %d, want 200", resp.StatusCode)
