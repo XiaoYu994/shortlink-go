@@ -56,7 +56,6 @@ func BenchmarkEnqueueInCreate(b *testing.B) {
 INSERT INTO links (code, url, expires_at, tenant_id)
 SELECT $1, $2, $3, $4
 WHERE EXISTS (SELECT 1 FROM quota)
-   OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = $4)
 RETURNING id, created_at`
 
 		b.ReportAllocs()
@@ -117,7 +116,7 @@ FROM generate_series(1, $2)`, tenantID, b.N); err != nil {
 						if len(batch) == 0 {
 							return
 						}
-						if err := store.Complete(ctx, batch[0].ID, workerID); err != nil {
+						if err := store.Complete(ctx, batch[0].ID, workerID, batch[0].LockVersion); err != nil {
 							b.Errorf("Complete: %v", err)
 							return
 						}
@@ -222,7 +221,7 @@ FROM generate_series(1, $3)`, tenantID, string(payload), b.N); err != nil {
 							b.Errorf("handler: %v", err)
 							return
 						}
-						if err := store.Complete(ctx, batch[0].ID, workerID); err != nil {
+						if err := store.Complete(ctx, batch[0].ID, workerID, batch[0].LockVersion); err != nil {
 							b.Errorf("Complete: %v", err)
 							return
 						}

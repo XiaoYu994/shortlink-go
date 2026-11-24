@@ -168,6 +168,64 @@ func TestAdminListSortAndCursor(t *testing.T) {
 	}
 }
 
+/*
+TestAdminListClicksTodayMixedZeroPagination 验证两段式今日点击排序（ADR 0022）：
+覆盖同点击数按 id 降序消歧、同一页跨「今日有点击 -> 今日 0 点击」边界，以及纯 0 点击段继续翻页。
+*/
+func TestAdminListClicksTodayMixedZeroPagination(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	l1 := createLink(t, store, tenantID, "https://example.com/z1")
+	l2 := createLink(t, store, tenantID, "https://example.com/c2")
+	l3 := createLink(t, store, tenantID, "https://example.com/c3")
+	l4 := createLink(t, store, tenantID, "https://example.com/z4")
+	l5 := createLink(t, store, tenantID, "https://example.com/c5")
+	l6 := createLink(t, store, tenantID, "https://example.com/z6")
+
+	setTodayClicks(t, store, tenantID, l2.ID, 7)
+	setTodayClicks(t, store, tenantID, l3.ID, 3)
+	setTodayClicks(t, store, tenantID, l5.ID, 3)
+
+	// 期望全量顺序：l2(7), l5(3), l3(3), l6(0), l4(0), l1(0)
+	wantIDs := []int64{l2.ID, l5.ID, l3.ID, l6.ID, l4.ID, l1.ID}
+	wantToday := []int64{7, 3, 3, 0, 0, 0}
+
+	// 按每页 2 条翻完所有页：page1 纯有点击，page2 跨有点击与 0 点击，page3 纯 0 点击。
+	var (
+		gotIDs   []int64
+		gotToday []int64
+		cursor   *link.ListCursor
+	)
+	for range 4 {
+		page, err := store.List(ctx, link.ListOptions{
+			TenantID: tenantID, Limit: 2, Sort: link.SortClicksToday, Cursor: cursor,
+		})
+		if err != nil {
+			t.Fatalf("List clicks_today cursor=%+v: %v", cursor, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, item := range page {
+			gotIDs = append(gotIDs, item.ID)
+			gotToday = append(gotToday, item.ClicksToday)
+		}
+		last := page[len(page)-1]
+		cursor = &link.ListCursor{ID: last.ID, ClicksToday: last.ClicksToday}
+	}
+
+	if len(gotIDs) != len(wantIDs) {
+		t.Fatalf("collected %d links (%v), want %d (%v)", len(gotIDs), gotIDs, len(wantIDs), wantIDs)
+	}
+	for i := range wantIDs {
+		if gotIDs[i] != wantIDs[i] || gotToday[i] != wantToday[i] {
+			t.Errorf("pos %d = (id=%d today=%d), want (id=%d today=%d)",
+				i, gotIDs[i], gotToday[i], wantIDs[i], wantToday[i])
+		}
+	}
+}
+
 func TestAdminUpdate(t *testing.T) {
 	store, tenantID := newTestStore(t)
 	ctx := context.Background()
@@ -217,6 +275,55 @@ func TestAdminUpdate(t *testing.T) {
 	}
 	if _, err := store.Update(ctx, tenantID, "missing1", link.Update{URL: &newURL}); !errors.Is(err, link.ErrNotFound) {
 		t.Errorf("missing update error = %v, want ErrNotFound", err)
+	}
+
+	// 验证 links.updated_at：元数据修改与状态切换推进时间，点击计数更新与幂等封禁不改动。
+	var beforeUpdated time.Time
+	if _, err := store.db.ExecContext(ctx, `UPDATE links SET updated_at = now() - interval '1 hour' WHERE id = $1`, l.ID); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM links WHERE id = $1`, l.ID).Scan(&beforeUpdated); err != nil {
+		t.Fatalf("read backdated updated_at: %v", err)
+	}
+	if err := store.RecordClicks(ctx, []click.Click{{LinkID: l.ID, At: time.Now().UTC(), Referrer: "direct", Device: click.DeviceDesktop, Client: click.ClientBrowser}}); err != nil {
+		t.Fatalf("RecordClicks: %v", err)
+	}
+	var afterClicks time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM links WHERE id = $1`, l.ID).Scan(&afterClicks); err != nil {
+		t.Fatalf("read updated_at after clicks: %v", err)
+	}
+	if !afterClicks.Equal(beforeUpdated) {
+		t.Errorf("RecordClicks changed updated_at: %v -> %v", beforeUpdated, afterClicks)
+	}
+	if _, err := store.Ban(ctx, l.Code, link.BanReasonSpam, link.BanSourceOperator); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	var afterBan time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM links WHERE id = $1`, l.ID).Scan(&afterBan); err != nil {
+		t.Fatalf("read updated_at after ban: %v", err)
+	}
+	if !afterBan.After(beforeUpdated) {
+		t.Errorf("Ban did not advance updated_at: before=%v after=%v", beforeUpdated, afterBan)
+	}
+	if _, err := store.Ban(ctx, l.Code, link.BanReasonPhishing, link.BanSourceRisk); err != nil {
+		t.Fatalf("idempotent Ban: %v", err)
+	}
+	var afterIdempotentBan time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM links WHERE id = $1`, l.ID).Scan(&afterIdempotentBan); err != nil {
+		t.Fatalf("read updated_at after idempotent ban: %v", err)
+	}
+	if !afterIdempotentBan.Equal(afterBan) {
+		t.Errorf("idempotent Ban changed updated_at: %v -> %v", afterBan, afterIdempotentBan)
+	}
+	if _, err := store.Unban(ctx, l.Code); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	var afterUnban time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM links WHERE id = $1`, l.ID).Scan(&afterUnban); err != nil {
+		t.Fatalf("read updated_at after unban: %v", err)
+	}
+	if afterUnban.Before(afterBan) {
+		t.Errorf("Unban moved updated_at backwards: ban=%v unban=%v", afterBan, afterUnban)
 	}
 }
 

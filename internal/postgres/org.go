@@ -15,9 +15,9 @@ const (
 
 	countOwnedOrgsSQL = `SELECT count(*) FROM memberships WHERE user_id = $1 AND role = 'owner'`
 
-	insertOrgTenantSQL = `INSERT INTO tenants (name) VALUES ($1) RETURNING id`
+	insertOrgTenantSQL = `INSERT INTO tenants (name) VALUES ($1) RETURNING id, created_at`
 
-	insertOrgOwnerMembershipSQL = `INSERT INTO memberships (user_id, tenant_id, role) VALUES ($1, $2, 'owner') RETURNING created_at`
+	insertOrgOwnerMembershipSQL = `INSERT INTO memberships (user_id, tenant_id, role) VALUES ($1, $2, 'owner')`
 )
 
 /*
@@ -66,10 +66,10 @@ func (s *Store) CreateOrgForUser(ctx context.Context, userID int64, name string,
 		orgID     int64
 		createdAt time.Time
 	)
-	if err := tx.QueryRowContext(ctx, insertOrgTenantSQL, normName).Scan(&orgID); err != nil {
+	if err := tx.QueryRowContext(ctx, insertOrgTenantSQL, normName).Scan(&orgID, &createdAt); err != nil {
 		return identity.CreatedOrg{}, fmt.Errorf("create org: insert tenant: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, insertOrgOwnerMembershipSQL, userID, orgID).Scan(&createdAt); err != nil {
+	if _, err := tx.ExecContext(ctx, insertOrgOwnerMembershipSQL, userID, orgID); err != nil {
 		return identity.CreatedOrg{}, fmt.Errorf("create org: insert owner membership: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

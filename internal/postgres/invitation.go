@@ -16,13 +16,14 @@ const (
 
 	tenantExistsSQL = `SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`
 
-	// 部分唯一索引只看 accepted_at 和 revoked_at，不看 expires_at；先关闭已过期旧邀请再插入。
+	// 部分唯一索引不看 expires_at；重邀前把已过期旧邀请标记为 superseded_at，保留其 expired 历史语义，不再借写 revoked_at（ADR 0022）。
 	expireStaleInvitationsSQL = `UPDATE invitations
-SET revoked_at = now()
+SET superseded_at = now()
 WHERE tenant_id = $1
   AND email = $2
   AND accepted_at IS NULL
   AND revoked_at IS NULL
+  AND superseded_at IS NULL
   AND expires_at IS NOT NULL
   AND expires_at <= now()`
 
@@ -35,7 +36,7 @@ FROM invitations
 WHERE tenant_id = $1
 ORDER BY id DESC`
 
-	lockInvitationForRevokeSQL = `SELECT role, accepted_at, revoked_at, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+	lockInvitationForRevokeSQL = `SELECT role, accepted_at, revoked_at, superseded_at, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
 FROM invitations
 WHERE id = $1 AND tenant_id = $2
 FOR UPDATE`
@@ -257,13 +258,14 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 	defer func() { _ = tx.Rollback() }()
 
 	var (
-		roleStr    string
-		acceptedAt sql.NullTime
-		revokedAt  sql.NullTime
-		expired    bool
+		roleStr      string
+		acceptedAt   sql.NullTime
+		revokedAt    sql.NullTime
+		supersededAt sql.NullTime
+		expired      bool
 	)
 	err = tx.QueryRowContext(ctx, lockInvitationForRevokeSQL, p.InvitationID, p.TenantID).Scan(
-		&roleStr, &acceptedAt, &revokedAt, &expired,
+		&roleStr, &acceptedAt, &revokedAt, &supersededAt, &expired,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.ErrInvitationNotFound
@@ -275,7 +277,7 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 	if !identity.CanAssignMemberRole(p.ActorRole, targetRole) {
 		return identity.ErrMemberForbidden
 	}
-	if acceptedAt.Valid || revokedAt.Valid || expired {
+	if acceptedAt.Valid || revokedAt.Valid || supersededAt.Valid || expired {
 		return identity.ErrInvitationNotPending
 	}
 

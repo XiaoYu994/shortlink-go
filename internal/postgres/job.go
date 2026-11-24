@@ -12,6 +12,10 @@ import (
 )
 
 const (
+	jobColumns = `j.id, j.kind, j.tenant_id, j.payload, j.dedup_key, j.status, j.attempts, j.max_attempts,
+          j.run_at, j.locked_at, j.locked_until, j.locked_by, j.lock_version, j.last_error,
+          j.created_at, j.updated_at, j.finished_at`
+
 	enqueueJobSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts, run_at)
 VALUES ($1, $2, $3::jsonb, $4, $5, now() + ($6::bigint * interval '1 microsecond'))
 RETURNING id`
@@ -23,56 +27,112 @@ DO NOTHING
 RETURNING id`
 
 	/*
-		两段式抢占 CTE（ADR 0020）：
-		1. running_per_tenant 统计当前每个租户在途的 running 任务数（走 idx_jobs_running_tenant）。
-		2. eligible 给每个租户的待执行任务按 run_at, id 编号，筛掉已经达到软上限的租户。
-		3. candidate 再对 jobs 表本身执行 FOR UPDATE OF j SKIP LOCKED，保证多 worker 并发不重复抢占，
-		   并再次校验 status = 'pending' AND run_at <= now()，避免并发修改的可见性窗口。
-		按租户限并发是防饿死的软上限：多个 worker 同一毫秒并发抢占时可能短暂超出 1-2 个，
-		换取不在抢占路径锁 tenants 行的低竞争开销。
+		关闭单租户限并发（MaxPerTenant <= 0）时走极简快路径：直接按 idx_jobs_claimable (run_at, id)
+		有序扫描并加锁，复杂度 O(limit)。
 	*/
-	claimJobsSQL = `WITH running_per_tenant AS (
+	claimJobsNoFairnessSQL = `WITH candidate AS (
+    SELECT id
+    FROM jobs
+    WHERE status = 'pending'
+      AND run_at <= now()
+    ORDER BY run_at, id
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs j
+SET status = 'running',
+    attempts = j.attempts + 1,
+    lock_version = j.lock_version + 1,
+    locked_at = now(),
+    locked_until = now() + ($2::bigint * interval '1 microsecond'),
+    locked_by = $3,
+    updated_at = now()
+FROM candidate c
+WHERE j.id = c.id
+RETURNING ` + jobColumns
+
+	/*
+		开启单租户公平软上限（MaxPerTenant > 0）时的松散索引扫描 + LATERAL 抢占（ADR 0022）：
+		1. active_tenants 沿 idx_jobs_pending_tenant_run (tenant_id, run_at, id) 做递归跳扫，
+		   即使单个租户积压数十万条 pending 任务，也只花 1 次 B-Tree 查找跳到下一个租户；
+		2. per_tenant_candidates 对每个未满软上限的租户用 LATERAL 只取至多 (max_per_tenant - running_cnt) 条最早到期任务，
+		   同时合并 tenant_id IS NULL 的平台任务，彻底消除旧版全表窗口函数 O(N log N) 排序雪崩；
+		3. candidate 按全局 (run_at, id) 取前 $1 条并执行 FOR UPDATE OF j SKIP LOCKED 复核可见性，
+		   原子递增 lock_version 作为单调递增 Fencing Token。
+	*/
+	claimJobsFairSQL = `WITH RECURSIVE running_per_tenant AS (
     SELECT tenant_id, count(*) AS cnt
     FROM jobs
     WHERE status = 'running' AND tenant_id IS NOT NULL
     GROUP BY tenant_id
 ),
-eligible AS (
-    SELECT j.id,
-           CASE
-               WHEN j.tenant_id IS NULL THEN 1
-               ELSE row_number() OVER (PARTITION BY j.tenant_id ORDER BY j.run_at, j.id)
-           END AS tenant_rn,
-           COALESCE(r.cnt, 0) AS running_cnt
-    FROM jobs j
-    LEFT JOIN running_per_tenant r ON r.tenant_id = j.tenant_id
-    WHERE j.status = 'pending'
-      AND j.run_at <= now()
-      AND ($2::int <= 0 OR j.tenant_id IS NULL OR COALESCE(r.cnt, 0) < $2)
+active_tenants(tenant_id) AS (
+    (
+        SELECT tenant_id
+        FROM jobs
+        WHERE status = 'pending' AND tenant_id IS NOT NULL
+        ORDER BY tenant_id
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT next_t.tenant_id
+    FROM active_tenants a
+    CROSS JOIN LATERAL (
+        SELECT j.tenant_id
+        FROM jobs j
+        WHERE j.status = 'pending'
+          AND j.tenant_id > a.tenant_id
+        ORDER BY j.tenant_id
+        LIMIT 1
+    ) AS next_t
+),
+per_tenant_candidates AS (
+    SELECT picked.id, picked.run_at
+    FROM active_tenants t
+    LEFT JOIN running_per_tenant r ON r.tenant_id = t.tenant_id
+    CROSS JOIN LATERAL (
+        SELECT j.id, j.run_at
+        FROM jobs j
+        WHERE j.status = 'pending'
+          AND j.tenant_id = t.tenant_id
+          AND j.run_at <= now()
+        ORDER BY j.run_at, j.id
+        LIMIT GREATEST($2::bigint - COALESCE(r.cnt, 0), 0)
+    ) AS picked
+    WHERE COALESCE(r.cnt, 0) < $2::bigint
+    UNION ALL
+    SELECT p.id, p.run_at
+    FROM (
+        SELECT id, run_at
+        FROM jobs
+        WHERE status = 'pending'
+          AND tenant_id IS NULL
+          AND run_at <= now()
+        ORDER BY run_at, id
+        LIMIT $1
+    ) AS p
 ),
 candidate AS (
     SELECT j.id
-    FROM jobs j
-    JOIN eligible e ON e.id = j.id
+    FROM per_tenant_candidates p
+    JOIN jobs j ON j.id = p.id
     WHERE j.status = 'pending'
       AND j.run_at <= now()
-      AND ($2::int <= 0 OR j.tenant_id IS NULL OR (e.running_cnt + e.tenant_rn) <= $2)
-    ORDER BY j.run_at, j.id
+    ORDER BY p.run_at, p.id
     LIMIT $1
     FOR UPDATE OF j SKIP LOCKED
 )
 UPDATE jobs j
 SET status = 'running',
     attempts = j.attempts + 1,
+    lock_version = j.lock_version + 1,
     locked_at = now(),
     locked_until = now() + ($3::bigint * interval '1 microsecond'),
     locked_by = $4,
     updated_at = now()
 FROM candidate c
 WHERE j.id = c.id
-RETURNING j.id, j.kind, j.tenant_id, j.payload, j.dedup_key, j.status, j.attempts, j.max_attempts,
-          j.run_at, j.locked_at, j.locked_until, j.locked_by, j.last_error,
-          j.created_at, j.updated_at, j.finished_at`
+RETURNING ` + jobColumns
 
 	completeJobSQL = `UPDATE jobs
 SET status = 'done',
@@ -82,33 +142,36 @@ SET status = 'done',
     last_error = '',
     finished_at = now(),
     updated_at = now()
-WHERE id = $1 AND status = 'running' AND locked_by = $2`
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND lock_version = $3`
 
 	retryJobSQL = `UPDATE jobs
 SET status = 'pending',
-    attempts = CASE WHEN $5 THEN attempts ELSE GREATEST(attempts - 1, 0) END,
-    run_at = now() + ($3::bigint * interval '1 microsecond'),
+    attempts = CASE WHEN $6 THEN attempts ELSE GREATEST(attempts - 1, 0) END,
+    run_at = now() + ($4::bigint * interval '1 microsecond'),
     locked_at = NULL,
     locked_until = NULL,
     locked_by = NULL,
-    last_error = $4,
+    last_error = $5,
     updated_at = now()
-WHERE id = $1 AND status = 'running' AND locked_by = $2`
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND lock_version = $3`
 
 	deadJobSQL = `UPDATE jobs
 SET status = 'dead',
     locked_at = NULL,
     locked_until = NULL,
     locked_by = NULL,
-    last_error = $3,
+    last_error = $4,
     finished_at = now(),
     updated_at = now()
-WHERE id = $1 AND status = 'running' AND locked_by = $2`
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND lock_version = $3`
 
+	// 分批回收租约到期任务（<= now() 与其他过期边界一致），避免崩溃恢复时单事务锁全量行。
 	reapExpiredJobsSQL = `WITH expired AS (
     SELECT id
     FROM jobs
-    WHERE status = 'running' AND locked_until < now()
+    WHERE status = 'running' AND locked_until <= now()
+    ORDER BY locked_until
+    LIMIT $2
     FOR UPDATE SKIP LOCKED
 )
 UPDATE jobs j
@@ -124,10 +187,41 @@ FROM expired e
 WHERE j.id = e.id
 RETURNING j.kind, j.status`
 
-	oldestPendingAgesSQL = `SELECT kind, GREATEST(EXTRACT(EPOCH FROM (now() - min(run_at))), 0)
-FROM jobs
-WHERE status = 'pending' AND run_at <= now()
-GROUP BY kind`
+	/*
+		沿 idx_jobs_pending_kind_run (kind, run_at) 做松散索引扫描：
+		只做 O(kind 数) 次索引查找，积压数十万条时不再全表扫回表 GROUP BY（ADR 0022）。
+	*/
+	oldestPendingAgesSQL = `WITH RECURSIVE kinds(kind) AS (
+    (
+        SELECT kind
+        FROM jobs
+        WHERE status = 'pending'
+        ORDER BY kind
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT next_k.kind
+    FROM kinds k
+    CROSS JOIN LATERAL (
+        SELECT j.kind
+        FROM jobs j
+        WHERE j.status = 'pending'
+          AND j.kind > k.kind
+        ORDER BY j.kind
+        LIMIT 1
+    ) AS next_k
+)
+SELECT k.kind, GREATEST(EXTRACT(EPOCH FROM (now() - first_due.run_at)), 0)
+FROM kinds k
+CROSS JOIN LATERAL (
+    SELECT j.run_at
+    FROM jobs j
+    WHERE j.status = 'pending'
+      AND j.kind = k.kind
+      AND j.run_at <= now()
+    ORDER BY j.run_at
+    LIMIT 1
+) AS first_due`
 
 	cleanupDoneJobsSQL = `DELETE FROM jobs
 WHERE id IN (
@@ -193,7 +287,7 @@ func (s *Store) EnqueueJob(ctx context.Context, p EnqueueJobParams) (int64, erro
 	return id, nil
 }
 
-// Claim 批量抢占可执行任务，返回已标记为 running 且递增 attempts 的任务列表。
+// Claim 批量抢占可执行任务，返回已标记为 running 且递增 attempts、lock_version 的任务列表。
 func (s *Store) Claim(ctx context.Context, p job.ClaimParams) ([]job.Job, error) {
 	if p.Limit <= 0 {
 		return nil, nil
@@ -205,7 +299,15 @@ func (s *Store) Claim(ctx context.Context, p job.ClaimParams) ([]job.Job, error)
 		return nil, errors.New("claim jobs: locked_by is required")
 	}
 
-	rows, err := s.db.QueryContext(ctx, claimJobsSQL, p.Limit, p.MaxPerTenant, p.Lease.Microseconds(), p.LockedBy)
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if p.MaxPerTenant <= 0 {
+		rows, err = s.db.QueryContext(ctx, claimJobsNoFairnessSQL, p.Limit, p.Lease.Microseconds(), p.LockedBy)
+	} else {
+		rows, err = s.db.QueryContext(ctx, claimJobsFairSQL, p.Limit, p.MaxPerTenant, p.Lease.Microseconds(), p.LockedBy)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("claim jobs: %w", err)
 	}
@@ -225,40 +327,57 @@ func (s *Store) Claim(ctx context.Context, p job.ClaimParams) ([]job.Job, error)
 	return out, nil
 }
 
-// Complete 将当前 worker 持有的任务标记为 done。租约已易主时静默不覆盖。
-func (s *Store) Complete(ctx context.Context, id int64, lockedBy string) error {
-	if _, err := s.db.ExecContext(ctx, completeJobSQL, id, lockedBy); err != nil {
+// Complete 将当前 worker 持有的任务标记为 done。租约已易主或代次过期时返回 job.ErrLeaseLost。
+func (s *Store) Complete(ctx context.Context, id int64, lockedBy string, lockVersion int64) error {
+	res, err := s.db.ExecContext(ctx, completeJobSQL, id, lockedBy, lockVersion)
+	if err != nil {
 		return fmt.Errorf("complete job %d: %w", id, err)
 	}
-	return nil
+	return checkJobLeaseAffected(res, "complete", id)
 }
 
-// Retry 将当前 worker 持有的任务退回 pending 并设置下次运行时间。
+// Retry 将当前 worker 持有的任务退回 pending 并设置下次运行时间。租约失守时返回 job.ErrLeaseLost。
 func (s *Store) Retry(ctx context.Context, p job.RetryParams) error {
 	if p.Delay < 0 {
 		p.Delay = 0
 	}
-	if _, err := s.db.ExecContext(ctx, retryJobSQL,
-		p.ID, p.LockedBy, p.Delay.Microseconds(), p.LastError, p.ConsumeAttempt); err != nil {
+	res, err := s.db.ExecContext(ctx, retryJobSQL,
+		p.ID, p.LockedBy, p.LockVersion, p.Delay.Microseconds(), p.LastError, p.ConsumeAttempt)
+	if err != nil {
 		return fmt.Errorf("retry job %d: %w", p.ID, err)
 	}
-	return nil
+	return checkJobLeaseAffected(res, "retry", p.ID)
 }
 
-// Dead 将当前 worker 持有的任务标记为 dead 终态。
-func (s *Store) Dead(ctx context.Context, id int64, lockedBy, lastError string) error {
-	if _, err := s.db.ExecContext(ctx, deadJobSQL, id, lockedBy, lastError); err != nil {
+// Dead 将当前 worker 持有的任务标记为 dead 终态。租约失守时返回 job.ErrLeaseLost。
+func (s *Store) Dead(ctx context.Context, id int64, lockedBy string, lockVersion int64, lastError string) error {
+	res, err := s.db.ExecContext(ctx, deadJobSQL, id, lockedBy, lockVersion, lastError)
+	if err != nil {
 		return fmt.Errorf("mark job %d dead: %w", id, err)
+	}
+	return checkJobLeaseAffected(res, "mark dead", id)
+}
+
+func checkJobLeaseAffected(res sql.Result, op string, id int64) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s job %d: rows affected: %w", op, id, err)
+	}
+	if n == 0 {
+		return job.ErrLeaseLost
 	}
 	return nil
 }
 
-// ReapExpired 回收所有租约已过期的 running 任务，返回每条被回收任务的 kind 和新状态。
-func (s *Store) ReapExpired(ctx context.Context, retryDelay time.Duration) ([]job.ReapedRecord, error) {
+// ReapExpired 分批回收至多 limit 条租约已过期的 running 任务，返回每条被回收任务的 kind 和新状态。
+func (s *Store) ReapExpired(ctx context.Context, retryDelay time.Duration, limit int) ([]job.ReapedRecord, error) {
 	if retryDelay < 0 {
 		retryDelay = 0
 	}
-	rows, err := s.db.QueryContext(ctx, reapExpiredJobsSQL, retryDelay.Microseconds())
+	if limit <= 0 {
+		limit = job.DefaultReapBatchSize
+	}
+	rows, err := s.db.QueryContext(ctx, reapExpiredJobsSQL, retryDelay.Microseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("reap expired jobs: %w", err)
 	}
@@ -335,7 +454,7 @@ func scanJob(scanner rowScanner) (job.Job, error) {
 	if err := scanner.Scan(
 		&j.ID, &j.Kind, &tenantID, &j.Payload, &dedupKey, &j.Status,
 		&j.Attempts, &j.MaxAttempts, &j.RunAt, &lockedAt, &lockedUntil,
-		&lockedBy, &j.LastError, &j.CreatedAt, &j.UpdatedAt, &finishedAt,
+		&lockedBy, &j.LockVersion, &j.LastError, &j.CreatedAt, &j.UpdatedAt, &finishedAt,
 	); err != nil {
 		return job.Job{}, err
 	}

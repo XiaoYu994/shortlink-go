@@ -53,7 +53,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if payload.LinkID != l.ID || payload.Code != l.Code || payload.URL != l.URL {
 		t.Errorf("payload = %+v, want link (%d, %q, %q)", payload, l.ID, l.Code, l.URL)
 	}
-	if err := store.Complete(ctx, claimed[0].ID, "test-worker"); err != nil {
+	if err := store.Complete(ctx, claimed[0].ID, "test-worker", claimed[0].LockVersion); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestJobClaimSkipLockedConcurrentAndFairness(t *testing.T) {
 	counts := map[int64]int{}
 	for _, j := range fairBatch {
 		counts[*j.TenantID]++
-		if err := store.Complete(ctx, j.ID, "fair-worker"); err != nil {
+		if err := store.Complete(ctx, j.ID, "fair-worker", j.LockVersion); err != nil {
 			t.Fatalf("Complete %d: %v", j.ID, err)
 		}
 	}
@@ -258,7 +258,7 @@ func TestJobReapAndCleanup(t *testing.T) {
 		t.Fatalf("expire leases: %v", err)
 	}
 
-	reaped, err := store.ReapExpired(ctx, 0)
+	reaped, err := store.ReapExpired(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("ReapExpired: %v", err)
 	}
@@ -273,7 +273,10 @@ func TestJobReapAndCleanup(t *testing.T) {
 		t.Errorf("statuses = (%q, %q), want (pending, dead)", statusRetry, statusDead)
 	}
 
-	// 2. OldestPendingAges 反映到期 pending 任务等待时长。
+	// 2. OldestPendingAges 反映到期 pending 任务等待时长，且忽略未到期的未来任务。
+	if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: "future.only", TenantID: &tenantID, Delay: time.Hour}); err != nil {
+		t.Fatalf("EnqueueJob future.only: %v", err)
+	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET run_at = now() - interval '30 seconds' WHERE id = $1`, idRetry); err != nil {
 		t.Fatalf("backdate run_at: %v", err)
 	}
@@ -284,12 +287,16 @@ func TestJobReapAndCleanup(t *testing.T) {
 	if ages[job.KindLinkRiskScan] < 25*time.Second {
 		t.Errorf("oldest pending age = %v, want >= 25s", ages[job.KindLinkRiskScan])
 	}
+	if _, ok := ages["future.only"]; ok {
+		t.Errorf("future.only should not appear in OldestPendingAges: %+v", ages)
+	}
 
 	// 3. CleanupDoneJobs 只删超保留期的 done 任务，保留 dead 和近期 done。
-	if _, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "w"}); err != nil {
-		t.Fatalf("Claim idRetry: %v", err)
+	claimedRetry, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "w"})
+	if err != nil || len(claimedRetry) != 1 {
+		t.Fatalf("Claim idRetry: got %d err=%v", len(claimedRetry), err)
 	}
-	if err := store.Complete(ctx, idRetry, "w"); err != nil {
+	if err := store.Complete(ctx, claimedRetry[0].ID, "w", claimedRetry[0].LockVersion); err != nil {
 		t.Fatalf("Complete idRetry: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET finished_at = now() - interval '10 days' WHERE id = $1`, idRetry); err != nil {
@@ -308,32 +315,200 @@ func TestJobReapAndCleanup(t *testing.T) {
 		t.Errorf("dead job should be preserved, count = %d", deadCount)
 	}
 
-	// 4. CleanupExpiredSessions 只删过期/吊销超保留期的会话，保留有效会话。
+	// 4. CleanupExpiredSessions 拆分清理过期会话与已吊销超保留期会话，并遵守 limit 上限。
 	activeSess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer: "https://dex.example", Subject: "sub-active", Email: "a@example.com", EmailVerified: true,
 	}, time.Hour)
 	if err != nil {
 		t.Fatalf("CreateSessionForIdentity active: %v", err)
 	}
-	oldSess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
+	oldExpiredSess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
 		Issuer: "https://dex.example", Subject: "sub-old", Email: "b@example.com", EmailVerified: true,
 	}, time.Hour)
 	if err != nil {
 		t.Fatalf("CreateSessionForIdentity old: %v", err)
 	}
+	oldRevokedSess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
+		Issuer: "https://dex.example", Subject: "sub-revoked-old", Email: "c@example.com", EmailVerified: true,
+	}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSessionForIdentity old revoked: %v", err)
+	}
+	recentRevokedSess, err := store.CreateSessionForIdentity(ctx, identity.ExternalIdentity{
+		Issuer: "https://dex.example", Subject: "sub-revoked-recent", Email: "d@example.com", EmailVerified: true,
+	}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSessionForIdentity recent revoked: %v", err)
+	}
 	if _, err := store.db.ExecContext(ctx,
 		`UPDATE sessions SET created_at = now() - interval '12 days', expires_at = now() - interval '10 days' WHERE id = $1`,
-		oldSess.Session.ID); err != nil {
-		t.Fatalf("backdate session: %v", err)
+		oldExpiredSess.Session.ID); err != nil {
+		t.Fatalf("backdate expired session: %v", err)
 	}
-	deletedSess, err := store.CleanupExpiredSessions(ctx, 7*24*time.Hour, 100)
+	// 已吊销但 expires_at 仍在将来：验证拆分后的第二条按 revoked_at 清理的索引路径生效。
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE sessions SET revoked_at = now() - interval '10 days' WHERE id = $1`,
+		oldRevokedSess.Session.ID); err != nil {
+		t.Fatalf("backdate old revoked session: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE sessions SET revoked_at = now() - interval '1 hour' WHERE id = $1`,
+		recentRevokedSess.Session.ID); err != nil {
+		t.Fatalf("set recent revoked session: %v", err)
+	}
+
+	deletedSess, err := store.CleanupExpiredSessions(ctx, 7*24*time.Hour, 1)
 	if err != nil {
-		t.Fatalf("CleanupExpiredSessions: %v", err)
+		t.Fatalf("CleanupExpiredSessions limit=1: %v", err)
 	}
 	if deletedSess != 1 {
-		t.Errorf("deletedSess = %d, want 1", deletedSess)
+		t.Errorf("deletedSess (limit=1) = %d, want 1", deletedSess)
+	}
+	deletedSess2, err := store.CleanupExpiredSessions(ctx, 7*24*time.Hour, 100)
+	if err != nil {
+		t.Fatalf("CleanupExpiredSessions remaining: %v", err)
+	}
+	if deletedSess2 != 1 {
+		t.Errorf("deletedSess (remaining) = %d, want 1 (old revoked session)", deletedSess2)
+	}
+	var keptSessions int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM sessions`).Scan(&keptSessions); err != nil {
+		t.Fatalf("count remaining sessions: %v", err)
+	}
+	if keptSessions != 2 {
+		t.Errorf("remaining sessions = %d, want 2 (active + recent revoked)", keptSessions)
 	}
 	if _, err := store.GetSessionInfo(ctx, activeSess.Token); err != nil {
 		t.Errorf("active session should remain valid: %v", err)
+	}
+}
+
+func TestJobLeaseFencingPreventsSameWorkerABAAndReapBatchLimit(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 5})
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	// 1. 同一 worker 首次抢占，拿到 lock_version = 1。
+	first, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "same-worker"})
+	if err != nil || len(first) != 1 || first[0].LockVersion != 1 {
+		t.Fatalf("first Claim = %+v err=%v, want 1 job lockVersion=1", first, err)
+	}
+
+	// 2. 模拟租约到期被 Reaper 回收，随后被同一 WorkerID 再次抢占，拿到 lock_version = 2。
+	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET locked_until = now() WHERE id = $1`, id); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	reaped, err := store.ReapExpired(ctx, 0, 10)
+	if err != nil || len(reaped) != 1 {
+		t.Fatalf("ReapExpired = %+v err=%v, want 1", reaped, err)
+	}
+	second, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "same-worker"})
+	if err != nil || len(second) != 1 || second[0].LockVersion != 2 {
+		t.Fatalf("second Claim = %+v err=%v, want 1 job lockVersion=2", second, err)
+	}
+
+	// 3. 持有旧 lock_version=1 的陈旧协程调 Complete / Retry / Dead 全部被拒，不能覆盖新租约。
+	if err := store.Complete(ctx, id, "same-worker", 1); !errors.Is(err, job.ErrLeaseLost) {
+		t.Errorf("stale Complete err = %v, want ErrLeaseLost", err)
+	}
+	if err := store.Retry(ctx, job.RetryParams{ID: id, LockedBy: "same-worker", LockVersion: 1, LastError: "stale"}); !errors.Is(err, job.ErrLeaseLost) {
+		t.Errorf("stale Retry err = %v, want ErrLeaseLost", err)
+	}
+	if err := store.Dead(ctx, id, "same-worker", 1, "stale"); !errors.Is(err, job.ErrLeaseLost) {
+		t.Errorf("stale Dead err = %v, want ErrLeaseLost", err)
+	}
+
+	var status string
+	var lockVersion int64
+	if err := store.db.QueryRowContext(ctx, `SELECT status, lock_version FROM jobs WHERE id = $1`, id).Scan(&status, &lockVersion); err != nil {
+		t.Fatalf("select job: %v", err)
+	}
+	if status != job.StatusRunning || lockVersion != 2 {
+		t.Fatalf("job after stale writes = (%q, v%d), want (running, v2)", status, lockVersion)
+	}
+
+	// 4. 持有当前 lock_version=2 的协程正常提交成功。
+	if err := store.Complete(ctx, id, "same-worker", 2); err != nil {
+		t.Fatalf("current Complete: %v", err)
+	}
+
+	// 5. ReapExpired 遵守 limit 分批回收上限。
+	for range 5 {
+		if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID}); err != nil {
+			t.Fatalf("EnqueueJob batch: %v", err)
+		}
+	}
+	if _, err := store.Claim(ctx, job.ClaimParams{Limit: 5, Lease: time.Minute, LockedBy: "batch-w"}); err != nil {
+		t.Fatalf("Claim batch: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET locked_until = now() - interval '1 second' WHERE status = 'running'`); err != nil {
+		t.Fatalf("expire batch leases: %v", err)
+	}
+	for _, want := range []int{2, 2, 1, 0} {
+		got, err := store.ReapExpired(ctx, 0, 2)
+		if err != nil {
+			t.Fatalf("ReapExpired limit=2: %v", err)
+		}
+		if len(got) != want {
+			t.Fatalf("ReapExpired len = %d, want %d", len(got), want)
+		}
+	}
+}
+
+func TestJobClaimFairnessIncludesPlatformJobsAndSkipsFuture(t *testing.T) {
+	store, tenantA := newTestStore(t)
+	ctx := context.Background()
+
+	issuedB, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "tenant-fair-b", Scopes: identity.AllAPIKeyScopes()})
+	if err != nil {
+		t.Fatalf("IssueAPIKey tenantB: %v", err)
+	}
+	tenantB := issuedB.Tenant.ID
+
+	// 租户 A 放 4 条到期 + 2 条未来任务；租户 B 放 1 条到期；平台级（tenant_id=NULL）放 2 条到期。
+	for range 4 {
+		if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantA}); err != nil {
+			t.Fatalf("enqueue A due: %v", err)
+		}
+	}
+	for range 2 {
+		if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantA, Delay: time.Hour}); err != nil {
+			t.Fatalf("enqueue A future: %v", err)
+		}
+	}
+	if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantB}); err != nil {
+		t.Fatalf("enqueue B due: %v", err)
+	}
+	for range 2 {
+		if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: "platform.sync", TenantID: nil}); err != nil {
+			t.Fatalf("enqueue platform: %v", err)
+		}
+	}
+
+	batch, err := store.Claim(ctx, job.ClaimParams{Limit: 10, MaxPerTenant: 2, Lease: time.Minute, LockedBy: "w-fair"})
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	// 期望：A 最多 2 条 + B 1 条 + 平台 2 条 = 5 条（不含未来任务，也不超 A 的 2 条上限）。
+	if len(batch) != 5 {
+		t.Fatalf("claimed len = %d, want 5", len(batch))
+	}
+	var countA, countB, countPlatform int
+	for _, j := range batch {
+		switch {
+		case j.TenantID == nil:
+			countPlatform++
+		case *j.TenantID == tenantA:
+			countA++
+		case *j.TenantID == tenantB:
+			countB++
+		}
+	}
+	if countA != 2 || countB != 1 || countPlatform != 2 {
+		t.Errorf("counts (A=%d, B=%d, platform=%d), want (2, 1, 2)", countA, countB, countPlatform)
 	}
 }

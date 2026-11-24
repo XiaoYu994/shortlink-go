@@ -300,3 +300,70 @@ func TestMigration007InvitationsConstraints(t *testing.T) {
 		t.Fatalf("re-invite after accept: %v", err)
 	}
 }
+
+func TestMigration010IndexesAndConstraints(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	for _, idx := range []string{
+		"idx_sessions_revoked_at",
+		"idx_jobs_pending_tenant_run",
+		"idx_jobs_pending_kind_run",
+		"idx_memberships_tenant_owners",
+	} {
+		var exists bool
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, idx,
+		).Scan(&exists); err != nil {
+			t.Fatalf("check index %s: %v", idx, err)
+		}
+		if !exists {
+			t.Errorf("missing expected migration 010 index %s", idx)
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tests := []struct {
+		name    string
+		query   string
+		args    []any
+		wantErr string
+	}{
+		{
+			name:    "api key hash length",
+			query:   `INSERT INTO api_keys (tenant_id, key_hash, scopes) VALUES ($1, $2, ARRAY['links:read']::text[])`,
+			args:    []any{tenantID, []byte("too-short")},
+			wantErr: "ck_api_keys_hash_length",
+		},
+		{
+			name:    "blank tenant name",
+			query:   `INSERT INTO tenants (name) VALUES ('   ')`,
+			wantErr: "ck_tenants_name_length",
+		},
+		{
+			name:    "overlong tenant name",
+			query:   `INSERT INTO tenants (name) VALUES ($1)`,
+			args:    []any{strings.Repeat("a", 101)},
+			wantErr: "ck_tenants_name_length",
+		},
+		{
+			name:    "invitation revoked and superseded together",
+			query:   `INSERT INTO invitations (tenant_id, email, role, created_at, revoked_at, superseded_at) VALUES ($1, 'dupstate@example.com', 'member', $2, $2, $2)`,
+			args:    []any{tenantID, now},
+			wantErr: "ck_invitations_state",
+		},
+		{
+			name:    "negative job lock_version",
+			query:   `INSERT INTO jobs (kind, lock_version) VALUES ('link.risk_scan', -1)`,
+			wantErr: "ck_jobs_lock_version_nonnegative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := store.db.ExecContext(ctx, tt.query, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want constraint %q", err, tt.wantErr)
+			}
+		})
+	}
+}

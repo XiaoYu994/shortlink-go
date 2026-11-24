@@ -206,6 +206,11 @@ func validateIssue(p IssueAPIKeyParams) error {
 	if hasID == hasName || p.TenantID < 0 {
 		return ErrIssueTarget
 	}
+	if hasName {
+		if _, err := identity.NormalizeOrgName(p.Name); err != nil {
+			return err
+		}
+	}
 	if hasID && p.ExternalID != "" {
 		return ErrExternalIDOnExisting
 	}

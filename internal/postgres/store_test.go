@@ -306,9 +306,27 @@ SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, index).Scan(&exi
 		}
 	}
 
-	orphan := mustLink(t, "https://example.com/no-tenant", tenantID)
-	orphan.TenantID = tenantID + 1_000_000
-	if err := store.Create(ctx, orphan); err != nil {
-		t.Fatalf("Create with missing tenant: %v", err)
+	// 数据库本身没有外键：直接 SQL 写入孤儿 tenant_id 仍能落库（ADR 0010）；
+	// 但应用层 Store.Create 必须拦截不存在的租户并返回 ErrTenantNotFound，不产生孤儿链接或任务（ADR 0022）。
+	missingTenant := tenantID + 1_000_000
+	orphan := mustLink(t, "https://example.com/no-tenant", missingTenant)
+	if err := store.Create(ctx, orphan); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("Create with missing tenant err = %v, want ErrTenantNotFound", err)
+	}
+	zeroTenant := mustLink(t, "https://example.com/zero-tenant", 0)
+	if err := store.Create(ctx, zeroTenant); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("Create with zero tenant err = %v, want ErrTenantNotFound", err)
+	}
+	var orphanJobs int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM jobs`).Scan(&orphanJobs); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if orphanJobs != 0 {
+		t.Errorf("orphan jobs = %d, want 0", orphanJobs)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO links (code, url, tenant_id) VALUES ('orph0001', 'https://example.com/raw-orphan', $1)`,
+		missingTenant); err != nil {
+		t.Fatalf("raw SQL insert orphan link without FK: %v", err)
 	}
 }

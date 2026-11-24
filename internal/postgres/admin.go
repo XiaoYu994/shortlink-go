@@ -19,8 +19,9 @@ clicks_today 用左连接取 UTC 今天的行；没有点击时补 0。
 封禁的三个字段同有同无，由数据库 CHECK 保证。
 */
 const (
-	adminLinkColumns = `l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id, l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks, COALESCE(d.clicks, 0)`
-	todayJoin        = ` LEFT JOIN link_clicks_daily d ON d.link_id = l.id AND d.day = (now() AT TIME ZONE 'UTC')::date`
+	adminLinkColumns     = `l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id, l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks, COALESCE(d.clicks, 0)`
+	zeroTodayLinkColumns = `l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id, l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks, 0::bigint`
+	todayJoin            = ` LEFT JOIN link_clicks_daily d ON d.link_id = l.id AND d.day = (now() AT TIME ZONE 'UTC')::date`
 
 	/*
 		linkColumns 是 scanLink 读取的十列，顺序不能改。
@@ -57,17 +58,55 @@ WHERE l.tenant_id = $1 AND (l.clicks, l.id) < ($2, $3)
 ORDER BY l.clicks DESC, l.id DESC
 LIMIT $4`
 
-	listLinksFirstByClicksTodaySQL = `SELECT ` + adminLinkColumns + `
-FROM links l` + todayJoin + `
-WHERE l.tenant_id = $1
-ORDER BY COALESCE(d.clicks, 0) DESC, l.id DESC
+	/*
+		按今日点击排序拆成两段有序索引扫描，消除旧版 LEFT JOIN + COALESCE 导致的整租户全量排序（ADR 0022）：
+		1. 今日有点击段：以 link_clicks_daily 为驱动表，直接走 idx_link_clicks_daily_tenant_day_clicks；
+		2. 今日 0 点击段：仅在第一段不足 limit 或游标已落入 clicks_today = 0 时，沿 idx_links_tenant_id 逆序补齐。
+		两段在同一只读 REPEATABLE READ 事务内执行，共用同一个数据库 now() 日期与 MVCC 快照。
+	*/
+	listLinksFirstClickedTodaySQL = `SELECT ` + adminLinkColumns + `
+FROM link_clicks_daily d
+JOIN links l ON l.id = d.link_id
+WHERE d.tenant_id = $1
+  AND d.day = (now() AT TIME ZONE 'UTC')::date
+  AND l.tenant_id = $1
+ORDER BY d.clicks DESC, d.link_id DESC
 LIMIT $2`
 
-	listLinksAfterClicksTodaySQL = `SELECT ` + adminLinkColumns + `
-FROM links l` + todayJoin + `
-WHERE l.tenant_id = $1 AND (COALESCE(d.clicks, 0), l.id) < ($2, $3)
-ORDER BY COALESCE(d.clicks, 0) DESC, l.id DESC
+	listLinksAfterClickedTodaySQL = `SELECT ` + adminLinkColumns + `
+FROM link_clicks_daily d
+JOIN links l ON l.id = d.link_id
+WHERE d.tenant_id = $1
+  AND d.day = (now() AT TIME ZONE 'UTC')::date
+  AND l.tenant_id = $1
+  AND (d.clicks, d.link_id) < ($2, $3)
+ORDER BY d.clicks DESC, d.link_id DESC
 LIMIT $4`
+
+	listLinksFirstUnclickedTodaySQL = `SELECT ` + zeroTodayLinkColumns + `
+FROM links l
+WHERE l.tenant_id = $1
+  AND NOT EXISTS (
+      SELECT 1
+      FROM link_clicks_daily d
+      WHERE d.link_id = l.id
+        AND d.day = (now() AT TIME ZONE 'UTC')::date
+  )
+ORDER BY l.id DESC
+LIMIT $2`
+
+	listLinksAfterUnclickedTodaySQL = `SELECT ` + zeroTodayLinkColumns + `
+FROM links l
+WHERE l.tenant_id = $1
+  AND l.id < $2
+  AND NOT EXISTS (
+      SELECT 1
+      FROM link_clicks_daily d
+      WHERE d.link_id = l.id
+        AND d.day = (now() AT TIME ZONE 'UTC')::date
+  )
+ORDER BY l.id DESC
+LIMIT $3`
 
 	getForTenantSQL = `SELECT ` + adminLinkColumns + `
 FROM links l` + todayJoin + `
@@ -88,7 +127,8 @@ WHERE l.code = $1 AND l.tenant_id = $2`
         expires_at = CASE WHEN $5 THEN $6::timestamptz ELSE expires_at END,
         disabled_at = CASE WHEN NOT $7 THEN disabled_at
                            WHEN $8 THEN COALESCE(disabled_at, now())
-                           ELSE NULL END
+                           ELSE NULL END,
+        updated_at = now()
     WHERE code = $1 AND tenant_id = $2 AND banned_at IS NULL
     RETURNING ` + linkColumns + `, clicks
 ),
@@ -121,7 +161,8 @@ LEFT JOIN link_clicks_daily d ON d.link_id = u.id AND d.day = (now() AT TIME ZON
 	banLinkSQL = `UPDATE links
 SET banned_at = COALESCE(banned_at, now()),
     ban_reason = COALESCE(ban_reason, $2),
-    ban_source = COALESCE(ban_source, $3)
+    ban_source = COALESCE(ban_source, $3),
+    updated_at = CASE WHEN banned_at IS NULL THEN now() ELSE updated_at END
 WHERE code = $1
 RETURNING ` + linkColumns
 
@@ -132,7 +173,8 @@ RETURNING ` + linkColumns
 	banLinkIfURLSQL = `UPDATE links
 SET banned_at = COALESCE(banned_at, now()),
     ban_reason = COALESCE(ban_reason, $2),
-    ban_source = COALESCE(ban_source, $3)
+    ban_source = COALESCE(ban_source, $3),
+    updated_at = CASE WHEN banned_at IS NULL THEN now() ELSE updated_at END
 WHERE code = $1 AND url = $4
 RETURNING ` + linkColumns
 
@@ -140,7 +182,10 @@ RETURNING ` + linkColumns
 
 	// Unban 把三个封禁字段一起清空。没被封禁的链接解封是空操作，仍然返回这一行。
 	unbanLinkSQL = `UPDATE links
-SET banned_at = NULL, ban_reason = NULL, ban_source = NULL
+SET banned_at = NULL,
+    ban_reason = NULL,
+    ban_source = NULL,
+    updated_at = CASE WHEN banned_at IS NOT NULL THEN now() ELSE updated_at END
 WHERE code = $1
 RETURNING ` + linkColumns
 )
@@ -200,12 +245,7 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 				opts.TenantID, cursor.Clicks, cursor.ID, opts.Limit)
 		}
 	case link.SortClicksToday:
-		if opts.Cursor == nil {
-			rows, err = s.db.QueryContext(ctx, listLinksFirstByClicksTodaySQL, opts.TenantID, opts.Limit)
-		} else {
-			rows, err = s.db.QueryContext(ctx, listLinksAfterClicksTodaySQL,
-				opts.TenantID, cursor.ClicksToday, cursor.ID, opts.Limit)
-		}
+		return s.listByClicksToday(ctx, opts)
 	default:
 		return nil, fmt.Errorf("list links: unknown sort %q", opts.Sort)
 	}
@@ -214,7 +254,70 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 	}
 	defer func() { _ = rows.Close() }()
 
-	result := make([]link.AdminLink, 0, opts.Limit)
+	return scanAdminLinks(rows, opts.Limit)
+}
+
+func (s *Store) listByClicksToday(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
+	// 游标已经落入今日 0 点击段时，跳过 link_clicks_daily 直接按 links (tenant_id, id DESC) 翻页。
+	if opts.Cursor != nil && opts.Cursor.ClicksToday <= 0 {
+		return queryAdminLinks(ctx, s.db, opts.Limit, listLinksAfterUnclickedTodaySQL,
+			opts.TenantID, opts.Cursor.ID, opts.Limit)
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelRepeatableRead,
+		ReadOnly:  true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		query string
+		args  []any
+	)
+	if opts.Cursor == nil {
+		query = listLinksFirstClickedTodaySQL
+		args = []any{opts.TenantID, opts.Limit}
+	} else {
+		query = listLinksAfterClickedTodaySQL
+		args = []any{opts.TenantID, opts.Cursor.ClicksToday, opts.Cursor.ID, opts.Limit}
+	}
+	result, err := queryAdminLinks(ctx, tx, opts.Limit, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	if remaining := opts.Limit - len(result); remaining > 0 {
+		more, err := queryAdminLinks(ctx, tx, remaining, listLinksFirstUnclickedTodaySQL, opts.TenantID, remaining)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, more...)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	return result, nil
+}
+
+type queryContexter interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func queryAdminLinks(ctx context.Context, q queryContexter, capHint int, query string, args ...any) ([]link.AdminLink, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list links: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanAdminLinks(rows, capHint)
+}
+
+func scanAdminLinks(rows *sql.Rows, capHint int) ([]link.AdminLink, error) {
+	result := make([]link.AdminLink, 0, capHint)
 	for rows.Next() {
 		got, err := scanAdminLink(rows)
 		if err != nil {

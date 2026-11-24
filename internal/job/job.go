@@ -23,8 +23,12 @@ const (
 	// KindLinkRiskScan 是创建或修改短链 URL 后触发的异步风控扫描任务。
 	KindLinkRiskScan = "link.risk_scan"
 
-	DefaultMaxAttempts = 5
+	DefaultMaxAttempts   = 5
+	DefaultReapBatchSize = 500
 )
+
+// ErrLeaseLost 表示任务租约已过期、被回收或被其他抢占接管，当前回写被 Fencing Token 拒绝。
+var ErrLeaseLost = errors.New("job lease lost")
 
 // Job 是队列中的一条后台任务记录。
 type Job struct {
@@ -40,6 +44,7 @@ type Job struct {
 	LockedAt    *time.Time
 	LockedUntil *time.Time
 	LockedBy    string
+	LockVersion int64
 	LastError   string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -61,10 +66,12 @@ type ClaimParams struct {
 RetryParams 描述一次失败或延迟后的任务归还。
 ConsumeAttempt 为 false 时把本次抢占增加的 attempts 退回，用于目标 host 限速等非故障延迟，
 避免正常任务因短暂限速耗尽重试次数进入 dead。
+LockVersion 是抢占时获得的单调递增 Fencing Token，防止陈旧执行者覆盖新租约。
 */
 type RetryParams struct {
 	ID             int64
 	LockedBy       string
+	LockVersion    int64
 	Delay          time.Duration
 	LastError      string
 	ConsumeAttempt bool
@@ -79,10 +86,10 @@ type ReapedRecord struct {
 // Queue 是 Runner 依赖的持久化任务队列能力，由存储层实现。
 type Queue interface {
 	Claim(ctx context.Context, p ClaimParams) ([]Job, error)
-	Complete(ctx context.Context, id int64, lockedBy string) error
+	Complete(ctx context.Context, id int64, lockedBy string, lockVersion int64) error
 	Retry(ctx context.Context, p RetryParams) error
-	Dead(ctx context.Context, id int64, lockedBy, lastError string) error
-	ReapExpired(ctx context.Context, retryDelay time.Duration) ([]ReapedRecord, error)
+	Dead(ctx context.Context, id int64, lockedBy string, lockVersion int64, lastError string) error
+	ReapExpired(ctx context.Context, retryDelay time.Duration, limit int) ([]ReapedRecord, error)
 	OldestPendingAges(ctx context.Context) (map[string]time.Duration, error)
 }
 

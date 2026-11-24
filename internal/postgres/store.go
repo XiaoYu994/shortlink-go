@@ -41,13 +41,11 @@ const (
     THEN 0 ELSE link_usage END`
 
 	/*
-		占本月配额、插入链接与入队异步风控任务在同一条多 CTE 语句里完成，三条动作一起提交或一起回滚（ADR 0020）。
+		占本月配额、插入链接与入队异步风控任务在同一条多 CTE 语句里完成，三条动作一起提交或一起回滚（ADR 0020、ADR 0022）。
 		quota 把「本月已创建数」和它所属的月份一起更新：月份过期时先按 0 算再加一；
 		EXISTS (SELECT 1 FROM quota) 靠它的 RETURNING 判断是否拿到了配额，
 		数据修改 CTE 的改动只有 RETURNING 能看到。
-		租户行不存在时照常插入链接，不占配额：这是 ADR 0010 允许的孤儿引用，
-		只会在直接调用存储时出现，HTTP 路径的租户一定来自鉴权。
-		tenant_id 为 0 时用 NULLIF 转成 NULL，避免违反 ck_jobs_tenant_id_positive。
+		租户不存在时 quota 为空，不再绕过配额静默写入孤儿链接，由 Create 补查后返回 ErrTenantNotFound（守住 ADR 0010 应用层完整性）。
 		语句失败（例如短码冲突）时配额更新和风控入队随语句一起回滚，重试不会重复计数也不留孤儿任务。
 	*/
 	insertLinkSQL = `WITH quota AS (
@@ -62,13 +60,12 @@ inserted AS (
     INSERT INTO links (code, url, expires_at, tenant_id)
     SELECT $1, $2, $3, $4
     WHERE EXISTS (SELECT 1 FROM quota)
-       OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = $4)
     RETURNING id, code, url, created_at, tenant_id
 ),
 enqueued AS (
     INSERT INTO jobs (kind, tenant_id, payload)
     SELECT 'link.risk_scan',
-           NULLIF(i.tenant_id, 0),
+           i.tenant_id,
            jsonb_build_object('link_id', i.id, 'code', i.code, 'url', i.url)
     FROM inserted i
 )
@@ -152,10 +149,16 @@ func Open(ctx context.Context, dsn string, cfg PoolConfig) (*sql.DB, error) {
 
 /*
 Create 生成随机短码，在同一语句里占用本月配额并插入链接，成功后回填 ID、Code 和 CreatedAt。
-本月配额不足返回 link.ErrQuotaExceeded，不写链接也不增加用量；删除链接不返还配额。
-短码冲突时重新生成，最多重试 maxCodeAttempts 次；冲突的语句会连同用量一起回滚。
+租户不存在返回 ErrTenantNotFound；本月配额不足返回 link.ErrQuotaExceeded，不写链接也不增加用量。
+删除链接不返还配额。短码冲突时重新生成，最多重试 maxCodeAttempts 次；冲突的语句会连同用量一起回滚。
 */
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
+	if l.TenantID <= 0 {
+		return ErrTenantNotFound
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for range maxCodeAttempts {
 		code, err := s.generate()
 		if err != nil {
@@ -168,9 +171,12 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			return nil
 		}
 		if errors.Is(err, sql.ErrNoRows) {
-			exceeded, checkErr := s.quotaExceeded(ctx, l.TenantID)
+			exceeded, exists, checkErr := s.checkCreateQuota(ctx, l.TenantID)
 			if checkErr != nil {
 				return checkErr
+			}
+			if !exists {
+				return ErrTenantNotFound
 			}
 			if exceeded {
 				return link.ErrQuotaExceeded
@@ -190,20 +196,17 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 }
 
 /*
-quotaExceeded 用和创建语句相同的「有效已用量」复查租户是否真的没有配额。
-插入语句只在租户存在且本月用量已满时不返回行；租户不存在时链接照常写入，
-所以查不到租户按「没有超配额」处理，交给调用方走其他分支。
+checkCreateQuota 用和创建语句相同的「有效已用量」区分租户不存在与本月配额已满。
 */
-func (s *Store) quotaExceeded(ctx context.Context, tenantID int64) (bool, error) {
-	var exceeded bool
-	err := s.db.QueryRowContext(ctx, quotaExceededSQL, tenantID).Scan(&exceeded)
+func (s *Store) checkCreateQuota(ctx context.Context, tenantID int64) (exceeded, exists bool, err error) {
+	err = s.db.QueryRowContext(ctx, quotaExceededSQL, tenantID).Scan(&exceeded)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("check link quota: %w", err)
+		return false, false, fmt.Errorf("check link quota: %w", err)
 	}
-	return exceeded, nil
+	return exceeded, true, nil
 }
 
 /*

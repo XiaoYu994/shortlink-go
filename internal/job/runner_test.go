@@ -75,6 +75,7 @@ func (q *fakeQueue) Claim(_ context.Context, p ClaimParams) ([]Job, error) {
 		}
 		j.Status = StatusRunning
 		j.Attempts++
+		j.LockVersion++
 		j.LockedBy = p.LockedBy
 		lockedAt := now
 		lockedUntil := now.Add(p.Lease)
@@ -86,11 +87,12 @@ func (q *fakeQueue) Claim(_ context.Context, p ClaimParams) ([]Job, error) {
 	return out, nil
 }
 
-func (q *fakeQueue) Complete(_ context.Context, id int64, lockedBy string) error {
+func (q *fakeQueue) Complete(_ context.Context, id int64, lockedBy string, lockVersion int64) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i := range q.jobs {
-		if q.jobs[i].ID == id && q.jobs[i].Status == StatusRunning && q.jobs[i].LockedBy == lockedBy {
+		if q.jobs[i].ID == id && q.jobs[i].Status == StatusRunning &&
+			q.jobs[i].LockedBy == lockedBy && q.jobs[i].LockVersion == lockVersion {
 			now := time.Now()
 			q.jobs[i].Status = StatusDone
 			q.jobs[i].LockedBy = ""
@@ -101,14 +103,15 @@ func (q *fakeQueue) Complete(_ context.Context, id int64, lockedBy string) error
 			return nil
 		}
 	}
-	return nil
+	return ErrLeaseLost
 }
 
 func (q *fakeQueue) Retry(_ context.Context, p RetryParams) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i := range q.jobs {
-		if q.jobs[i].ID == p.ID && q.jobs[i].Status == StatusRunning && q.jobs[i].LockedBy == p.LockedBy {
+		if q.jobs[i].ID == p.ID && q.jobs[i].Status == StatusRunning &&
+			q.jobs[i].LockedBy == p.LockedBy && q.jobs[i].LockVersion == p.LockVersion {
 			j := &q.jobs[i]
 			j.Status = StatusPending
 			if !p.ConsumeAttempt && j.Attempts > 0 {
@@ -122,14 +125,15 @@ func (q *fakeQueue) Retry(_ context.Context, p RetryParams) error {
 			return nil
 		}
 	}
-	return nil
+	return ErrLeaseLost
 }
 
-func (q *fakeQueue) Dead(_ context.Context, id int64, lockedBy, lastError string) error {
+func (q *fakeQueue) Dead(_ context.Context, id int64, lockedBy string, lockVersion int64, lastError string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i := range q.jobs {
-		if q.jobs[i].ID == id && q.jobs[i].Status == StatusRunning && q.jobs[i].LockedBy == lockedBy {
+		if q.jobs[i].ID == id && q.jobs[i].Status == StatusRunning &&
+			q.jobs[i].LockedBy == lockedBy && q.jobs[i].LockVersion == lockVersion {
 			now := time.Now()
 			q.jobs[i].Status = StatusDead
 			q.jobs[i].LockedBy = ""
@@ -140,20 +144,26 @@ func (q *fakeQueue) Dead(_ context.Context, id int64, lockedBy, lastError string
 			return nil
 		}
 	}
-	return nil
+	return ErrLeaseLost
 }
 
-func (q *fakeQueue) ReapExpired(_ context.Context, retryDelay time.Duration) ([]ReapedRecord, error) {
+func (q *fakeQueue) ReapExpired(_ context.Context, retryDelay time.Duration, limit int) ([]ReapedRecord, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.reapErr != nil {
 		return nil, q.reapErr
 	}
+	if limit <= 0 {
+		limit = DefaultReapBatchSize
+	}
 	now := time.Now()
 	var records []ReapedRecord
 	for i := range q.jobs {
+		if len(records) >= limit {
+			break
+		}
 		j := &q.jobs[i]
-		if j.Status != StatusRunning || j.LockedUntil == nil || !j.LockedUntil.Before(now) {
+		if j.Status != StatusRunning || j.LockedUntil == nil || j.LockedUntil.After(now) {
 			continue
 		}
 		j.LockedAt = nil
@@ -504,5 +514,124 @@ func TestRunnerGracefulShutdownWaitsAndTimesOut(t *testing.T) {
 				t.Fatalf("Run error = %v, want DeadlineExceeded", err)
 			}
 		})
+	})
+}
+
+func TestRunnerStaleLeaseLostDoesNotOverwriteSameWorkerReclaim(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q := newFakeQueue()
+		id := q.add(Job{Kind: "aba", MaxAttempts: 3})
+
+		firstStarted := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		secondStarted := make(chan struct{})
+		releaseSecond := make(chan struct{})
+		var calls atomic.Int32
+
+		reg := prometheus.NewRegistry()
+		runner := New(q, map[string]Handler{
+			"aba": func(context.Context, Job) error {
+				switch calls.Add(1) {
+				case 1:
+					close(firstStarted)
+					<-releaseFirst
+					return nil
+				case 2:
+					close(secondStarted)
+					<-releaseSecond
+					return nil
+				default:
+					return nil
+				}
+			},
+		}, nil, reg, Options{
+			WorkerID:        "same-worker",
+			Concurrency:     2,
+			PollInterval:    50 * time.Millisecond,
+			LeaseDuration:   200 * time.Millisecond,
+			JobTimeout:      10 * time.Second,
+			ReapInterval:    100 * time.Millisecond,
+			BaseBackoff:     50 * time.Millisecond,
+			MetricsInterval: time.Hour,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- runner.Run(ctx) }()
+
+		<-firstStarted
+		// 等第一个租约超时被同一进程 Reaper 回收并被同一 WorkerID 再次抢占。
+		<-secondStarted
+
+		// 第一个陈旧协程此时返回成功，必须被 Fencing Token 拦下，不能覆盖第二个协程的 running 状态也不能记 done 指标。
+		close(releaseFirst)
+		synctest.Wait()
+
+		j, _ := q.get(id)
+		if j.Status != StatusRunning || j.LockVersion != 2 {
+			t.Fatalf("after stale completion: status=%q lockVersion=%d, want running v2", j.Status, j.LockVersion)
+		}
+		if got := testutil.ToFloat64(runner.processed.WithLabelValues("aba", resultDone)); got != 0 {
+			t.Fatalf("processed{done} after stale completion = %v, want 0", got)
+		}
+
+		close(releaseSecond)
+		synctest.Wait()
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+
+		j, _ = q.get(id)
+		if j.Status != StatusDone || j.LockVersion != 2 {
+			t.Fatalf("final job: status=%q lockVersion=%d, want done v2", j.Status, j.LockVersion)
+		}
+		if got := testutil.ToFloat64(runner.processed.WithLabelValues("aba", resultDone)); got != 1 {
+			t.Errorf("final processed{done} = %v, want 1", got)
+		}
+	})
+}
+
+func TestRunnerReaperDrainsAcrossBatches(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q := newFakeQueue()
+		expired := time.Now().Add(-time.Second)
+		for range 5 {
+			q.add(Job{
+				Kind:        KindLinkRiskScan,
+				Status:      StatusRunning,
+				Attempts:    1,
+				MaxAttempts: 3,
+				LockedAt:    &expired,
+				LockedUntil: &expired,
+				LockedBy:    "crashed-worker",
+				LockVersion: 1,
+			})
+		}
+
+		reg := prometheus.NewRegistry()
+		runner := New(q, map[string]Handler{}, nil, reg, Options{
+			Concurrency:     1,
+			PollInterval:    time.Hour,
+			ReapInterval:    100 * time.Millisecond,
+			ReapBatchSize:   2,
+			BaseBackoff:     time.Hour,
+			MetricsInterval: time.Hour,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- runner.Run(ctx) }()
+
+		time.Sleep(150 * time.Millisecond)
+		synctest.Wait()
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+
+		if got := testutil.ToFloat64(runner.reaped.WithLabelValues(KindLinkRiskScan)); got != 5 {
+			t.Errorf("reaped = %v, want 5 across batches", got)
+		}
 	})
 }

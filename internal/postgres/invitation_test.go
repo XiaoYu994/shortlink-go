@@ -58,7 +58,7 @@ func TestCreateInvitation(t *testing.T) {
 		t.Fatalf("second = %+v", second)
 	}
 
-	// 模拟已过期但尚未写 revoked_at 的历史待兑现邀请，再次邀请应自动关闭过期行并成功。
+	// 模拟已过期但尚未关闭的历史待兑现邀请，再次邀请应将其标记为 superseded_at，保留 expired 语义而不覆盖 revoked_at（ADR 0022）。
 	if _, err := store.db.ExecContext(ctx,
 		`UPDATE invitations SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 minute' WHERE id = $1`,
 		second.ID,
@@ -79,12 +79,32 @@ func TestCreateInvitation(t *testing.T) {
 		t.Fatalf("third = %+v", third)
 	}
 
-	var staleRevoked sql.NullTime
-	if err := store.db.QueryRowContext(ctx, `SELECT revoked_at FROM invitations WHERE id = $1`, second.ID).Scan(&staleRevoked); err != nil {
-		t.Fatalf("check stale revoked_at: %v", err)
+	var staleRevoked, staleSuperseded sql.NullTime
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT revoked_at, superseded_at FROM invitations WHERE id = $1`, second.ID,
+	).Scan(&staleRevoked, &staleSuperseded); err != nil {
+		t.Fatalf("check stale superseded_at: %v", err)
 	}
-	if !staleRevoked.Valid {
-		t.Error("expected expired invitation to be marked revoked_at on re-invite")
+	if !staleSuperseded.Valid {
+		t.Error("expected expired invitation to be marked superseded_at on re-invite")
+	}
+	if staleRevoked.Valid {
+		t.Error("expired invitation should keep revoked_at NULL so history remains expired rather than revoked")
+	}
+
+	listed, err := store.ListInvitations(ctx, tenant1)
+	if err != nil {
+		t.Fatalf("ListInvitations: %v", err)
+	}
+	for _, item := range listed {
+		if item.ID == second.ID && item.Status(time.Now().UTC()) != "expired" {
+			t.Errorf("superseded expired invitation status = %q, want expired", item.Status(time.Now().UTC()))
+		}
+	}
+	if err := store.RevokeInvitation(ctx, identity.RevokeInvitationParams{
+		TenantID: tenant1, InvitationID: second.ID, ActorRole: identity.RoleOwner,
+	}); !errors.Is(err, identity.ErrInvitationNotPending) {
+		t.Errorf("revoke superseded invitation err = %v, want ErrInvitationNotPending", err)
 	}
 }
 

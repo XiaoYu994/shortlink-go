@@ -10,6 +10,14 @@ import (
 	"shortlink/internal/link"
 )
 
+const readFixedDimensionsSQL = `SELECT dimension, value, sum(clicks)
+FROM link_dimension_daily
+WHERE link_id = $1
+  AND day BETWEEN $2::date AND $3::date
+  AND dimension IN ($4, $5)
+GROUP BY dimension, value
+ORDER BY dimension, sum(clicks) DESC, value`
+
 /*
 Stats 读取一条链接的日统计。
 
@@ -89,9 +97,9 @@ ORDER BY day`, linkID, from, to)
 }
 
 /*
-readDimensionClicks 分三次读三类维度。
+readDimensionClicks 分两次读三类维度：
 参考来源只取点击数最多的 10 个：host 来自客户端，是唯一能被任意撑大的维度，
-不能先全部拉到 Go 再截断。设备、客户端类别固定，取全部。
+不能先全部拉到 Go 再截断。设备、客户端类别固定，合并成一次查询取全部，减少一次 DB 往返（ADR 0022）。
 点击数相同时按取值升序，保证结果稳定。
 不合成 other 汇总行：other 是存下来的真实取值，和普通 host 一样参与排序。
 */
@@ -100,11 +108,35 @@ func readDimensionClicks(ctx context.Context, tx *sql.Tx, linkID int64, from, to
 	if stats.Referrers, err = readDimension(ctx, tx, linkID, from, to, dimensionReferrer, 10); err != nil {
 		return err
 	}
-	if stats.Devices, err = readDimension(ctx, tx, linkID, from, to, dimensionDevice, 0); err != nil {
-		return err
+	return readFixedDimensions(ctx, tx, linkID, from, to, stats)
+}
+
+func readFixedDimensions(ctx context.Context, tx *sql.Tx, linkID int64, from, to string, stats *link.Stats) error {
+	rows, err := tx.QueryContext(ctx, readFixedDimensionsSQL, linkID, from, to, dimensionDevice, dimensionClient)
+	if err != nil {
+		return fmt.Errorf("link stats dimensions: %w", err)
 	}
-	stats.Clients, err = readDimension(ctx, tx, linkID, from, to, dimensionClient, 0)
-	return err
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			dim   string
+			count link.DimensionCount
+		)
+		if err := rows.Scan(&dim, &count.Value, &count.Clicks); err != nil {
+			return fmt.Errorf("link stats dimensions: %w", err)
+		}
+		switch dim {
+		case dimensionDevice:
+			stats.Devices = append(stats.Devices, count)
+		case dimensionClient:
+			stats.Clients = append(stats.Clients, count)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("link stats dimensions: %w", err)
+	}
+	return nil
 }
 
 // readDimension 按维度汇总日期范围内的点击数；limit <= 0 表示不限制。

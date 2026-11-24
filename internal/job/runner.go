@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -38,9 +39,10 @@ const (
 	resultRetry   = "retry"
 	resultDead    = "dead"
 
-	commitTimeout   = 5 * time.Second
-	reapQueryLimit  = 5 * time.Second
-	periodicTimeout = 30 * time.Second
+	commitTimeout         = 5 * time.Second
+	reapQueryLimit        = 5 * time.Second
+	maxReapBatchesPerTick = 20
+	periodicTimeout       = 30 * time.Second
 )
 
 // 覆盖 1ms 到约 65s，适配空 handler 到 5s+ 外部抓取任务耗时。
@@ -58,6 +60,7 @@ type Options struct {
 	LeaseDuration   time.Duration
 	JobTimeout      time.Duration
 	ReapInterval    time.Duration
+	ReapBatchSize   int
 	BaseBackoff     time.Duration
 	MaxBackoff      time.Duration
 	ShutdownTimeout time.Duration
@@ -86,6 +89,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ReapInterval <= 0 {
 		o.ReapInterval = DefaultReapInterval
+	}
+	if o.ReapBatchSize <= 0 {
+		o.ReapBatchSize = DefaultReapBatchSize
 	}
 	if o.BaseBackoff <= 0 {
 		o.BaseBackoff = DefaultBaseBackoff
@@ -339,15 +345,15 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 
 	switch {
 	case err == nil:
-		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID); cerr != nil {
-			r.logger.Error("complete job", "job_id", j.ID, "kind", j.Kind, "err", cerr)
+		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion); cerr != nil {
+			r.logCommitError("complete job", j, cerr)
 			return
 		}
 		r.processed.WithLabelValues(j.Kind, resultDone).Inc()
 
 	case IsSkipped(err):
-		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID); cerr != nil {
-			r.logger.Error("complete skipped job", "job_id", j.ID, "kind", j.Kind, "err", cerr)
+		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion); cerr != nil {
+			r.logCommitError("complete skipped job", j, cerr)
 			return
 		}
 		r.processed.WithLabelValues(j.Kind, resultSkipped).Inc()
@@ -357,18 +363,19 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 		if rerr := r.queue.Retry(commitCtx, RetryParams{
 			ID:             j.ID,
 			LockedBy:       r.opts.WorkerID,
+			LockVersion:    j.LockVersion,
 			Delay:          delay,
 			LastError:      err.Error(),
 			ConsumeAttempt: false,
 		}); rerr != nil {
-			r.logger.Error("defer job", "job_id", j.ID, "kind", j.Kind, "err", rerr)
+			r.logCommitError("defer job", j, rerr)
 			return
 		}
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 
 	case IsPermanent(err) || j.Attempts >= j.MaxAttempts:
-		if derr := r.queue.Dead(commitCtx, j.ID, r.opts.WorkerID, err.Error()); derr != nil {
-			r.logger.Error("mark job dead", "job_id", j.ID, "kind", j.Kind, "err", derr)
+		if derr := r.queue.Dead(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion, err.Error()); derr != nil {
+			r.logCommitError("mark job dead", j, derr)
 			return
 		}
 		r.logger.Warn("job moved to dead", "job_id", j.ID, "kind", j.Kind, "attempts", j.Attempts, "err", err)
@@ -379,17 +386,27 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 		if rerr := r.queue.Retry(commitCtx, RetryParams{
 			ID:             j.ID,
 			LockedBy:       r.opts.WorkerID,
+			LockVersion:    j.LockVersion,
 			Delay:          delay,
 			LastError:      err.Error(),
 			ConsumeAttempt: true,
 		}); rerr != nil {
-			r.logger.Error("retry job", "job_id", j.ID, "kind", j.Kind, "err", rerr)
+			r.logCommitError("retry job", j, rerr)
 			return
 		}
 		r.logger.Warn("job scheduled for retry",
 			"job_id", j.ID, "kind", j.Kind, "attempts", j.Attempts, "delay", delay, "err", err)
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 	}
+}
+
+func (r *Runner) logCommitError(op string, j Job, err error) {
+	if errors.Is(err, ErrLeaseLost) {
+		r.logger.Warn("job lease lost before commit",
+			"op", op, "job_id", j.ID, "kind", j.Kind, "lock_version", j.LockVersion)
+		return
+	}
+	r.logger.Error(op, "job_id", j.ID, "kind", j.Kind, "err", err)
 }
 
 func isDeferred(err error) bool {
@@ -435,24 +452,33 @@ func (r *Runner) reapLoop(ctx context.Context) {
 }
 
 func (r *Runner) reapOnce(ctx context.Context) {
-	qctx, cancel := context.WithTimeout(ctx, reapQueryLimit)
-	defer cancel()
-
-	records, err := r.queue.ReapExpired(qctx, r.opts.BaseBackoff)
-	if err != nil {
-		if ctx.Err() == nil {
-			r.logger.Error("reap expired jobs", "err", err)
+	totalReaped := 0
+	for range maxReapBatchesPerTick {
+		if ctx.Err() != nil {
+			return
 		}
-		return
-	}
-	for _, rec := range records {
-		r.reaped.WithLabelValues(rec.Kind).Inc()
-		if rec.Status == StatusDead {
-			r.processed.WithLabelValues(rec.Kind, resultDead).Inc()
+		qctx, cancel := context.WithTimeout(ctx, reapQueryLimit)
+		records, err := r.queue.ReapExpired(qctx, r.opts.BaseBackoff, r.opts.ReapBatchSize)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				r.logger.Error("reap expired jobs", "err", err)
+			}
+			return
+		}
+		for _, rec := range records {
+			r.reaped.WithLabelValues(rec.Kind).Inc()
+			if rec.Status == StatusDead {
+				r.processed.WithLabelValues(rec.Kind, resultDead).Inc()
+			}
+		}
+		totalReaped += len(records)
+		if len(records) < r.opts.ReapBatchSize {
+			break
 		}
 	}
-	if len(records) > 0 {
-		r.logger.Warn("reaped expired job leases", "count", len(records))
+	if totalReaped > 0 {
+		r.logger.Warn("reaped expired job leases", "count", totalReaped)
 	}
 }
 
