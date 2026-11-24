@@ -295,6 +295,9 @@ func TestMetricsRegistered(t *testing.T) {
 	if got := gatheredCounter(t, reg, writtenMetricName, map[string]string{"result": resultError}); got != 0 {
 		t.Errorf("written error = %v, want 0", got)
 	}
+	if got := gatheredGauge(t, reg, stoppedMetricName); got != 0 {
+		t.Errorf("%s = %v, want 0", stoppedMetricName, got)
+	}
 }
 
 func TestFlushesOnInterval(t *testing.T) {
@@ -538,6 +541,9 @@ func TestCloseWaitsForCanceledWrite(t *testing.T) {
 func TestWorkerPanicStopsRecorder(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	r := New(panicStore{}, discardLogger(), reg, Options{Buffer: 4, BatchSize: 1, Interval: time.Hour})
+	if got := gatheredGauge(t, reg, stoppedMetricName); got != 0 {
+		t.Fatalf("initial %s = %v, want 0", stoppedMetricName, got)
+	}
 	record(r, 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -545,6 +551,9 @@ func TestWorkerPanicStopsRecorder(t *testing.T) {
 	err := r.Close(ctx)
 	if err == nil || !strings.Contains(err.Error(), "store exploded") {
 		t.Fatalf("Close error = %v, want panic", err)
+	}
+	if got := gatheredGauge(t, reg, stoppedMetricName); got != 1 {
+		t.Errorf("after panic %s = %v, want 1", stoppedMetricName, got)
 	}
 	record(r, 2)
 	if got := gatheredCounter(t, reg, droppedMetricName, nil); got != 0 {
@@ -587,6 +596,27 @@ func gatheredCounter(t *testing.T, g prometheus.Gatherer, name string, labels ma
 			return c.GetValue()
 		}
 		t.Fatalf("metric %s labels %v not found", name, labels)
+	}
+	t.Fatalf("metric %s is not registered", name)
+	return 0
+}
+
+func gatheredGauge(t *testing.T, g prometheus.Gatherer, name string) float64 {
+	t.Helper()
+	families, err := g.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			if m.GetGauge() == nil {
+				t.Fatalf("metric %s is not a gauge", name)
+			}
+			return m.GetGauge().GetValue()
+		}
 	}
 	t.Fatalf("metric %s is not registered", name)
 	return 0

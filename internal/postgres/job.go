@@ -232,6 +232,16 @@ WHERE id IN (
     ORDER BY finished_at, id
     LIMIT $2
 )`
+
+	cleanupDeadJobsSQL = `DELETE FROM jobs
+WHERE id IN (
+    SELECT id
+    FROM jobs
+    WHERE status = 'dead'
+      AND finished_at < now() - ($1::bigint * interval '1 microsecond')
+    ORDER BY finished_at, id
+    LIMIT $2
+)`
 )
 
 // EnqueueJobParams 是显式入队一条通用后台任务的参数。
@@ -422,23 +432,14 @@ func (s *Store) OldestPendingAges(ctx context.Context) (map[string]time.Duration
 	return ages, nil
 }
 
-// CleanupDoneJobs 分批删除早于 retention 的已完成任务，控制表膨胀；dead 任务保留供排障。
+// CleanupDoneJobs 分批删除早于 retention 的已完成任务，控制表膨胀。
 func (s *Store) CleanupDoneJobs(ctx context.Context, retention time.Duration, limit int) (int64, error) {
-	if retention < 0 {
-		return 0, errors.New("cleanup done jobs: retention must not be negative")
-	}
-	if limit <= 0 {
-		return 0, errors.New("cleanup done jobs: limit must be positive")
-	}
-	res, err := s.db.ExecContext(ctx, cleanupDoneJobsSQL, retention.Microseconds(), limit)
-	if err != nil {
-		return 0, fmt.Errorf("cleanup done jobs: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("cleanup done jobs: %w", err)
-	}
-	return n, nil
+	return s.execRetentionCleanup(ctx, "cleanup done jobs", cleanupDoneJobsSQL, retention, limit)
+}
+
+// CleanupDeadJobs 分批删除超过长保留期的死信任务，防止长期运行后 jobs 表无限膨胀。
+func (s *Store) CleanupDeadJobs(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	return s.execRetentionCleanup(ctx, "cleanup dead jobs", cleanupDeadJobsSQL, retention, limit)
 }
 
 func scanJob(scanner rowScanner) (job.Job, error) {

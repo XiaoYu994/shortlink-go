@@ -14,9 +14,10 @@ import (
 
 // Verdict 表示一次 URL 风控扫描的结论。
 type Verdict struct {
-	Unsafe bool
-	Reason link.BanReason
-	Detail string
+	Unsafe      bool
+	Reason      link.BanReason
+	Detail      string
+	Uncacheable bool `json:"-"`
 }
 
 // Scanner 抽象单条目标 URL 的风控检测能力，第一版为安全抓取加规则匹配，后续可替换外部风控或大模型。
@@ -159,7 +160,8 @@ func (s *RuleScanner) Scan(ctx context.Context, targetURL string) (Verdict, erro
 		return Verdict{}, fmt.Errorf("target returned server error %d", resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
-		return Verdict{Unsafe: false}, nil
+		// 4xx 可能是目标站识别扫描器后做 cloaking，本次不误封，但也不写入"安全"缓存。
+		return Verdict{Unsafe: false, Uncacheable: true}, nil
 	}
 
 	// 只读取前 maxBodyBytes 字节，防止恶意站点返回无限响应流打爆内存。

@@ -43,6 +43,12 @@ func TestIsBlockedAddr(t *testing.T) {
 		{"fe80::1", true},
 		{"fc00::1", true},
 		{"2001:db8::1", true},
+		{"64:ff9b::10.0.0.1", true},
+		{"64:ff9b:1::10.0.0.1", true},
+		{"2002:0a00:0001::1", true},
+		{"2001::1", true},
+		{"fec0::1", true},
+		{"100::1", true},
 		{"93.184.216.34", false},
 		{"1.1.1.1", false},
 		{"2606:2800:220:1:248:1893:25c8:1946", false},
@@ -158,6 +164,22 @@ func TestSafeHTTPClientBlocksSSRFAndRedirects(t *testing.T) {
 			t.Fatalf("redirect loop error = %v, want ErrTooManyRedirects", err)
 		}
 	})
+
+	t.Run("blocks non-standard port on public ip", func(t *testing.T) {
+		client := NewSafeHTTPClient(HTTPClientOptions{
+			Timeout: time.Second,
+			Resolver: stubResolver{ips: map[string][]netip.Addr{
+				"public.example": {netip.MustParseAddr("93.184.216.34")},
+			}},
+		})
+		resp, err := client.Get("http://public.example:8080/probe")
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if !errors.Is(err, ErrBlockedPort) {
+			t.Fatalf("Get non-80/443 port error = %v, want ErrBlockedPort", err)
+		}
+	})
 }
 
 func TestRuleScannerBodyLimitAndRules(t *testing.T) {
@@ -207,8 +229,8 @@ func TestRuleScannerBodyLimitAndRules(t *testing.T) {
 	}
 
 	v, err = scanner.Scan(ctx, srv.URL+"/404")
-	if err != nil || v.Unsafe {
-		t.Errorf("404 verdict = (%+v, %v), want safe/nil", v, err)
+	if err != nil || v.Unsafe || !v.Uncacheable {
+		t.Errorf("404 verdict = (%+v, %v), want safe+uncacheable/nil", v, err)
 	}
 
 	// 命中域名黑名单直接判定，无需出站请求。

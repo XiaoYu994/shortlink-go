@@ -424,8 +424,9 @@ func TestStoreGetByCodeFallsBackWhenRedisFails(t *testing.T) {
 	if got := testutil.ToFloat64(s.gets.WithLabelValues(resultFallback)); got != 1 {
 		t.Errorf("gets{result=fallback} = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); got != 1 {
-		t.Errorf("writes{result=error} = %v, want 1", got)
+	// 降级回源不触发 SET NX 回写：Redis 读已失败时不白等一次写超时。
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); got != 0 {
+		t.Errorf("writes{result=error} = %v, want 0", got)
 	}
 }
 
@@ -438,10 +439,13 @@ func TestStoreGetByCodeRepairsUnusableValue(t *testing.T) {
 		{name: "not json", value: func(string) string { return "not json" }},
 		{name: "empty object", value: func(string) string { return "{}" }},
 		{name: "empty url", value: func(code string) string {
-			return fmt.Sprintf(`{"Code":%q,"URL":""}`, code)
+			return fmt.Sprintf(`{"ID":3,"Code":%q,"URL":""}`, code)
+		}},
+		{name: "missing id", value: func(code string) string {
+			return fmt.Sprintf(`{"Code":%q,"URL":"https://example.com/no-id"}`, code)
 		}},
 		{name: "wrong code", value: func(string) string {
-			return `{"Code":"xxxxxxxx","URL":"https://example.com/evil"}`
+			return `{"ID":3,"Code":"xxxxxxxx","URL":"https://example.com/evil"}`
 		}},
 		{name: "lower case fields", wantHit: true, value: func(code string) string {
 			return fmt.Sprintf(`{"id":3,"code":%q,"url":"https://example.com/ok"}`, code)

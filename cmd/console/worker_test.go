@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 )
@@ -12,8 +13,6 @@ func TestParseWorkerArgs(t *testing.T) {
 		args      []string
 		wantOK    bool
 		wantUsage bool
-		wantErr   bool
-		wantHosts []string
 	}{
 		{
 			name:   "no flags",
@@ -26,36 +25,6 @@ func TestParseWorkerArgs(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			name:      "valid loopback test host",
-			args:      []string{"--allow-test-host", "127.0.0.1:18089"},
-			wantOK:    true,
-			wantHosts: []string{"127.0.0.1:18089"},
-		},
-		{
-			name:      "valid localhost test host",
-			args:      []string{"--allow-test-host", "localhost:18089"},
-			wantOK:    true,
-			wantHosts: []string{"localhost:18089"},
-		},
-		{
-			name:    "rejects public ip",
-			args:    []string{"--allow-test-host", "8.8.8.8:80"},
-			wantOK:  false,
-			wantErr: true,
-		},
-		{
-			name:    "rejects missing port",
-			args:    []string{"--allow-test-host", "127.0.0.1"},
-			wantOK:  false,
-			wantErr: true,
-		},
-		{
-			name:    "rejects non-numeric port",
-			args:    []string{"--allow-test-host", "127.0.0.1:abc"},
-			wantOK:  false,
-			wantErr: true,
-		},
-		{
 			name:      "rejects extra positional args",
 			args:      []string{"extra"},
 			wantOK:    false,
@@ -66,33 +35,35 @@ func TestParseWorkerArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			opts, ok, err := parseWorkerArgs(tt.args, &stderr)
+			_, ok, err := parseWorkerArgs(tt.args, &stderr)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v (err=%v)", ok, tt.wantOK, err)
 			}
-			if tt.wantUsage {
-				if !errors.Is(err, errUsage) {
-					t.Fatalf("err = %v, want errUsage", err)
-				}
-				return
+			if tt.wantUsage && !errors.Is(err, errUsage) {
+				t.Fatalf("err = %v, want errUsage", err)
 			}
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
+			if !tt.wantUsage && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(opts.allowTestHosts) != len(tt.wantHosts) {
-				t.Fatalf("allowTestHosts = %v, want %v", opts.allowTestHosts, tt.wantHosts)
-			}
-			for i := range tt.wantHosts {
-				if opts.allowTestHosts[i] != tt.wantHosts[i] {
-					t.Errorf("allowTestHosts[%d] = %q, want %q", i, opts.allowTestHosts[i], tt.wantHosts[i])
-				}
-			}
 		})
+	}
+}
+
+func TestDrainCleanupBatches(t *testing.T) {
+	var calls int
+	counts := []int64{5, 5, 2}
+	total, err := drainCleanupBatches(context.Background(), 5, 10, func(_ context.Context, limit int) (int64, error) {
+		if limit != 5 {
+			t.Fatalf("limit = %d, want 5", limit)
+		}
+		n := counts[calls]
+		calls++
+		return n, nil
+	})
+	if err != nil {
+		t.Fatalf("drainCleanupBatches error = %v", err)
+	}
+	if total != 12 || calls != 3 {
+		t.Errorf("total=%d calls=%d, want (12, 3)", total, calls)
 	}
 }

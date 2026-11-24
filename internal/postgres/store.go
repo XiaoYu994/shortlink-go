@@ -18,6 +18,7 @@ import (
 
 	"shortlink/internal/audit"
 	"shortlink/internal/idgen"
+	"shortlink/internal/job"
 	"shortlink/internal/link"
 )
 
@@ -65,7 +66,7 @@ inserted AS (
 ),
 enqueued AS (
     INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT 'link.risk_scan',
+    SELECT $8::text,
            i.tenant_id,
            jsonb_build_object('link_id', i.id, 'code', i.code, 'url', i.url)
     FROM inserted i
@@ -75,8 +76,8 @@ audited AS (
     SELECT i.tenant_id,
            $5::text,
            $6::bigint,
-           'link.create',
-           'link',
+           $9::text,
+           $10::text,
            i.code,
            $7::text,
            jsonb_strip_nulls(jsonb_build_object(
@@ -186,6 +187,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 
 		err = s.db.QueryRowContext(ctx, insertLinkSQL,
 			code, l.URL, l.ExpiresAt, l.TenantID, actorKind, actorID, reqID,
+			job.KindLinkRiskScan, string(audit.ActionLinkCreate), string(audit.TargetLink),
 		).Scan(&l.ID, &l.CreatedAt)
 		if err == nil {
 			l.Code = code
@@ -208,7 +210,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			*/
 			continue
 		}
-		if isUniqueViolation(err) {
+		if isUniqueConstraintViolation(err, "links_code_key") {
 			continue
 		}
 		return fmt.Errorf("insert link: %w", err)

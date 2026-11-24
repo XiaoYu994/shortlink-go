@@ -46,6 +46,38 @@ FOR UPDATE`
 	revokeInvitationSQL = `UPDATE invitations
 SET revoked_at = now()
 WHERE id = $1 AND tenant_id = $2`
+
+	// 三条清理语句分别沿迁移 012 的部分索引按批次删除，禁止用 OR 混合条件。
+	cleanupExpiredInvitationsByExpirySQL = `DELETE FROM invitations
+WHERE id IN (
+    SELECT id
+    FROM invitations
+    WHERE expires_at IS NOT NULL
+      AND expires_at < now() - ($1::bigint * interval '1 microsecond')
+      AND accepted_at IS NULL
+    ORDER BY expires_at, id
+    LIMIT $2
+)`
+
+	cleanupRevokedInvitationsSQL = `DELETE FROM invitations
+WHERE id IN (
+    SELECT id
+    FROM invitations
+    WHERE revoked_at IS NOT NULL
+      AND revoked_at < now() - ($1::bigint * interval '1 microsecond')
+    ORDER BY revoked_at, id
+    LIMIT $2
+)`
+
+	cleanupSupersededInvitationsSQL = `DELETE FROM invitations
+WHERE id IN (
+    SELECT id
+    FROM invitations
+    WHERE superseded_at IS NOT NULL
+      AND superseded_at < now() - ($1::bigint * interval '1 microsecond')
+    ORDER BY superseded_at, id
+    LIMIT $2
+)`
 )
 
 var (
@@ -311,4 +343,19 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 		return fmt.Errorf("revoke invitation: commit: %w", err)
 	}
 	return nil
+}
+
+// CleanupExpiredInvitationsByExpiry 分批删除超过保留期的已过期未兑现邀请。
+func (s *Store) CleanupExpiredInvitationsByExpiry(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	return s.execRetentionCleanup(ctx, "cleanup expired invitations", cleanupExpiredInvitationsByExpirySQL, retention, limit)
+}
+
+// CleanupRevokedInvitations 分批删除超过保留期的已撤销邀请。
+func (s *Store) CleanupRevokedInvitations(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	return s.execRetentionCleanup(ctx, "cleanup revoked invitations", cleanupRevokedInvitationsSQL, retention, limit)
+}
+
+// CleanupSupersededInvitations 分批删除超过保留期的被重邀替代邀请。
+func (s *Store) CleanupSupersededInvitations(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	return s.execRetentionCleanup(ctx, "cleanup superseded invitations", cleanupSupersededInvitationsSQL, retention, limit)
 }

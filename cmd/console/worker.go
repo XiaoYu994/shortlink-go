@@ -1,7 +1,7 @@
 /*
 worker 是 console 的后台任务模式（阶段 12、ADR 0020）：
 运行 PostgreSQL Outbox Worker Pool，处理异步 URL 风控（link.risk_scan）、
-回收过期租约，并定期分批清理过期会话与已完成任务。
+回收过期租约，并定期循环分批清理过期会话、已完成/死信任务与过期/失效邀请。
 配置了 WORKER_ADDR 时同时暴露独立的 /healthz、/readyz 和 /metrics 运维端口。
 */
 package main
@@ -12,10 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -31,16 +29,10 @@ import (
 	"shortlink/internal/storemetrics"
 )
 
-const cleanupBatchLimit = 500
-
-type stringSliceFlag []string
-
-func (f *stringSliceFlag) String() string { return fmt.Sprint([]string(*f)) }
-
-func (f *stringSliceFlag) Set(v string) error {
-	*f = append(*f, v)
-	return nil
-}
+const (
+	cleanupBatchLimit        = 500
+	maxCleanupBatchesPerTick = 40
+)
 
 type workerCLIOptions struct {
 	allowTestHosts []string
@@ -48,37 +40,35 @@ type workerCLIOptions struct {
 
 func parseWorkerArgs(args []string, stderr io.Writer) (workerCLIOptions, bool, error) {
 	fs := newFlagSet("worker", stderr)
-	var allowHosts stringSliceFlag
-	fs.Var(&allowHosts, "allow-test-host", "仅测试/冒烟使用：放行指定的回环 host:port 供本地风控联调")
+	var opts workerCLIOptions
+	registerWorkerTestFlags(fs, &opts)
 	ok, err := parseFlags(fs, args, stderr)
 	if !ok {
 		return workerCLIOptions{}, false, err
 	}
-	for _, hp := range allowHosts {
-		if err := validateLoopbackHostPort(hp); err != nil {
-			return workerCLIOptions{}, false, fmt.Errorf("--allow-test-host %q: %w", hp, err)
-		}
+	if err := validateWorkerTestFlags(opts); err != nil {
+		return workerCLIOptions{}, false, err
 	}
-	return workerCLIOptions{allowTestHosts: allowHosts}, true, nil
+	return opts, true, nil
 }
 
-func validateLoopbackHostPort(hp string) error {
-	host, portStr, err := net.SplitHostPort(hp)
-	if err != nil {
-		return errors.New("must be a valid host:port")
+// drainCleanupBatches 在单次周期 tick 内连续分批清理，直到返回不足 batchLimit 行或达到批数上限。
+func drainCleanupBatches(ctx context.Context, batchLimit, maxBatches int, fn func(context.Context, int) (int64, error)) (int64, error) {
+	var total int64
+	for range maxBatches {
+		if ctx.Err() != nil {
+			return total, ctx.Err()
+		}
+		n, err := fn(ctx, batchLimit)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n < int64(batchLimit) {
+			break
+		}
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
-		return errors.New("port must be in 1..65535")
-	}
-	if host == "localhost" {
-		return nil
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil || !addr.IsLoopback() {
-		return errors.New("must be a loopback address such as 127.0.0.1:18089")
-	}
-	return nil
+	return total, nil
 }
 
 func runWorker(cliOpts workerCLIOptions) error {
@@ -122,10 +112,12 @@ func runWorker(cliOpts workerCLIOptions) error {
 
 	httpClient := risk.NewSafeHTTPClient(risk.HTTPClientOptions{
 		Timeout:          cfg.RiskFetchTimeout,
+		AllowedPorts:     cfg.RiskAllowedPorts,
 		AllowedHostPorts: cliOpts.allowTestHosts,
 	})
 	scanner := risk.NewRuleScanner(risk.RuleScannerOptions{
 		HTTPClient:      httpClient,
+		BlockedHosts:    cfg.RiskBlockedHosts,
 		BlockedKeywords: cfg.RiskBlockedKeywords,
 	})
 	verdictCache := risk.NewVerdictCache(rdb, registry, risk.VerdictCacheOptions{Logger: logger})
@@ -150,17 +142,61 @@ func runWorker(cliOpts workerCLIOptions) error {
 		ShutdownTimeout: cfg.ShutdownTimeout,
 		PeriodicTasks: []job.PeriodicTask{
 			{
-				Name:     "sessions.cleanup",
+				Name:     "sessions.cleanup_expired",
 				Interval: cfg.CleanupInterval,
 				Run: func(ctx context.Context) (int64, error) {
-					return pgStore.CleanupExpiredSessions(ctx, cfg.SessionRetention, cleanupBatchLimit)
+					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupExpiredSessionsByExpiry(ctx, cfg.SessionRetention, limit)
+					})
+				},
+			},
+			{
+				Name:     "sessions.cleanup_revoked",
+				Interval: cfg.CleanupInterval,
+				Run: func(ctx context.Context) (int64, error) {
+					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupRevokedSessions(ctx, cfg.SessionRetention, limit)
+					})
 				},
 			},
 			{
 				Name:     "jobs.cleanup_done",
 				Interval: cfg.CleanupInterval,
 				Run: func(ctx context.Context) (int64, error) {
-					return pgStore.CleanupDoneJobs(ctx, cfg.DoneJobRetention, cleanupBatchLimit)
+					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupDoneJobs(ctx, cfg.DoneJobRetention, limit)
+					})
+				},
+			},
+			{
+				Name:     "jobs.cleanup_dead",
+				Interval: cfg.CleanupInterval,
+				Run: func(ctx context.Context) (int64, error) {
+					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupDeadJobs(ctx, cfg.DeadJobRetention, limit)
+					})
+				},
+			},
+			{
+				Name:     "invitations.cleanup",
+				Interval: cfg.CleanupInterval,
+				Run: func(ctx context.Context) (int64, error) {
+					n1, err := drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupExpiredInvitationsByExpiry(ctx, cfg.InvitationRetention, limit)
+					})
+					if err != nil {
+						return n1, err
+					}
+					n2, err := drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupRevokedInvitations(ctx, cfg.InvitationRetention, limit)
+					})
+					if err != nil {
+						return n1 + n2, err
+					}
+					n3, err := drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupSupersededInvitations(ctx, cfg.InvitationRetention, limit)
+					})
+					return n1 + n2 + n3, err
 				},
 			},
 		},
@@ -168,6 +204,11 @@ func runWorker(cliOpts workerCLIOptions) error {
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 收到第一次信号后立即恢复默认信号处理，支持再按一次信号立即退出（ADR 0020）。
+	go func() {
+		<-signalCtx.Done()
+		stop()
+	}()
 
 	var (
 		opsErrCh chan error

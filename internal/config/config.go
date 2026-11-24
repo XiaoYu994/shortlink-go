@@ -50,6 +50,7 @@ const (
 
 	defaultWorkerCleanupInterval = time.Hour
 	defaultWorkerRetention       = 7 * 24 * time.Hour
+	defaultWorkerLongRetention   = 30 * 24 * time.Hour
 
 	defaultAccessLogSampleRate    = 1.0
 	defaultAccessLogSlowThreshold = 200 * time.Millisecond
@@ -168,9 +169,13 @@ type WorkerConfig struct {
 	CleanupInterval     time.Duration
 	SessionRetention    time.Duration
 	DoneJobRetention    time.Duration
+	DeadJobRetention    time.Duration
+	InvitationRetention time.Duration
 	RiskFetchTimeout    time.Duration
 	RiskHostRateLimit   int
+	RiskBlockedHosts    map[string]link.BanReason
 	RiskBlockedKeywords map[string]link.BanReason
+	RiskAllowedPorts    []int
 }
 
 /*
@@ -271,18 +276,20 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 	}
 
 	cfg := WorkerConfig{
-		BaseConfig:        base,
-		Concurrency:       job.DefaultConcurrency,
-		MaxPerTenant:      job.DefaultMaxPerTenant,
-		PollInterval:      job.DefaultPollInterval,
-		LeaseDuration:     job.DefaultLeaseDuration,
-		JobTimeout:        job.DefaultJobTimeout,
-		ReapInterval:      job.DefaultReapInterval,
-		CleanupInterval:   defaultWorkerCleanupInterval,
-		SessionRetention:  defaultWorkerRetention,
-		DoneJobRetention:  defaultWorkerRetention,
-		RiskFetchTimeout:  risk.DefaultFetchTimeout,
-		RiskHostRateLimit: risk.DefaultHostRateLimit,
+		BaseConfig:          base,
+		Concurrency:         job.DefaultConcurrency,
+		MaxPerTenant:        job.DefaultMaxPerTenant,
+		PollInterval:        job.DefaultPollInterval,
+		LeaseDuration:       job.DefaultLeaseDuration,
+		JobTimeout:          job.DefaultJobTimeout,
+		ReapInterval:        job.DefaultReapInterval,
+		CleanupInterval:     defaultWorkerCleanupInterval,
+		SessionRetention:    defaultWorkerRetention,
+		DoneJobRetention:    defaultWorkerRetention,
+		DeadJobRetention:    defaultWorkerLongRetention,
+		InvitationRetention: defaultWorkerLongRetention,
+		RiskFetchTimeout:    risk.DefaultFetchTimeout,
+		RiskHostRateLimit:   risk.DefaultHostRateLimit,
 	}
 
 	if cfg.Concurrency, err = envInt("WORKER_CONCURRENCY", cfg.Concurrency); err != nil {
@@ -312,11 +319,24 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 	if cfg.DoneJobRetention, err = envDuration("WORKER_DONE_JOB_RETENTION", cfg.DoneJobRetention); err != nil {
 		return WorkerConfig{}, err
 	}
+	if cfg.DeadJobRetention, err = envDuration("WORKER_DEAD_JOB_RETENTION", cfg.DeadJobRetention); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.InvitationRetention, err = envDuration("WORKER_INVITATION_RETENTION", cfg.InvitationRetention); err != nil {
+		return WorkerConfig{}, err
+	}
 	if cfg.RiskFetchTimeout, err = envDuration("RISK_FETCH_TIMEOUT", cfg.RiskFetchTimeout); err != nil {
 		return WorkerConfig{}, err
 	}
 	if cfg.RiskHostRateLimit, err = envInt("RISK_HOST_RATE_LIMIT", cfg.RiskHostRateLimit); err != nil {
 		return WorkerConfig{}, err
+	}
+	if raw := os.Getenv("RISK_BLOCKED_HOSTS"); raw != "" {
+		rules, err := risk.ParseKeywordRules(raw)
+		if err != nil {
+			return WorkerConfig{}, fmt.Errorf("RISK_BLOCKED_HOSTS: %w", err)
+		}
+		cfg.RiskBlockedHosts = rules
 	}
 	if raw := os.Getenv("RISK_BLOCKED_KEYWORDS"); raw != "" {
 		rules, err := risk.ParseKeywordRules(raw)
@@ -325,11 +345,37 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		}
 		cfg.RiskBlockedKeywords = rules
 	}
+	if raw := os.Getenv("RISK_ALLOWED_PORTS"); raw != "" {
+		ports, err := parsePorts(raw)
+		if err != nil {
+			return WorkerConfig{}, fmt.Errorf("RISK_ALLOWED_PORTS: %w", err)
+		}
+		cfg.RiskAllowedPorts = ports
+	}
 
 	if err := validateWorker(cfg); err != nil {
 		return WorkerConfig{}, err
 	}
 	return cfg, nil
+}
+
+func parsePorts(raw string) ([]int, error) {
+	var ports []int
+	for part := range strings.SplitSeq(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := strconv.Atoi(part)
+		if err != nil || p < 1 || p > 65535 {
+			return nil, fmt.Errorf("invalid port %q: must be in 1..65535", part)
+		}
+		ports = append(ports, p)
+	}
+	if len(ports) == 0 {
+		return nil, errors.New("must contain at least one port")
+	}
+	return ports, nil
 }
 
 func validateWorker(cfg WorkerConfig) error {
@@ -348,8 +394,8 @@ func validateWorker(cfg WorkerConfig) error {
 	if cfg.JobTimeout <= 0 {
 		return errors.New("WORKER_JOB_TIMEOUT must be positive")
 	}
-	if cfg.JobTimeout > cfg.LeaseDuration {
-		return errors.New("WORKER_JOB_TIMEOUT must not exceed WORKER_LEASE_DURATION")
+	if cfg.JobTimeout+job.CommitTimeout > cfg.LeaseDuration {
+		return fmt.Errorf("WORKER_JOB_TIMEOUT + %s commit margin must not exceed WORKER_LEASE_DURATION", job.CommitTimeout)
 	}
 	if cfg.ReapInterval <= 0 {
 		return errors.New("WORKER_REAP_INTERVAL must be positive")
@@ -362,6 +408,12 @@ func validateWorker(cfg WorkerConfig) error {
 	}
 	if cfg.DoneJobRetention < 0 {
 		return errors.New("WORKER_DONE_JOB_RETENTION must not be negative")
+	}
+	if cfg.DeadJobRetention < 0 {
+		return errors.New("WORKER_DEAD_JOB_RETENTION must not be negative")
+	}
+	if cfg.InvitationRetention < 0 {
+		return errors.New("WORKER_INVITATION_RETENTION must not be negative")
 	}
 	if cfg.RiskFetchTimeout <= 0 {
 		return errors.New("RISK_FETCH_TIMEOUT must be positive")

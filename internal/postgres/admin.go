@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"shortlink/internal/audit"
+	"shortlink/internal/job"
 	"shortlink/internal/link"
 )
 
@@ -123,20 +124,28 @@ WHERE l.code = $1 AND l.tenant_id = $2`
 		只改 expires_at 或 disabled 不入队。
 		RETURNING 只带 links 的列，clicks_today 在 CTE 外面补。
 	*/
-	updateLinkSQL = `WITH updated AS (
-    UPDATE links
-    SET url = CASE WHEN $3 THEN $4::text ELSE url END,
-        expires_at = CASE WHEN $5 THEN $6::timestamptz ELSE expires_at END,
-        disabled_at = CASE WHEN NOT $7 THEN disabled_at
-                           WHEN $8 THEN COALESCE(disabled_at, now())
+	updateLinkSQL = `WITH target AS (
+    SELECT ` + linkColumns + `, clicks, (banned_at IS NOT NULL) AS is_banned
+    FROM links
+    WHERE code = $1 AND tenant_id = $2
+    FOR UPDATE
+),
+updated AS (
+    UPDATE links l
+    SET url = CASE WHEN $3 THEN $4::text ELSE l.url END,
+        expires_at = CASE WHEN $5 THEN $6::timestamptz ELSE l.expires_at END,
+        disabled_at = CASE WHEN NOT $7 THEN l.disabled_at
+                           WHEN $8 THEN COALESCE(l.disabled_at, now())
                            ELSE NULL END,
         updated_at = now()
-    WHERE code = $1 AND tenant_id = $2 AND banned_at IS NULL
-    RETURNING ` + linkColumns + `, clicks
+    FROM target t
+    WHERE l.id = t.id AND NOT t.is_banned
+    RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
+              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks
 ),
 enqueued AS (
     INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT 'link.risk_scan',
+    SELECT $13::text,
            NULLIF(u.tenant_id, 0),
            jsonb_build_object('link_id', u.id, 'code', u.code, 'url', u.url)
     FROM updated u
@@ -147,25 +156,29 @@ audited AS (
     SELECT u.tenant_id,
            $9::text,
            $10::bigint,
-           'link.update',
-           'link',
+           $14::text,
+           $15::text,
            u.code,
            $11::text,
            $12::jsonb
     FROM updated u
 )
-SELECT u.id, u.code, u.url, u.expires_at, u.created_at, u.tenant_id,
-       u.disabled_at, u.banned_at, u.ban_reason, u.ban_source,
-       u.clicks, COALESCE(d.clicks, 0)
-FROM updated u
+SELECT COALESCE(u.id, t.id),
+       COALESCE(u.code, t.code),
+       COALESCE(u.url, t.url),
+       CASE WHEN u.id IS NOT NULL THEN u.expires_at ELSE t.expires_at END,
+       COALESCE(u.created_at, t.created_at),
+       COALESCE(u.tenant_id, t.tenant_id),
+       CASE WHEN u.id IS NOT NULL THEN u.disabled_at ELSE t.disabled_at END,
+       COALESCE(u.banned_at, t.banned_at),
+       COALESCE(u.ban_reason, t.ban_reason),
+       COALESCE(u.ban_source, t.ban_source),
+       COALESCE(u.clicks, t.clicks),
+       COALESCE(d.clicks, 0),
+       t.is_banned
+FROM target t
+LEFT JOIN updated u ON u.id = t.id
 LEFT JOIN link_clicks_daily d ON d.link_id = u.id AND d.day = (now() AT TIME ZONE 'UTC')::date`
-
-	/*
-		补查为什么没更新到行：短码是否存在、是否已封禁。
-		这是 RevokeAPIKey 区分「不存在」和「已吊销」的同一个写法。
-		tenant_id 仍然参与条件，其他租户的链接一律当不存在。
-	*/
-	updateLinkMissSQL = `SELECT banned_at IS NOT NULL FROM links WHERE code = $1 AND tenant_id = $2`
 
 	/*
 		Ban 按短码操作，不带租户。COALESCE 让重复封禁保留第一次的时间、
@@ -194,8 +207,8 @@ audited AS (
     SELECT u.tenant_id,
            $4::text,
            $5::bigint,
-           'link.ban',
-           'link',
+           $7::text,
+           $8::text,
            u.code,
            $6::text,
            jsonb_build_object(
@@ -210,13 +223,14 @@ audited AS (
 SELECT ` + linkColumns + ` FROM updated`
 
 	/*
-		banLinkIfURLSQL 给异步风控使用：仅当当前 URL 仍等于送审 URL 时才封禁（ADR 0020）。
-		租户在扫描完成前把违规 URL 改成合规 URL 时，旧扫描任务不会误封新链接。
+		banLinkIfURLSQL 给异步风控使用：同一语句加 FOR UPDATE 锁并判断 URL 是否仍等于送审 URL（ADR 0020）。
+		不存在返回零行（ErrNotFound），URL 已变更返回 url_matched=false（ErrURLChanged），
+		消除先 UPDATE 再补查的并发窗口。
 	*/
-	banLinkIfURLSQL = `WITH prev AS (
-    SELECT id, (banned_at IS NULL) AS newly_banned
+	banLinkIfURLSQL = `WITH target AS (
+    SELECT ` + linkColumns + `, (url = $4) AS url_matched, (banned_at IS NULL) AS newly_banned
     FROM links
-    WHERE code = $1 AND url = $4
+    WHERE code = $1
     FOR UPDATE
 ),
 updated AS (
@@ -225,18 +239,18 @@ updated AS (
         ban_reason = COALESCE(l.ban_reason, $2::text),
         ban_source = COALESCE(l.ban_source, $3::text),
         updated_at = CASE WHEN l.banned_at IS NULL THEN now() ELSE l.updated_at END
-    FROM prev p
-    WHERE l.id = p.id
+    FROM target t
+    WHERE l.id = t.id AND t.url_matched
     RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, p.newly_banned
+              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, t.newly_banned
 ),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
     SELECT u.tenant_id,
            $5::text,
            $6::bigint,
-           'link.ban',
-           'link',
+           $8::text,
+           $9::text,
            u.code,
            $7::text,
            jsonb_build_object(
@@ -248,9 +262,19 @@ audited AS (
     FROM updated u
     WHERE u.newly_banned
 )
-SELECT ` + linkColumns + ` FROM updated`
-
-	linkExistsByCodeSQL = `SELECT 1 FROM links WHERE code = $1`
+SELECT COALESCE(u.id, t.id),
+       COALESCE(u.code, t.code),
+       COALESCE(u.url, t.url),
+       COALESCE(u.expires_at, t.expires_at),
+       COALESCE(u.created_at, t.created_at),
+       COALESCE(u.tenant_id, t.tenant_id),
+       COALESCE(u.disabled_at, t.disabled_at),
+       COALESCE(u.banned_at, t.banned_at),
+       COALESCE(u.ban_reason, t.ban_reason),
+       COALESCE(u.ban_source, t.ban_source),
+       t.url_matched
+FROM target t
+LEFT JOIN updated u ON u.id = t.id`
 
 	// Unban 把三个封禁字段一起清空。没被封禁的链接解封是空操作，不重复写入审计日志。
 	unbanLinkSQL = `WITH prev AS (
@@ -276,8 +300,8 @@ audited AS (
     SELECT u.tenant_id,
            $2::text,
            $3::bigint,
-           'link.unban',
-           'link',
+           $5::text,
+           $6::text,
            u.code,
            $4::text,
            jsonb_strip_nulls(jsonb_build_object(
@@ -486,28 +510,24 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 
 	row := s.db.QueryRowContext(ctx, updateLinkSQL,
 		code, tenantID, hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue,
-		actorKind, actorID, reqID, string(metaJSON))
-	got, err := scanAdminLink(row)
-	if err == nil {
-		return got, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("update link: %w", err)
-	}
-
-	// 没更新到行：区分不存在和已封禁，和 RevokeAPIKey 一样补查一次。
-	var banned bool
-	err = s.db.QueryRowContext(ctx, updateLinkMissSQL, code, tenantID).Scan(&banned)
+		actorKind, actorID, reqID, string(metaJSON),
+		job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink))
+	var (
+		got      link.AdminLink
+		isBanned bool
+	)
+	base, err := scanLink(row, &got.Clicks, &got.ClicksToday, &isBanned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("update link: %w", err)
 	}
-	if !banned {
-		return nil, fmt.Errorf("update link: row was not updated")
+	if isBanned {
+		return nil, link.ErrBanned
 	}
-	return nil, link.ErrBanned
+	got.Link = *base
+	return &got, nil
 }
 
 /*
@@ -606,33 +626,33 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 	}
 	actorKind, actorID, reqID := resolveAuditMeta(ctx, fallback)
 
-	var row *sql.Row
 	if expectedURL == "" {
-		row = s.db.QueryRowContext(ctx, banLinkSQL, code, string(reason), string(source), actorKind, actorID, reqID)
-	} else {
-		row = s.db.QueryRowContext(ctx, banLinkIfURLSQL, code, string(reason), string(source), expectedURL, actorKind, actorID, reqID)
-	}
-	got, err := scanLink(row)
-	if err == nil {
+		got, err := scanLink(s.db.QueryRowContext(ctx, banLinkSQL,
+			code, string(reason), string(source), actorKind, actorID, reqID,
+			string(audit.ActionLinkBan), string(audit.TargetLink)))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, link.ErrNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ban link: %w", err)
+		}
 		return got, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("ban link: %w", err)
-	}
-	if expectedURL == "" {
-		return nil, link.ErrNotFound
-	}
 
-	// 未命中时补查短码是否存在，区分已删除和 URL 已变更。
-	var exists int
-	err = s.db.QueryRowContext(ctx, linkExistsByCodeSQL, code).Scan(&exists)
+	var urlMatched bool
+	got, err := scanLink(s.db.QueryRowContext(ctx, banLinkIfURLSQL,
+		code, string(reason), string(source), expectedURL, actorKind, actorID, reqID,
+		string(audit.ActionLinkBan), string(audit.TargetLink)), &urlMatched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ban link: %w", err)
 	}
-	return nil, link.ErrURLChanged
+	if !urlMatched {
+		return nil, link.ErrURLChanged
+	}
+	return got, nil
 }
 
 /*
@@ -642,7 +662,8 @@ Unban 按短码解封，把三个封禁字段一起清空，不要求租户 ID�
 */
 func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
 	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.OperatorMeta(""))
-	got, err := scanLink(s.db.QueryRowContext(ctx, unbanLinkSQL, code, actorKind, actorID, reqID))
+	got, err := scanLink(s.db.QueryRowContext(ctx, unbanLinkSQL,
+		code, actorKind, actorID, reqID, string(audit.ActionLinkUnban), string(audit.TargetLink)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}

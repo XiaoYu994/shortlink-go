@@ -292,10 +292,16 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 			return nil, err // 真正的错误不写缓存，下次请求应该重试
 		}
 		/*
-			回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
-			这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
+			Redis 读失败走降级通道时不再回写同一个不可达的 Redis，
+			避免每条降级回源再白等一次写入超时和刷 WARN 日志。
 		*/
-		s.writeCacheBestEffort(fetchCtx, key, found, writeNX)
+		if result != resultFallback {
+			/*
+				回源写缓存必须用 NX：管理写可能已经在数据库提交并覆盖了缓存，
+				这个请求读到的旧快照不能把它盖回去。见 ADR 0011。
+			*/
+			s.writeCacheBestEffort(fetchCtx, key, found, writeNX)
+		}
 		return found, err
 	})
 	if ctx.Err() == nil {
@@ -488,13 +494,13 @@ func (s *Store) readCache(ctx context.Context, key, code string) (cached *link.L
 /*
 usableCachedLink 判断命中的值能不能用。
 JSON null 是负缓存，解出来是 nil。
-零值 Link 会让跳转 302 到空的 Location，短码对不上则会把别的链接拿去跳。
+缺少有效 ID 会导致跳转后静默漏记点击；零值 URL 或短码不匹配则属于坏数据。
 */
 func usableCachedLink(cached *link.Link, code string) bool {
 	if cached == nil {
 		return true
 	}
-	return cached.URL != "" && cached.Code == code
+	return cached.ID > 0 && cached.URL != "" && cached.Code == code
 }
 
 /*

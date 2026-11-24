@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,48 +22,52 @@ import (
 func baseTestEnv() map[string]string {
 	// make test 会导出 .env。每个子测试都要把读取的变量设一遍，空字符串表示未配置。
 	return map[string]string{
-		"ADDR":                      "",
-		"CONSOLE_ADDR":              "",
-		"DATABASE_URL":              "postgres://localhost/shortlink",
-		"DB_MAX_OPEN_CONNS":         "",
-		"DB_MAX_IDLE_CONNS":         "",
-		"DB_CONN_MAX_LIFETIME":      "",
-		"DB_CONN_MAX_IDLE_TIME":     "",
-		"REQUEST_TIMEOUT":           "",
-		"SHUTDOWN_TIMEOUT":          "",
-		"DRAIN_DELAY":               "",
-		"CACHE_MISS_CONCURRENCY":    "",
-		"CACHE_FETCH_TIMEOUT":       "",
-		"REDIS_URL":                 "redis://localhost:6379/0",
-		"VISITOR_SALT":              "test-salt",
-		"TRUST_PROXY_HEADERS":       "",
-		"LOG_LEVEL":                 "",
-		"LOG_FORMAT":                "",
-		"PPROF_ADDR":                "",
-		"ACCESS_LOG_SAMPLE_RATE":    "",
-		"ACCESS_LOG_SLOW_THRESHOLD": "",
-		"OIDC_ISSUER":               "",
-		"OIDC_CLIENT_ID":            "",
-		"OIDC_CLIENT_SECRET":        "",
-		"OIDC_REDIRECT_URL":         "",
-		"GITHUB_CLIENT_ID":          "",
-		"GITHUB_CLIENT_SECRET":      "",
-		"GITHUB_REDIRECT_URL":       "",
-		"WEB_DIST_DIR":              "",
-		"PUBLIC_BASE_URL":           "",
-		"WORKER_ADDR":               "",
-		"WORKER_CONCURRENCY":        "",
-		"WORKER_MAX_PER_TENANT":     "",
-		"WORKER_POLL_INTERVAL":      "",
-		"WORKER_LEASE_DURATION":     "",
-		"WORKER_JOB_TIMEOUT":        "",
-		"WORKER_REAP_INTERVAL":      "",
-		"WORKER_CLEANUP_INTERVAL":   "",
-		"WORKER_SESSION_RETENTION":  "",
-		"WORKER_DONE_JOB_RETENTION": "",
-		"RISK_FETCH_TIMEOUT":        "",
-		"RISK_HOST_RATE_LIMIT":      "",
-		"RISK_BLOCKED_KEYWORDS":     "",
+		"ADDR":                        "",
+		"CONSOLE_ADDR":                "",
+		"DATABASE_URL":                "postgres://localhost/shortlink",
+		"DB_MAX_OPEN_CONNS":           "",
+		"DB_MAX_IDLE_CONNS":           "",
+		"DB_CONN_MAX_LIFETIME":        "",
+		"DB_CONN_MAX_IDLE_TIME":       "",
+		"REQUEST_TIMEOUT":             "",
+		"SHUTDOWN_TIMEOUT":            "",
+		"DRAIN_DELAY":                 "",
+		"CACHE_MISS_CONCURRENCY":      "",
+		"CACHE_FETCH_TIMEOUT":         "",
+		"REDIS_URL":                   "redis://localhost:6379/0",
+		"VISITOR_SALT":                "test-salt",
+		"TRUST_PROXY_HEADERS":         "",
+		"LOG_LEVEL":                   "",
+		"LOG_FORMAT":                  "",
+		"PPROF_ADDR":                  "",
+		"ACCESS_LOG_SAMPLE_RATE":      "",
+		"ACCESS_LOG_SLOW_THRESHOLD":   "",
+		"OIDC_ISSUER":                 "",
+		"OIDC_CLIENT_ID":              "",
+		"OIDC_CLIENT_SECRET":          "",
+		"OIDC_REDIRECT_URL":           "",
+		"GITHUB_CLIENT_ID":            "",
+		"GITHUB_CLIENT_SECRET":        "",
+		"GITHUB_REDIRECT_URL":         "",
+		"WEB_DIST_DIR":                "",
+		"PUBLIC_BASE_URL":             "",
+		"WORKER_ADDR":                 "",
+		"WORKER_CONCURRENCY":          "",
+		"WORKER_MAX_PER_TENANT":       "",
+		"WORKER_POLL_INTERVAL":        "",
+		"WORKER_LEASE_DURATION":       "",
+		"WORKER_JOB_TIMEOUT":          "",
+		"WORKER_REAP_INTERVAL":        "",
+		"WORKER_CLEANUP_INTERVAL":     "",
+		"WORKER_SESSION_RETENTION":    "",
+		"WORKER_DONE_JOB_RETENTION":   "",
+		"WORKER_DEAD_JOB_RETENTION":   "",
+		"WORKER_INVITATION_RETENTION": "",
+		"RISK_FETCH_TIMEOUT":          "",
+		"RISK_HOST_RATE_LIMIT":        "",
+		"RISK_BLOCKED_HOSTS":          "",
+		"RISK_BLOCKED_KEYWORDS":       "",
+		"RISK_ALLOWED_PORTS":          "",
 	}
 }
 
@@ -577,18 +582,20 @@ func TestLoadWorkerConfig(t *testing.T) {
 	base["VISITOR_SALT"] = ""
 
 	defaults := WorkerConfig{
-		BaseConfig:        defaultBaseConfig(""),
-		Concurrency:       job.DefaultConcurrency,
-		MaxPerTenant:      job.DefaultMaxPerTenant,
-		PollInterval:      job.DefaultPollInterval,
-		LeaseDuration:     job.DefaultLeaseDuration,
-		JobTimeout:        job.DefaultJobTimeout,
-		ReapInterval:      job.DefaultReapInterval,
-		CleanupInterval:   defaultWorkerCleanupInterval,
-		SessionRetention:  defaultWorkerRetention,
-		DoneJobRetention:  defaultWorkerRetention,
-		RiskFetchTimeout:  risk.DefaultFetchTimeout,
-		RiskHostRateLimit: risk.DefaultHostRateLimit,
+		BaseConfig:          defaultBaseConfig(""),
+		Concurrency:         job.DefaultConcurrency,
+		MaxPerTenant:        job.DefaultMaxPerTenant,
+		PollInterval:        job.DefaultPollInterval,
+		LeaseDuration:       job.DefaultLeaseDuration,
+		JobTimeout:          job.DefaultJobTimeout,
+		ReapInterval:        job.DefaultReapInterval,
+		CleanupInterval:     defaultWorkerCleanupInterval,
+		SessionRetention:    defaultWorkerRetention,
+		DoneJobRetention:    defaultWorkerRetention,
+		DeadJobRetention:    defaultWorkerLongRetention,
+		InvitationRetention: defaultWorkerLongRetention,
+		RiskFetchTimeout:    risk.DefaultFetchTimeout,
+		RiskHostRateLimit:   risk.DefaultHostRateLimit,
 	}
 
 	tests := []struct {
@@ -601,42 +608,52 @@ func TestLoadWorkerConfig(t *testing.T) {
 		{
 			name: "explicit worker values",
 			env: map[string]string{
-				"WORKER_ADDR":               "127.0.0.1:8082",
-				"WORKER_CONCURRENCY":        "16",
-				"WORKER_MAX_PER_TENANT":     "2",
-				"WORKER_POLL_INTERVAL":      "100ms",
-				"WORKER_LEASE_DURATION":     "45s",
-				"WORKER_JOB_TIMEOUT":        "15s",
-				"WORKER_REAP_INTERVAL":      "10s",
-				"WORKER_CLEANUP_INTERVAL":   "30m",
-				"WORKER_SESSION_RETENTION":  "24h",
-				"WORKER_DONE_JOB_RETENTION": "48h",
-				"RISK_FETCH_TIMEOUT":        "3s",
-				"RISK_HOST_RATE_LIMIT":      "5",
-				"RISK_BLOCKED_KEYWORDS":     "smoke-phish:phishing",
+				"WORKER_ADDR":                 "127.0.0.1:8082",
+				"WORKER_CONCURRENCY":          "16",
+				"WORKER_MAX_PER_TENANT":       "2",
+				"WORKER_POLL_INTERVAL":        "100ms",
+				"WORKER_LEASE_DURATION":       "45s",
+				"WORKER_JOB_TIMEOUT":          "15s",
+				"WORKER_REAP_INTERVAL":        "10s",
+				"WORKER_CLEANUP_INTERVAL":     "30m",
+				"WORKER_SESSION_RETENTION":    "24h",
+				"WORKER_DONE_JOB_RETENTION":   "48h",
+				"WORKER_DEAD_JOB_RETENTION":   "168h",
+				"WORKER_INVITATION_RETENTION": "168h",
+				"RISK_FETCH_TIMEOUT":          "3s",
+				"RISK_HOST_RATE_LIMIT":        "5",
+				"RISK_BLOCKED_HOSTS":          "bad.example:malware",
+				"RISK_BLOCKED_KEYWORDS":       "smoke-phish:phishing",
+				"RISK_ALLOWED_PORTS":          "80, 443, 8443",
 			},
 			want: WorkerConfig{
-				BaseConfig:        defaultBaseConfig("127.0.0.1:8082"),
-				Concurrency:       16,
-				MaxPerTenant:      2,
-				PollInterval:      100 * time.Millisecond,
-				LeaseDuration:     45 * time.Second,
-				JobTimeout:        15 * time.Second,
-				ReapInterval:      10 * time.Second,
-				CleanupInterval:   30 * time.Minute,
-				SessionRetention:  24 * time.Hour,
-				DoneJobRetention:  48 * time.Hour,
-				RiskFetchTimeout:  3 * time.Second,
-				RiskHostRateLimit: 5,
+				BaseConfig:          defaultBaseConfig("127.0.0.1:8082"),
+				Concurrency:         16,
+				MaxPerTenant:        2,
+				PollInterval:        100 * time.Millisecond,
+				LeaseDuration:       45 * time.Second,
+				JobTimeout:          15 * time.Second,
+				ReapInterval:        10 * time.Second,
+				CleanupInterval:     30 * time.Minute,
+				SessionRetention:    24 * time.Hour,
+				DoneJobRetention:    48 * time.Hour,
+				DeadJobRetention:    168 * time.Hour,
+				InvitationRetention: 168 * time.Hour,
+				RiskFetchTimeout:    3 * time.Second,
+				RiskHostRateLimit:   5,
+				RiskBlockedHosts: map[string]link.BanReason{
+					"bad.example": link.BanReasonMalware,
+				},
 				RiskBlockedKeywords: map[string]link.BanReason{
 					"smoke-phish": link.BanReasonPhishing,
 				},
+				RiskAllowedPorts: []int{80, 443, 8443},
 			},
 		},
 		{
-			name:    "job timeout exceeds lease",
-			env:     map[string]string{"WORKER_LEASE_DURATION": "10s", "WORKER_JOB_TIMEOUT": "15s"},
-			wantErr: "WORKER_JOB_TIMEOUT must not exceed WORKER_LEASE_DURATION",
+			name:    "job timeout without commit margin exceeds lease",
+			env:     map[string]string{"WORKER_LEASE_DURATION": "30s", "WORKER_JOB_TIMEOUT": "28s"},
+			wantErr: "WORKER_JOB_TIMEOUT + 5s commit margin must not exceed WORKER_LEASE_DURATION",
 		},
 		{
 			name:    "zero concurrency",
@@ -649,9 +666,19 @@ func TestLoadWorkerConfig(t *testing.T) {
 			wantErr: "WORKER_MAX_PER_TENANT must not be negative",
 		},
 		{
+			name:    "invalid risk blocked hosts",
+			env:     map[string]string{"RISK_BLOCKED_HOSTS": "badrule"},
+			wantErr: "RISK_BLOCKED_HOSTS",
+		},
+		{
 			name:    "invalid risk blocked keywords",
 			env:     map[string]string{"RISK_BLOCKED_KEYWORDS": "badrule"},
 			wantErr: "RISK_BLOCKED_KEYWORDS",
+		},
+		{
+			name:    "invalid risk allowed ports",
+			env:     map[string]string{"RISK_ALLOWED_PORTS": "80,99999"},
+			wantErr: "RISK_ALLOWED_PORTS",
 		},
 	}
 
@@ -668,10 +695,11 @@ func TestLoadWorkerConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadWorkerConfig() returned error: %v", err)
 			}
-			gotRules := got.RiskBlockedKeywords
-			wantRules := tt.want.RiskBlockedKeywords
-			if !workerConfigEqual(got, tt.want) || !maps.Equal(gotRules, wantRules) {
-				t.Errorf("LoadWorkerConfig() = %+v (rules=%v), want %+v (rules=%v)", got, gotRules, tt.want, wantRules)
+			if !workerConfigEqual(got, tt.want) ||
+				!maps.Equal(got.RiskBlockedHosts, tt.want.RiskBlockedHosts) ||
+				!maps.Equal(got.RiskBlockedKeywords, tt.want.RiskBlockedKeywords) ||
+				!slices.Equal(got.RiskAllowedPorts, tt.want.RiskAllowedPorts) {
+				t.Errorf("LoadWorkerConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -688,6 +716,8 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.CleanupInterval == b.CleanupInterval &&
 		a.SessionRetention == b.SessionRetention &&
 		a.DoneJobRetention == b.DoneJobRetention &&
+		a.DeadJobRetention == b.DeadJobRetention &&
+		a.InvitationRetention == b.InvitationRetention &&
 		a.RiskFetchTimeout == b.RiskFetchTimeout &&
 		a.RiskHostRateLimit == b.RiskHostRateLimit
 }

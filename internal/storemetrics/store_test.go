@@ -220,6 +220,13 @@ func TestAdminOperationsRecordResult(t *testing.T) {
 			}
 			return err
 		}},
+		{operationBanIfURL, func(t *testing.T, s *Store) error {
+			got, err := s.BanIfURL(context.Background(), "abc", "https://example.com", link.BanReasonPhishing, link.BanSourceRisk)
+			if err == nil && (got == nil || got.Code != tracedLink.Code) {
+				t.Errorf("BanIfURL = %+v, want %s", got, tracedLink.Code)
+			}
+			return err
+		}},
 		{operationUnban, func(t *testing.T, s *Store) error {
 			got, err := s.Unban(context.Background(), "abc")
 			if err == nil && (got == nil || got.Code != tracedLink.Code) {

@@ -96,7 +96,7 @@ func run(args []string, stdout, stderr io.Writer,
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ctx = audit.WithMeta(ctx, audit.OperatorMeta(""))
+	ctx = audit.WithMeta(ctx, audit.OperatorMeta(operatorActorRef()))
 	store, closer, err := open(ctx)
 	if err != nil {
 		return err
@@ -114,7 +114,7 @@ func runLink(args []string, stdout, stderr io.Writer, open func(context.Context)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ctx = audit.WithMeta(ctx, audit.OperatorMeta(""))
+	ctx = audit.WithMeta(ctx, audit.OperatorMeta(operatorActorRef()))
 	links, closer, err := open(ctx)
 	if err != nil {
 		return err
@@ -162,6 +162,19 @@ func openLinkStore(ctx context.Context) (linkStore, io.Closer, error) {
 		Logger: logx.NewFallback(os.Stderr, "console-cli"),
 	})
 	return store, multiCloser{db, rdb}, nil
+}
+
+// operatorActorRef 生成 CLI 运维操作的执行者标识，便于审计追溯是哪位运维在哪个节点执行。
+func operatorActorRef() string {
+	user := os.Getenv("USER")
+	if user == "" {
+		user = "unknown"
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "localhost"
+	}
+	return "cli:" + user + "@" + host
 }
 
 // multiCloser 依次关闭一组资源，把错误合并返回。

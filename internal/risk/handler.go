@@ -73,12 +73,14 @@ func NewHandler(opts HandlerOptions) job.Handler {
 
 			verdict, err = opts.Scanner.Scan(ctx, p.URL)
 			if err != nil {
-				if errors.Is(err, ErrBlockedAddress) || errors.Is(err, ErrInvalidScheme) || errors.Is(err, ErrTooManyRedirects) {
+				if errors.Is(err, ErrBlockedAddress) || errors.Is(err, ErrBlockedPort) || errors.Is(err, ErrInvalidScheme) || errors.Is(err, ErrTooManyRedirects) {
 					return job.Permanent(err)
 				}
 				return err
 			}
-			opts.Cache.Set(ctx, p.URL, verdict)
+			if !verdict.Uncacheable {
+				opts.Cache.Set(ctx, p.URL, verdict)
+			}
 		}
 
 		if !verdict.Unsafe {

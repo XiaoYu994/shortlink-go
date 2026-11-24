@@ -512,3 +512,101 @@ func TestJobClaimFairnessIncludesPlatformJobsAndSkipsFuture(t *testing.T) {
 		t.Errorf("counts (A=%d, B=%d, platform=%d), want (2, 1, 2)", countA, countB, countPlatform)
 	}
 }
+
+func TestCleanupDeadJobsAndInvitations(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := context.Background()
+
+	// 1. dead job 清理：仅删除早于保留期的 dead 任务，保留近期 dead 任务。
+	oldDeadID, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("EnqueueJob oldDead: %v", err)
+	}
+	recentDeadID, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("EnqueueJob recentDead: %v", err)
+	}
+	claimed, err := store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "cleanup-w"})
+	if err != nil || len(claimed) != 2 {
+		t.Fatalf("Claim = %d err=%v, want 2", len(claimed), err)
+	}
+	for _, j := range claimed {
+		if err := store.Dead(ctx, j.ID, "cleanup-w", j.LockVersion, "fatal"); err != nil {
+			t.Fatalf("Dead %d: %v", j.ID, err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET finished_at = now() - interval '40 days' WHERE id = $1`, oldDeadID); err != nil {
+		t.Fatalf("backdate old dead job: %v", err)
+	}
+	deletedDead, err := store.CleanupDeadJobs(ctx, 30*24*time.Hour, 100)
+	if err != nil {
+		t.Fatalf("CleanupDeadJobs: %v", err)
+	}
+	if deletedDead != 1 {
+		t.Errorf("deletedDead = %d, want 1", deletedDead)
+	}
+	var remainID int64
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM jobs WHERE status = 'dead'`).Scan(&remainID); err != nil || remainID != recentDeadID {
+		t.Errorf("remaining dead job = (%d, %v), want %d", remainID, err, recentDeadID)
+	}
+
+	// 2. invitations 清理：分别清理超期未接受、已撤销、被取代的老记录，保留活跃待兑现邀请。
+	activeInv, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenantID, Email: "active-inv@example.com", Role: identity.RoleMember,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvitation active: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	expiredInv, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenantID, Email: "expired-inv@example.com", Role: identity.RoleMember, ExpiresAt: &future,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvitation expired: %v", err)
+	}
+	revokedInv, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenantID, Email: "revoked-inv@example.com", Role: identity.RoleMember,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvitation revoked: %v", err)
+	}
+	supersededInv, err := store.CreateInvitation(ctx, CreateInvitationParams{
+		TenantID: tenantID, Email: "superseded-inv@example.com", Role: identity.RoleMember,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvitation superseded: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE invitations SET created_at = now() - interval '45 days', expires_at = now() - interval '40 days' WHERE id = $1`,
+		expiredInv.ID); err != nil {
+		t.Fatalf("backdate expired invitation: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE invitations SET created_at = now() - interval '45 days', revoked_at = now() - interval '40 days' WHERE id = $1`,
+		revokedInv.ID); err != nil {
+		t.Fatalf("backdate revoked invitation: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE invitations SET created_at = now() - interval '45 days', superseded_at = now() - interval '40 days' WHERE id = $1`,
+		supersededInv.ID); err != nil {
+		t.Fatalf("backdate superseded invitation: %v", err)
+	}
+
+	retention := 30 * 24 * time.Hour
+	nExp, err := store.CleanupExpiredInvitationsByExpiry(ctx, retention, 100)
+	if err != nil || nExp != 1 {
+		t.Fatalf("CleanupExpiredInvitationsByExpiry = (%d, %v), want (1, nil)", nExp, err)
+	}
+	nRev, err := store.CleanupRevokedInvitations(ctx, retention, 100)
+	if err != nil || nRev != 1 {
+		t.Fatalf("CleanupRevokedInvitations = (%d, %v), want (1, nil)", nRev, err)
+	}
+	nSup, err := store.CleanupSupersededInvitations(ctx, retention, 100)
+	if err != nil || nSup != 1 {
+		t.Fatalf("CleanupSupersededInvitations = (%d, %v), want (1, nil)", nSup, err)
+	}
+	var keptInvID int64
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM invitations`).Scan(&keptInvID); err != nil || keptInvID != activeInv.ID {
+		t.Errorf("remaining invitation = (%d, %v), want %d", keptInvID, err, activeInv.ID)
+	}
+}

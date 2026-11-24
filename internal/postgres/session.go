@@ -73,10 +73,10 @@ inserted_memberships AS (
 )
 INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
 SELECT r.tenant_id,
-       'user',
+       $4::text,
        $1,
-       'invitation.redeem',
-       'invitation',
+       $5::text,
+       $6::text,
        r.id::text,
        $3::text,
        jsonb_build_object('email', r.email, 'role', r.role)
@@ -280,7 +280,10 @@ func redeemInvitationsTx(ctx context.Context, tx *sql.Tx, userID int64, email st
 	if m, ok := audit.MetaFrom(ctx); ok {
 		reqID = audit.NormalizeMeta(m).RequestID
 	}
-	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL, userID, email, reqID); err != nil {
+	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL,
+		userID, email, reqID,
+		string(audit.ActorUser), string(audit.ActionInvitationRedeem), string(audit.TargetInvitation),
+	); err != nil {
 		return fmt.Errorf("create session for identity: redeem invitations: %w", err)
 	}
 	return nil
@@ -423,32 +426,45 @@ func (s *Store) RevokeSession(ctx context.Context, token string) error {
 
 // CleanupExpiredSessions 分批删除过期或吊销时间早于 retention 的服务端会话，总计不超过 limit 行。
 func (s *Store) CleanupExpiredSessions(ctx context.Context, retention time.Duration, limit int) (int64, error) {
-	if retention < 0 {
-		return 0, errors.New("cleanup expired sessions: retention must not be negative")
-	}
-	if limit <= 0 {
-		return 0, errors.New("cleanup expired sessions: limit must be positive")
-	}
-	retentionUS := retention.Microseconds()
-	res, err := s.db.ExecContext(ctx, cleanupExpiredSessionsByExpiresSQL, retentionUS, limit)
+	deleted, err := s.CleanupExpiredSessionsByExpiry(ctx, retention, limit)
 	if err != nil {
-		return 0, fmt.Errorf("cleanup expired sessions: %w", err)
-	}
-	deleted, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("cleanup expired sessions: %w", err)
+		return 0, err
 	}
 	remaining := int64(limit) - deleted
 	if remaining <= 0 {
 		return deleted, nil
 	}
-	res, err = s.db.ExecContext(ctx, cleanupExpiredSessionsByRevokedSQL, retentionUS, remaining)
+	revokedDeleted, err := s.CleanupRevokedSessions(ctx, retention, int(remaining))
 	if err != nil {
-		return 0, fmt.Errorf("cleanup revoked sessions: %w", err)
-	}
-	revokedDeleted, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("cleanup revoked sessions: %w", err)
+		return 0, err
 	}
 	return deleted + revokedDeleted, nil
+}
+
+// CleanupExpiredSessionsByExpiry 仅沿 idx_sessions_expires_at 分批删除早于 retention 的已过期会话。
+func (s *Store) CleanupExpiredSessionsByExpiry(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	return s.execRetentionCleanup(ctx, "cleanup expired sessions", cleanupExpiredSessionsByExpiresSQL, retention, limit)
+}
+
+// CleanupRevokedSessions 仅沿 idx_sessions_revoked_at 分批删除早于 retention 的已吊销会话。
+func (s *Store) CleanupRevokedSessions(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	return s.execRetentionCleanup(ctx, "cleanup revoked sessions", cleanupExpiredSessionsByRevokedSQL, retention, limit)
+}
+
+func (s *Store) execRetentionCleanup(ctx context.Context, op, query string, retention time.Duration, limit int) (int64, error) {
+	if retention < 0 {
+		return 0, fmt.Errorf("%s: retention must not be negative", op)
+	}
+	if limit <= 0 {
+		return 0, fmt.Errorf("%s: limit must be positive", op)
+	}
+	res, err := s.db.ExecContext(ctx, query, retention.Microseconds(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+	return n, nil
 }

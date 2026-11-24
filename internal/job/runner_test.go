@@ -520,6 +520,50 @@ func TestRunnerGracefulShutdownWaitsAndTimesOut(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("shutdown timeout on last attempt does not mark dead", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			q := newFakeQueue()
+			id := q.add(Job{Kind: "stuck-last", MaxAttempts: 1})
+
+			started := make(chan struct{})
+			runner := New(q, map[string]Handler{
+				"stuck-last": func(ctx context.Context, _ Job) error {
+					close(started)
+					<-ctx.Done()
+					return ctx.Err()
+				},
+			}, nil, prometheus.NewRegistry(), Options{
+				Concurrency:     1,
+				PollInterval:    50 * time.Millisecond,
+				ShutdownTimeout: 300 * time.Millisecond,
+				JobTimeout:      time.Minute,
+				ReapInterval:    time.Hour,
+				MetricsInterval: time.Hour,
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- runner.Run(ctx) }()
+
+			<-started
+			cancel()
+			err := <-done
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Run error = %v, want DeadlineExceeded", err)
+			}
+			j, ok := q.get(id)
+			if !ok {
+				t.Fatalf("job %d missing", id)
+			}
+			if j.Status != StatusPending {
+				t.Errorf("status = %q, want pending (must not move to dead on shutdown)", j.Status)
+			}
+			if j.Attempts != 0 {
+				t.Errorf("attempts = %d, want 0 (must not consume attempt on shutdown)", j.Attempts)
+			}
+		})
+	})
 }
 
 func TestRunnerStaleLeaseLostDoesNotOverwriteSameWorkerReclaim(t *testing.T) {

@@ -20,7 +20,7 @@ var errUsage = errors.New("usage")
 
 const usageText = `用法:
   console serve
-  console worker [--allow-test-host HOST:PORT]
+  console worker
   console key issue --name NAME [--external-id ID] [--expires RFC3339] [--scope SCOPE]...
   console key issue --tenant ID [--expires RFC3339] [--scope SCOPE]...
   console key list --tenant ID

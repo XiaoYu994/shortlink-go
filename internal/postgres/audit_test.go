@@ -299,8 +299,16 @@ func TestAuditLogsLifecycleAndIsolation(t *testing.T) {
 		t.Fatal("ListAuditLogs with non-positive cursor id = nil error, want error")
 	}
 
-	// 9. 失败的变更操作绝不产生审计日志。
+	// 9. 失败的变更操作与幂等空操作绝不产生审计日志。
 	beforeCount := len(events1)
+	if _, err := store.UpdateMemberRole(userCtx, identity.UpdateMemberRoleParams{
+		TenantID:     tenant1,
+		ActorUserID:  ownerID,
+		TargetUserID: ownerID,
+		NewRole:      identity.RoleOwner,
+	}); err != nil {
+		t.Fatalf("noop UpdateMemberRole err = %v, want nil", err)
+	}
 	if err := store.RevokeOrgAPIKey(userCtx, tenant1, issuedOrgKey.Key.ID); !errors.Is(err, identity.ErrAPIKeyRevoked) {
 		t.Fatalf("repeat revoke api key err = %v, want ErrAPIKeyRevoked", err)
 	}

@@ -20,6 +20,7 @@ const (
 
 	droppedMetricName = "shortlink_clicks_dropped_total"
 	writtenMetricName = "shortlink_clicks_written_total"
+	stoppedMetricName = "shortlink_clicks_recorder_stopped"
 
 	resultSuccess = "success"
 	resultError   = "error"
@@ -72,6 +73,7 @@ type Recorder struct {
 	done         chan struct{}
 	dropped      prometheus.Counter
 	written      *prometheus.CounterVec
+	stoppedGauge prometheus.Gauge
 	batchSize    int
 	interval     time.Duration
 	writeTimeout time.Duration
@@ -108,6 +110,10 @@ func New(store Store, logger *slog.Logger, registry *prometheus.Registry, opts O
 			Name: writtenMetricName,
 			Help: "Clicks included in a store write, by result.",
 		}, []string{"result"}),
+		stoppedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: stoppedMetricName,
+			Help: "Whether the click recorder background loop stopped unexpectedly due to a panic (1 = stopped).",
+		}),
 		batchSize:    opts.BatchSize,
 		interval:     opts.Interval,
 		writeTimeout: opts.WriteTimeout,
@@ -115,7 +121,8 @@ func New(store Store, logger *slog.Logger, registry *prometheus.Registry, opts O
 	// 先取出两个 label，进程一启动 /metrics 里就是 0。没写出过点击时也能看到这条指标。
 	r.written.WithLabelValues(resultSuccess)
 	r.written.WithLabelValues(resultError)
-	registry.MustRegister(r.dropped, r.written)
+	r.stoppedGauge.Set(0)
+	registry.MustRegister(r.dropped, r.written, r.stoppedGauge)
 	go r.loop()
 	return r
 }
@@ -237,6 +244,7 @@ func (r *Recorder) recoverLoop() {
 		close(r.ch)
 	}
 	r.mu.Unlock()
+	r.stoppedGauge.Set(1)
 	err := fmt.Errorf("click recorder panic: %v", rec)
 	r.noteCloseErr(err)
 	r.logger.Error("click recorder panic", "err", err, "stack", string(debug.Stack()))

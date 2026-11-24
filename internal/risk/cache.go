@@ -138,7 +138,7 @@ func (c *VerdictCache) Get(ctx context.Context, rawURL string) (Verdict, bool) {
 			return Verdict{}, false
 		}
 		c.lookups.WithLabelValues(cacheResultHit).Inc()
-		return Verdict(cv), true
+		return Verdict{Unsafe: cv.Unsafe, Reason: cv.Reason, Detail: cv.Detail}, true
 	case errors.Is(err, redis.Nil):
 		c.lookups.WithLabelValues(cacheResultMiss).Inc()
 		return Verdict{}, false
@@ -154,11 +154,14 @@ func (c *VerdictCache) Set(ctx context.Context, rawURL string, v Verdict) {
 	if c == nil || c.rdb == nil {
 		return
 	}
+	if v.Uncacheable {
+		return
+	}
 	norm, err := NormalizeURL(rawURL)
 	if err != nil {
 		return
 	}
-	data, err := json.Marshal(cachedVerdict(v))
+	data, err := json.Marshal(cachedVerdict{Unsafe: v.Unsafe, Reason: v.Reason, Detail: v.Detail})
 	if err != nil {
 		return
 	}

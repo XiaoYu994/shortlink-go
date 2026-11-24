@@ -23,6 +23,7 @@ const (
 	operationDelete    = "delete"
 	operationStats     = "stats"
 	operationBan       = "ban"
+	operationBanIfURL  = "ban_if_url"
 	operationUnban     = "unban"
 
 	resultSuccess       = "success"
@@ -170,7 +171,7 @@ func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, sou
 func (s *Store) BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
 	start := time.Now()
 	got, err := s.next.BanIfURL(ctx, code, expectedURL, reason, source)
-	s.observe(operationBan, err, time.Since(start))
+	s.observe(operationBanIfURL, err, time.Since(start))
 	return got, err
 }
 

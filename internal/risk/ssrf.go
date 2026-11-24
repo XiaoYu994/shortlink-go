@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,13 +30,15 @@ const (
 var (
 	// ErrBlockedAddress 表示目标主机解析到了回环、私网、云元数据或其他禁止访问的地址。
 	ErrBlockedAddress = errors.New("risk: target address is blocked")
+	// ErrBlockedPort 表示目标端口不在风控允许的出站端口白名单内（默认仅 80/443）。
+	ErrBlockedPort = errors.New("risk: target port is blocked")
 	// ErrInvalidScheme 表示重定向或请求使用了非 http/https 协议。
 	ErrInvalidScheme = errors.New("risk: only http and https schemes are allowed")
 	// ErrTooManyRedirects 表示重定向次数超过上限。
 	ErrTooManyRedirects = errors.New("risk: too many redirects")
 )
 
-// 额外封禁的保留网段（IsPrivate/IsLoopback 之外的 CGNAT、文档、基准和保留地址）。
+// 额外封禁的保留网段（IsPrivate/IsLoopback 之外的 CGNAT、文档、过渡隧道、NAT64、基准和保留地址）。
 var extraBlockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 CGNAT
@@ -45,7 +48,13 @@ var extraBlockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2
 	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
 	netip.MustParsePrefix("240.0.0.0/4"),     // Reserved / Broadcast
+	netip.MustParsePrefix("100::/64"),        // RFC 6666 Discard-Only
 	netip.MustParsePrefix("2001:db8::/32"),   // IPv6 Documentation
+	netip.MustParsePrefix("2001::/32"),       // RFC 4380 Teredo
+	netip.MustParsePrefix("2002::/16"),       // RFC 3056 6to4
+	netip.MustParsePrefix("64:ff9b::/96"),    // RFC 6052 NAT64
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // RFC 8215 Local-Use NAT64
+	netip.MustParsePrefix("fec0::/10"),       // RFC 3879 Site-Local (deprecated)
 }
 
 /*
@@ -87,8 +96,14 @@ AllowedHostPorts 只在单测和本地冒烟测试中显式传入（形如 127.0
 type HTTPClientOptions struct {
 	Timeout          time.Duration
 	MaxRedirects     int
+	AllowedPorts     []int
 	AllowedHostPorts []string
 	Resolver         HostResolver
+}
+
+// DefaultAllowedPorts 返回默认允许的风控出站端口白名单（HTTP 80 与 HTTPS 443）。
+func DefaultAllowedPorts() []int {
+	return []int{80, 443}
 }
 
 // NewSafeHTTPClient 构造在拨号层拦截 SSRF、在重定向层拦截非法跳转的 HTTP 客户端。
@@ -104,6 +119,17 @@ func NewSafeHTTPClient(opts HTTPClientOptions) *http.Client {
 	resolver := opts.Resolver
 	if resolver == nil {
 		resolver = net.DefaultResolver
+	}
+
+	ports := opts.AllowedPorts
+	if len(ports) == 0 {
+		ports = DefaultAllowedPorts()
+	}
+	allowedPorts := make(map[int]struct{}, len(ports))
+	for _, p := range ports {
+		if p >= 1 && p <= 65535 {
+			allowedPorts[p] = struct{}{}
+		}
 	}
 
 	allowed := make(map[string]struct{}, len(opts.AllowedHostPorts))
@@ -126,7 +152,7 @@ func NewSafeHTTPClient(opts HTTPClientOptions) *http.Client {
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return safeDialContext(ctx, dialer, resolver, allowed, network, address)
+			return safeDialContext(ctx, dialer, resolver, allowedPorts, allowed, network, address)
 		},
 	}
 
@@ -147,22 +173,27 @@ func NewSafeHTTPClient(opts HTTPClientOptions) *http.Client {
 }
 
 /*
-safeDialContext 在真正建立 TCP 连接前解析并校验所有候选 IP，然后直接对已通过校验的 IP 拨号。
+safeDialContext 在真正建立 TCP 连接前解析并校验所有候选 IP 与端口，然后直接对已通过校验的 IP 拨号。
 这样 DNS 解析与连接建立使用同一个 IP，杜绝先校验后拨号的 DNS Rebinding（TOCTOU）漏洞。
 */
 func safeDialContext(
 	ctx context.Context,
 	dialer *net.Dialer,
 	resolver HostResolver,
+	allowedPorts map[int]struct{},
 	allowed map[string]struct{},
 	network, address string,
 ) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(address)
+	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, fmt.Errorf("invalid dial address %q: %w", address, err)
 	}
-	if _, ok := allowed[strings.ToLower(net.JoinHostPort(host, port))]; ok {
+	if _, ok := allowed[strings.ToLower(net.JoinHostPort(host, portStr))]; ok {
 		return dialer.DialContext(ctx, network, address)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("%w: %q", ErrBlockedPort, portStr)
 	}
 
 	var ips []netip.Addr
@@ -184,10 +215,13 @@ func safeDialContext(
 			return nil, fmt.Errorf("%w: %s resolved to %s", ErrBlockedAddress, host, ip.Unmap())
 		}
 	}
+	if _, ok := allowedPorts[port]; !ok {
+		return nil, fmt.Errorf("%w: port %d is not allowed", ErrBlockedPort, port)
+	}
 
 	var lastErr error
 	for _, ip := range ips {
-		target := net.JoinHostPort(ip.Unmap().String(), port)
+		target := net.JoinHostPort(ip.Unmap().String(), portStr)
 		conn, err := dialer.DialContext(ctx, network, target)
 		if err == nil {
 			return conn, nil

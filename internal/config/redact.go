@@ -106,9 +106,13 @@ func (cfg WorkerConfig) LogValue() slog.Value {
 		slog.Duration("cleanup_interval", cfg.CleanupInterval),
 		slog.Duration("session_retention", cfg.SessionRetention),
 		slog.Duration("done_job_retention", cfg.DoneJobRetention),
+		slog.Duration("dead_job_retention", cfg.DeadJobRetention),
+		slog.Duration("invitation_retention", cfg.InvitationRetention),
 		slog.Duration("risk_fetch_timeout", cfg.RiskFetchTimeout),
 		slog.Int("risk_host_rate_limit", cfg.RiskHostRateLimit),
+		slog.Int("risk_blocked_hosts_count", len(cfg.RiskBlockedHosts)),
 		slog.Int("risk_blocked_keywords_count", len(cfg.RiskBlockedKeywords)),
+		slog.Int("risk_allowed_ports_count", len(cfg.RiskAllowedPorts)),
 	)
 }
 

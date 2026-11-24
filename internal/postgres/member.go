@@ -25,6 +25,12 @@ WHERE tenant_id = $1
 ORDER BY user_id
 FOR UPDATE`
 
+	getMemberSQL = `SELECT m.user_id, u.email, u.name, m.role, m.created_at
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.tenant_id = $1
+  AND m.user_id = $2`
+
 	updateMemberRoleSQL = `UPDATE memberships m
 SET role = $3
 FROM users u
@@ -205,6 +211,20 @@ func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRol
 	}
 	if err := scope.canUpdateRole(p.NewRole); err != nil {
 		return identity.Member{}, err
+	}
+	// 幂等空操作不写数据库、不产生审计日志噪音（ADR 0023）。
+	if scope.targetRole == p.NewRole {
+		member, err := scanMember(tx.QueryRowContext(ctx, getMemberSQL, p.TenantID, p.TargetUserID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return identity.Member{}, fmt.Errorf("update member role: user %d missing", p.TargetUserID)
+		}
+		if err != nil {
+			return identity.Member{}, fmt.Errorf("update member role: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return identity.Member{}, fmt.Errorf("update member role: commit: %w", err)
+		}
+		return member, nil
 	}
 
 	member, err := scanMember(tx.QueryRowContext(ctx, updateMemberRoleSQL, p.TenantID, p.TargetUserID, string(p.NewRole)))

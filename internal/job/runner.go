@@ -41,7 +41,8 @@ const (
 	resultRetry   = "retry"
 	resultDead    = "dead"
 
-	commitTimeout         = 5 * time.Second
+	// CommitTimeout 是任务执行结束后写回队列状态的数据库超时上限；配置校验需保证其与 JobTimeout 之和不超过 LeaseDuration。
+	CommitTimeout         = 5 * time.Second
 	reapQueryLimit        = 5 * time.Second
 	maxReapBatchesPerTick = 20
 	periodicTimeout       = 30 * time.Second
@@ -281,12 +282,14 @@ func (r *Runner) pollLoop(ctx, inFlightCtx context.Context, sem chan struct{}, w
 			continue
 		}
 
-		jobs, err := r.queue.Claim(ctx, ClaimParams{
+		claimCtx, claimCancel := context.WithTimeout(ctx, reapQueryLimit)
+		jobs, err := r.queue.Claim(claimCtx, ClaimParams{
 			Limit:        slots,
 			MaxPerTenant: r.opts.MaxPerTenant,
 			Lease:        r.opts.LeaseDuration,
 			LockedBy:     r.opts.WorkerID,
 		})
+		claimCancel()
 		if err != nil {
 			releaseSlots(sem, slots)
 			if ctx.Err() != nil {
@@ -344,7 +347,7 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 	r.duration.WithLabelValues(j.Kind).Observe(time.Since(start).Seconds())
 
 	// 回写结果脱离 inFlightCtx 的普通取消，给数据库短超时收尾，同时保留任务关联字段进日志。
-	commitCtx, cancel := context.WithTimeout(logx.WithJob(context.Background(), j.ID, j.Kind, jobTenantID(j)), commitTimeout)
+	commitCtx, cancel := context.WithTimeout(logx.WithJob(context.Background(), j.ID, j.Kind, jobTenantID(j)), CommitTimeout)
 	defer cancel()
 
 	switch {
@@ -375,6 +378,21 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 			r.logCommitError(commitCtx, "defer job", j, rerr)
 			return
 		}
+		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
+
+	case parentCtx.Err() != nil && !IsPermanent(err):
+		if rerr := r.queue.Retry(commitCtx, RetryParams{
+			ID:             j.ID,
+			LockedBy:       r.opts.WorkerID,
+			LockVersion:    j.LockVersion,
+			Delay:          0,
+			LastError:      "worker shutdown canceled in-flight job",
+			ConsumeAttempt: false,
+		}); rerr != nil {
+			r.logCommitError(commitCtx, "requeue job on shutdown", j, rerr)
+			return
+		}
+		r.logger.WarnContext(commitCtx, "job requeued on worker shutdown", "attempts", j.Attempts)
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 
 	case IsPermanent(err) || j.Attempts >= j.MaxAttempts:

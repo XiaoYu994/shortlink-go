@@ -96,11 +96,14 @@ func TestGetByCodeCountsCorruptAsMiss(t *testing.T) {
 
 func TestGetByCodeCountsFallback(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
-	_ = rdb.Close()
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	var setCalls atomic.Int32
+	rdb.AddHook(&countSetHook{calls: &setCalls})
 
 	reg := prometheus.NewRegistry()
 	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
-		return &link.Link{URL: "https://example.com/down"}, nil
+		return &link.Link{ID: 1, Code: "down", URL: "https://example.com/down"}, nil
 	}}
 	s := New(next, rdb, reg, Options{})
 
@@ -110,6 +113,31 @@ func TestGetByCodeCountsFallback(t *testing.T) {
 	assertCacheResult(t, s, resultFallback, 1)
 	assertCacheResult(t, s, resultMiss, 0)
 	assertCacheResult(t, s, resultHit, 0)
+	if got := setCalls.Load(); got != 0 {
+		t.Errorf("SET calls on fallback = %d, want 0", got)
+	}
+	if got := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); got != 0 {
+		t.Errorf("writes{result=%q} = %v, want 0", writeError, got)
+	}
+}
+
+type countSetHook struct {
+	calls *atomic.Int32
+}
+
+func (h *countSetHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *countSetHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *countSetHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "set" {
+			h.calls.Add(1)
+		}
+		return next(ctx, cmd)
+	}
 }
 
 func TestGetByCodeCanceledDoesNotCount(t *testing.T) {
