@@ -58,12 +58,15 @@ func (s *Server) Routes() http.Handler {
 }
 
 func (s *Server) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
-	if s.auth != nil {
-		s.auth.handleProviders(w, r)
+	if httpx.IsClientGone(s.logger, r) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, authProvidersResponse{})
+	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, authProvidersResponse{
+		OIDC:          s.auth != nil && s.auth.oidc != nil,
+		GitHub:        s.auth != nil && s.auth.github != nil,
+		PublicBaseURL: s.publicBaseURL,
+	})
 }
 
 /*

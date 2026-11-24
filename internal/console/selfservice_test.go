@@ -138,13 +138,14 @@ func (a selfServiceAPIKeyAuth) Authenticate(context.Context, string) (identity.P
 func TestAuthProvidersAndReturnTo(t *testing.T) {
 	sess := &selfServiceSessionStore{userID: 7, role: identity.RoleOwner, orgID: 1}
 	srv := New(selfServiceLogger(), &stubStore{}, 2*time.Second, prometheus.NewRegistry(), Options{
-		Authorizer: identity.NewMapAuthorizer(),
-		OIDC:       selfServiceOIDC{},
-		Sessions:   sess,
+		Authorizer:    identity.NewMapAuthorizer(),
+		OIDC:          selfServiceOIDC{},
+		Sessions:      sess,
+		PublicBaseURL: "https://s.example.com",
 	})
 	h := srv.Routes()
 
-	// 1. /api/v1/auth/providers 反映启用的提供方。
+	// 1. /api/v1/auth/providers 反映启用的提供方与公开短链基地址。
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
 	if rec.Code != http.StatusOK {
@@ -154,8 +155,8 @@ func TestAuthProvidersAndReturnTo(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &prov); err != nil {
 		t.Fatalf("decode providers: %v", err)
 	}
-	if !prov.OIDC || prov.GitHub {
-		t.Fatalf("providers = %+v, want {OIDC:true GitHub:false}", prov)
+	if !prov.OIDC || prov.GitHub || prov.PublicBaseURL != "https://s.example.com" {
+		t.Fatalf("providers = %+v, want {OIDC:true GitHub:false PublicBaseURL:https://s.example.com}", prov)
 	}
 
 	// 2. 非法 return_to（含路径穿越）返回 400。

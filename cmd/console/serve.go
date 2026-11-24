@@ -97,16 +97,17 @@ func runServe() error {
 
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
 	srv := console.New(logger, store, cfg.RequestTimeout, registry, console.Options{
-		Keys:        pgStore,
-		Authorizer:  identity.NewMapAuthorizer(),
-		OIDC:        oidcClient,
-		GitHub:      githubClient,
-		Sessions:    sessions,
-		Members:     members,
-		Orgs:        orgs,
-		Invitations: invitations,
-		APIKeys:     apiKeys,
-		WebDistDir:  cfg.WebDistDir,
+		Keys:          pgStore,
+		Authorizer:    identity.NewMapAuthorizer(),
+		OIDC:          oidcClient,
+		GitHub:        githubClient,
+		Sessions:      sessions,
+		Members:       members,
+		Orgs:          orgs,
+		Invitations:   invitations,
+		APIKeys:       apiKeys,
+		WebDistDir:    cfg.WebDistDir,
+		PublicBaseURL: cfg.PublicBaseURL,
 	})
 	/*
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。

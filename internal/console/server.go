@@ -65,28 +65,31 @@ type Options struct {
 	APIKeys     APIKeyStore
 	// WebDistDir 非空时在 / 挂载前端构建产物（SPA），不拦截 /api/*、/r/* 和运维端点（ADR 0021）。
 	WebDistDir string
+	// PublicBaseURL 是公开短链跳转基地址（如 https://s.example.com），随 /api/v1/auth/providers 下发给前端展示与复制。
+	PublicBaseURL string
 	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
 	SessionTTL time.Duration
 }
 
 // Server 持有管理进程需要的依赖，复用 httpx 提供的运维端点与通用中间件。
 type Server struct {
-	base        *httpx.Server
-	logger      *slog.Logger
-	store       LinkCreator
-	admin       LinkAdminStore
-	stats       LinkStatsStore
-	keys        APIKeyAuthenticator
-	sessions    SessionAuthenticator
-	authz       Authorizer
-	csrf        *http.CrossOriginProtection
-	auth        *authHandler
-	members     *memberHandler
-	orgs        *orgHandler
-	invitations *invitationHandler
-	apiKeys     *apiKeyHandler
-	web         http.Handler
-	limiter     *tenantRateLimiter
+	base          *httpx.Server
+	logger        *slog.Logger
+	store         LinkCreator
+	admin         LinkAdminStore
+	stats         LinkStatsStore
+	keys          APIKeyAuthenticator
+	sessions      SessionAuthenticator
+	authz         Authorizer
+	csrf          *http.CrossOriginProtection
+	auth          *authHandler
+	members       *memberHandler
+	orgs          *orgHandler
+	invitations   *invitationHandler
+	apiKeys       *apiKeyHandler
+	web           http.Handler
+	publicBaseURL string
+	limiter       *tenantRateLimiter
 	// rateLimited 只属于管理 API；在 newServer 里注册一次，不在 Routes 中重复注册。
 	rateLimited prometheus.Counter
 }
@@ -108,6 +111,7 @@ type serverDeps struct {
 	invitations    InvitationStore
 	apiKeys        APIKeyStore
 	webDistDir     string
+	publicBaseURL  string
 	sessionTTL     time.Duration
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
@@ -137,6 +141,7 @@ func New(logger *slog.Logger, store Store, requestTimeout time.Duration, registr
 		invitations:    opts.Invitations,
 		apiKeys:        opts.APIKeys,
 		webDistDir:     opts.WebDistDir,
+		publicBaseURL:  opts.PublicBaseURL,
 		sessionTTL:     opts.SessionTTL,
 		requestTimeout: requestTimeout,
 		registry:       registry,
@@ -172,23 +177,24 @@ func newServer(d serverDeps) *Server {
 		web = newWebSPAHandler(d.webDistDir)
 	}
 	return &Server{
-		base:        base,
-		logger:      logger,
-		store:       d.store,
-		admin:       d.admin,
-		stats:       d.stats,
-		keys:        d.keys,
-		sessions:    d.sessions,
-		authz:       d.authorizer,
-		csrf:        csrf,
-		auth:        auth,
-		members:     members,
-		orgs:        orgs,
-		invitations: invitations,
-		apiKeys:     apiKeys,
-		web:         web,
-		limiter:     newTenantRateLimiter(),
-		rateLimited: newRateLimitedCounter(d.registry),
+		base:          base,
+		logger:        logger,
+		store:         d.store,
+		admin:         d.admin,
+		stats:         d.stats,
+		keys:          d.keys,
+		sessions:      d.sessions,
+		authz:         d.authorizer,
+		csrf:          csrf,
+		auth:          auth,
+		members:       members,
+		orgs:          orgs,
+		invitations:   invitations,
+		apiKeys:       apiKeys,
+		web:           web,
+		publicBaseURL: d.publicBaseURL,
+		limiter:       newTenantRateLimiter(),
+		rateLimited:   newRateLimitedCounter(d.registry),
 	}
 }
 

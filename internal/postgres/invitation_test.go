@@ -242,8 +242,8 @@ func TestCreateSessionForIdentityRedeemsInvitations(t *testing.T) {
 		t.Fatalf("GetSessionInfo verified: %v", err)
 	}
 	wantOrgs := []identity.UserOrg{
-		{ID: tenant1, Name: "test", Role: identity.RoleOwner},
-		{ID: tenant2, Name: "org-two", Role: identity.RoleMember},
+		{ID: tenant1, Name: "test", Role: identity.RoleOwner, LinkUsage: 0, LinkQuota: 1000},
+		{ID: tenant2, Name: "org-two", Role: identity.RoleMember, LinkUsage: 0, LinkQuota: 1000},
 	}
 	if !slices.Equal(info.Orgs, wantOrgs) {
 		t.Fatalf("orgs = %+v, want %+v", info.Orgs, wantOrgs)

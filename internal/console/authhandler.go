@@ -175,19 +175,9 @@ type authFlowCookie struct {
 }
 
 type authProvidersResponse struct {
-	OIDC   bool `json:"oidc"`
-	GitHub bool `json:"github"`
-}
-
-func (h *authHandler) handleProviders(w http.ResponseWriter, r *http.Request) {
-	if httpx.IsClientGone(h.logger, r) {
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, authProvidersResponse{
-		OIDC:   h.oidc != nil,
-		GitHub: h.github != nil,
-	})
+	OIDC          bool   `json:"oidc"`
+	GitHub        bool   `json:"github"`
+	PublicBaseURL string `json:"public_base_url,omitempty"`
 }
 
 type loginResponse struct {
@@ -208,9 +198,11 @@ type meResponse struct {
 }
 
 type meOrgResponse struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-	Role string `json:"role"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	LinkUsage int64  `json:"link_usage"`
+	LinkQuota int64  `json:"link_quota"`
 }
 
 // handleLogin 发起标准 OIDC 授权码登录（带 state、PKCE code_verifier 和 nonce）。
@@ -490,9 +482,11 @@ func (h *authHandler) handleMe(w http.ResponseWriter, r *http.Request) {
 	orgs := make([]meOrgResponse, 0, len(info.Orgs))
 	for _, org := range info.Orgs {
 		orgs = append(orgs, meOrgResponse{
-			ID:   org.ID,
-			Name: org.Name,
-			Role: string(org.Role),
+			ID:        org.ID,
+			Name:      org.Name,
+			Role:      string(org.Role),
+			LinkUsage: org.LinkUsage,
+			LinkQuota: org.LinkQuota,
 		})
 	}
 	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, meResponse{

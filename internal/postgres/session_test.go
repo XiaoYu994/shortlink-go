@@ -421,8 +421,8 @@ func TestGetSessionInfoAndRevokeSession(t *testing.T) {
 		t.Fatalf("GetSessionInfo with orgs: %v", err)
 	}
 	wantOrgs := []identity.UserOrg{
-		{ID: tenant1, Name: "test", Role: identity.RoleOwner},
-		{ID: tenant2, Name: "acme-two", Role: identity.RoleViewer},
+		{ID: tenant1, Name: "test", Role: identity.RoleOwner, LinkUsage: 0, LinkQuota: 1000},
+		{ID: tenant2, Name: "acme-two", Role: identity.RoleViewer, LinkUsage: 0, LinkQuota: 1000},
 	}
 	if !slices.Equal(info.Orgs, wantOrgs) {
 		t.Errorf("orgs = %+v, want %+v", info.Orgs, wantOrgs)

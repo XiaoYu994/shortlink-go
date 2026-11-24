@@ -58,11 +58,13 @@ type IssuedSession struct {
 	CookieMaxAge time.Duration
 }
 
-// UserOrg 表示用户所属的一个组织及其在该组织中的角色。
+// UserOrg 表示用户所属的一个组织、在该组织中的角色与当月短链配额概览。
 type UserOrg struct {
-	ID   int64
-	Name string
-	Role Role
+	ID        int64
+	Name      string
+	Role      Role
+	LinkUsage int64
+	LinkQuota int64
 }
 
 // SessionInfo 是当前有效会话关联的用户、到期时刻与所属组织列表。

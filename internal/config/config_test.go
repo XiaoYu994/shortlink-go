@@ -43,6 +43,7 @@ func baseTestEnv() map[string]string {
 		"GITHUB_CLIENT_SECRET":      "",
 		"GITHUB_REDIRECT_URL":       "",
 		"WEB_DIST_DIR":              "",
+		"PUBLIC_BASE_URL":           "",
 		"WORKER_ADDR":               "",
 		"WORKER_CONCURRENCY":        "",
 		"WORKER_MAX_PER_TENANT":     "",
@@ -371,13 +372,20 @@ func TestLoadConsoleConfig(t *testing.T) {
 		{
 			name: "web dist dir trimmed",
 			env: map[string]string{
-				"WEB_DIST_DIR": "  web/dist  ",
+				"WEB_DIST_DIR":    "  web/dist  ",
+				"PUBLIC_BASE_URL": " http://127.0.0.1:8080/ ",
 			},
 			want: func() ConsoleConfig {
 				c := defaults
 				c.WebDistDir = "web/dist"
+				c.PublicBaseURL = "http://127.0.0.1:8080"
 				return c
 			}(),
+		},
+		{
+			name:    "invalid public base url",
+			env:     map[string]string{"PUBLIC_BASE_URL": "ftp://example.com"},
+			wantErr: "PUBLIC_BASE_URL",
 		},
 		{
 			name: "oidc all set",

@@ -114,6 +114,8 @@ type ConsoleConfig struct {
 	GitHub GitHubConfig
 	// WebDistDir 非空时，console serve 在 / 托管前端构建产物（阶段 13、ADR 0021）。
 	WebDistDir string
+	// PublicBaseURL 是公开短链跳转的外部基地址（如 https://s.example.com 或本地 http://127.0.0.1:8080），供前端拼装可点击与可复制的短链地址。
+	PublicBaseURL string
 }
 
 // OIDCConfig 存放标准 OIDC 身份提供方的接入参数。
@@ -218,13 +220,19 @@ func LoadConsoleConfig() (ConsoleConfig, error) {
 			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 			RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
 		},
-		WebDistDir: strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
+		WebDistDir:    strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
+		PublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
 	}
 	if err := validateOIDC(cfg.OIDC); err != nil {
 		return ConsoleConfig{}, err
 	}
 	if err := validateGitHub(cfg.GitHub); err != nil {
 		return ConsoleConfig{}, err
+	}
+	if cfg.PublicBaseURL != "" {
+		if err := validateIssuerURL("PUBLIC_BASE_URL", cfg.PublicBaseURL); err != nil {
+			return ConsoleConfig{}, err
+		}
 	}
 	return cfg, nil
 }

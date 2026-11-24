@@ -82,7 +82,13 @@ WHERE s.token_hash = $1
 	getSessionInfoSQL = `SELECT u.id, u.email, u.name, u.created_at, s.expires_at,
        COALESCE((
            SELECT json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'role', m.role)
+               json_build_object(
+                   'id', t.id,
+                   'name', t.name,
+                   'role', m.role,
+                   'link_usage', (` + effectiveUsageSQL + `),
+                   'link_quota', t.link_quota
+               )
                ORDER BY t.id
            )
            FROM memberships m
@@ -341,9 +347,11 @@ func (s *Store) GetSessionInfo(ctx context.Context, token string) (identity.Sess
 
 func parseUserOrgsJSON(raw []byte) ([]identity.UserOrg, error) {
 	var rows []struct {
-		ID   int64  `json:"id"`
-		Name string `json:"name"`
-		Role string `json:"role"`
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		Role      string `json:"role"`
+		LinkUsage int64  `json:"link_usage"`
+		LinkQuota int64  `json:"link_quota"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, fmt.Errorf("decode orgs: %w", err)
@@ -355,9 +363,11 @@ func parseUserOrgsJSON(raw []byte) ([]identity.UserOrg, error) {
 			return nil, fmt.Errorf("invalid role %q", row.Role)
 		}
 		orgs = append(orgs, identity.UserOrg{
-			ID:   row.ID,
-			Name: row.Name,
-			Role: role,
+			ID:        row.ID,
+			Name:      row.Name,
+			Role:      role,
+			LinkUsage: row.LinkUsage,
+			LinkQuota: row.LinkQuota,
 		})
 	}
 	return orgs, nil
