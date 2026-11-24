@@ -21,7 +21,7 @@ type riskScanPayload struct {
 
 func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	// Create 成功时同语句入队一条 link.risk_scan。
 	l := mustLink(t, "https://example.com/initial", tenantID)
@@ -57,7 +57,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 
-	// 只修改 disabled 或 expires_at 不应入队。
+	// 只修改 disabled 或 expires_at 应入队 cache.reconcile，不入队 link.risk_scan。
 	disabled := true
 	if _, err := store.Update(ctx, tenantID, l.Code, link.Update{Disabled: &disabled}); err != nil {
 		t.Fatalf("Update disabled: %v", err)
@@ -66,11 +66,14 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim after Update disabled: %v", err)
 	}
-	if len(claimed) != 0 {
-		t.Fatalf("claimed after disabled-only Update = %d, want 0", len(claimed))
+	if len(claimed) != 1 || claimed[0].Kind != job.KindCacheReconcile {
+		t.Fatalf("claimed after disabled-only Update = %+v, want 1 cache.reconcile", claimed)
+	}
+	if err := store.Complete(ctx, claimed[0].ID, "test-worker", claimed[0].LockVersion); err != nil {
+		t.Fatalf("Complete disabled reconcile: %v", err)
 	}
 
-	// 修改 URL 应同语句入队一条新任务。
+	// 修改 URL 应同语句入队一条 link.risk_scan 与一条 cache.reconcile。
 	newURL := "https://example.com/updated-url"
 	if _, err := store.Update(ctx, tenantID, l.Code, link.Update{URL: &newURL}); err != nil {
 		t.Fatalf("Update url: %v", err)
@@ -79,14 +82,26 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim after Update url: %v", err)
 	}
-	if len(claimed) != 1 {
-		t.Fatalf("claimed after url Update = %d, want 1", len(claimed))
+	if len(claimed) != 2 {
+		t.Fatalf("claimed after url Update = %d, want 2", len(claimed))
 	}
-	if err := json.Unmarshal(claimed[0].Payload, &payload); err != nil {
-		t.Fatalf("unmarshal updated payload: %v", err)
+	var foundRisk bool
+	for _, j := range claimed {
+		if j.Kind == job.KindLinkRiskScan {
+			foundRisk = true
+			if err := json.Unmarshal(j.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal updated payload: %v", err)
+			}
+			if payload.URL != newURL {
+				t.Errorf("payload.URL = %q, want %q", payload.URL, newURL)
+			}
+		}
+		if err := store.Complete(ctx, j.ID, "test-worker", j.LockVersion); err != nil {
+			t.Fatalf("Complete url job %s: %v", j.Kind, err)
+		}
 	}
-	if payload.URL != newURL {
-		t.Errorf("payload.URL = %q, want %q", payload.URL, newURL)
+	if !foundRisk {
+		t.Fatalf("missing link.risk_scan after url Update in %+v", claimed)
 	}
 
 	// 配额不足时回滚，不留孤儿任务。
@@ -109,7 +124,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 
 func TestJobClaimSkipLockedConcurrentAndFairness(t *testing.T) {
 	store, tenantA := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	issuedB, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "tenant-b", Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
@@ -197,7 +212,7 @@ func TestJobClaimSkipLockedConcurrentAndFairness(t *testing.T) {
 
 func TestBanIfURLPreventsStaleRiskBan(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	badURL := "https://evil.example/phish"
 	goodURL := "https://safe.example/home"
@@ -240,7 +255,7 @@ func TestBanIfURLPreventsStaleRiskBan(t *testing.T) {
 
 func TestJobReapAndCleanup(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	// 1. 租约过期回收：未达上限回 pending，达到上限进 dead。
 	idRetry, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 3})
@@ -385,7 +400,7 @@ func TestJobReapAndCleanup(t *testing.T) {
 
 func TestJobLeaseFencingPreventsSameWorkerABAAndReapBatchLimit(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	id, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 5})
 	if err != nil {
@@ -461,7 +476,7 @@ func TestJobLeaseFencingPreventsSameWorkerABAAndReapBatchLimit(t *testing.T) {
 
 func TestJobClaimFairnessIncludesPlatformJobsAndSkipsFuture(t *testing.T) {
 	store, tenantA := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	issuedB, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "tenant-fair-b", Scopes: identity.AllAPIKeyScopes()})
 	if err != nil {
@@ -515,7 +530,7 @@ func TestJobClaimFairnessIncludesPlatformJobsAndSkipsFuture(t *testing.T) {
 
 func TestCleanupDeadJobsAndInvitations(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	// 1. dead job 清理：仅删除早于保留期的 dead 任务，保留近期 dead 任务。
 	oldDeadID, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 1})

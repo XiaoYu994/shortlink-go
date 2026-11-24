@@ -386,7 +386,7 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 		}
 	})
 
-	t.Run("retries when ban cache not updated", func(t *testing.T) {
+	t.Run("succeeds when ban cache not updated because reconcile job handles sync", func(t *testing.T) {
 		h := NewHandler(HandlerOptions{
 			Scanner: &fakeScanner{fn: func(context.Context, string) (Verdict, error) {
 				return Verdict{Unsafe: true, Reason: link.BanReasonMalware}, nil
@@ -395,9 +395,8 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 				return &link.Link{Code: "AbC12345"}, fmt.Errorf("ban: %w", cache.ErrNotUpdated)
 			}},
 		})
-		err := h(context.Background(), makeJob(ScanPayload{Code: "AbC12345", URL: "https://bad.example"}))
-		if err == nil || job.IsPermanent(err) || job.IsSkipped(err) {
-			t.Fatalf("handler err = %v, want retryable error", err)
+		if err := h(context.Background(), makeJob(ScanPayload{Code: "AbC12345", URL: "https://bad.example"})); err != nil {
+			t.Fatalf("handler err = %v, want nil (cache sync deferred to cache.reconcile)", err)
 		}
 	})
 

@@ -16,7 +16,7 @@ import (
 
 func TestRecordClicksWritesAggregates(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	first := createLink(t, store, tenantID, "https://example.com/clicks-1")
 	second := createLink(t, store, tenantID, "https://example.com/clicks-2")
@@ -79,6 +79,16 @@ func TestRecordClicksWritesAggregates(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("RecordClicks after delete: %v", err)
 	}
+	var lateRows int
+	if err := store.db.QueryRow(`SELECT count(*) FROM link_dimension_daily WHERE link_id = $1 AND value = 'late.example'`, second.ID).Scan(&lateRows); err != nil {
+		t.Fatalf("count deleted link late dimensions: %v", err)
+	}
+	if lateRows != 0 {
+		t.Errorf("deleted link late dimension rows = %d, want 0", lateRows)
+	}
+	if _, err := store.PurgeLinkStatsBatch(ctx, second.ID, 100); err != nil {
+		t.Fatalf("PurgeLinkStatsBatch: %v", err)
+	}
 	var rows int
 	if err := store.db.QueryRow(`SELECT count(*) FROM link_dimension_daily WHERE link_id = $1`, second.ID).Scan(&rows); err != nil {
 		t.Fatalf("count deleted link dimensions: %v", err)
@@ -90,7 +100,7 @@ func TestRecordClicksWritesAggregates(t *testing.T) {
 
 func TestRecordClicksIgnoresInvalidDimensions(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	l := createLink(t, store, tenantID, "https://example.com/invalid")
 
 	longValue := make([]byte, 256)
@@ -132,7 +142,7 @@ TestRecordClicksAndDeleteDoNotDeadlock 覆盖已经复现的锁序交叉：
 */
 func TestRecordClicksAndDeleteDoNotDeadlock(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	at := time.Date(2026, 11, 16, 8, 0, 0, 0, time.UTC)
 
 	for round := 0; round < 30; round++ {
@@ -184,7 +194,7 @@ TestConcurrentRecordClicksAccumulate 模拟两个 redirector 同时写同一批�
 */
 func TestConcurrentRecordClicksAccumulate(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	const (
 		writers = 2
@@ -318,7 +328,7 @@ func BenchmarkRecordClicks(b *testing.B) {
 		ids[i] = createLink(b, store, tenantID, fmt.Sprintf("https://example.com/bench-%d", i)).ID
 	}
 	clicks := benchClicks(ids, 100)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	b.ReportAllocs()
 	for b.Loop() {
 		if err := store.RecordClicks(ctx, clicks); err != nil {

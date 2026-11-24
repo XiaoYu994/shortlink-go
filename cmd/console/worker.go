@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,8 +30,11 @@ import (
 )
 
 const (
-	cleanupBatchLimit        = 500
-	maxCleanupBatchesPerTick = 40
+	cleanupBatchLimit          = 500
+	maxCleanupBatchesPerTick   = 40
+	purgeStatsBatchLimit       = 500
+	maxPurgeStatsBatchesPerRun = 20
+	purgeStatsDeferDelay       = 100 * time.Millisecond
 )
 
 type workerCLIOptions struct {
@@ -131,6 +135,39 @@ func runWorker(cliOpts workerCLIOptions) error {
 
 	runner := job.New(pgStore, map[string]job.Handler{
 		job.KindLinkRiskScan: riskHandler,
+		job.KindCacheReconcile: func(ctx context.Context, j job.Job) error {
+			var p struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(j.Payload, &p); err != nil {
+				return job.Permanent(fmt.Errorf("decode cache.reconcile payload: %w", err))
+			}
+			if p.Code == "" {
+				return job.Permanent(errors.New("cache.reconcile payload missing code"))
+			}
+			return linkStore.Reconcile(ctx, p.Code)
+		},
+		job.KindLinkPurgeStats: func(ctx context.Context, j job.Job) error {
+			var p struct {
+				LinkID int64 `json:"link_id"`
+			}
+			if err := json.Unmarshal(j.Payload, &p); err != nil {
+				return job.Permanent(fmt.Errorf("decode link.purge_stats payload: %w", err))
+			}
+			if p.LinkID <= 0 {
+				return job.Permanent(errors.New("link.purge_stats payload missing link_id"))
+			}
+			for range maxPurgeStatsBatchesPerRun {
+				n, err := pgStore.PurgeLinkStatsBatch(ctx, p.LinkID, purgeStatsBatchLimit)
+				if err != nil {
+					return err
+				}
+				if n < purgeStatsBatchLimit {
+					return nil
+				}
+			}
+			return job.Defer(purgeStatsDeferDelay, "more link stats remain to purge")
+		},
 	}, logger, registry, job.Options{
 		Concurrency:     cfg.Concurrency,
 		MaxPerTenant:    cfg.MaxPerTenant,

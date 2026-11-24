@@ -101,7 +101,9 @@ func NewHandler(opts HandlerOptions) job.Handler {
 			return job.Skip("link url changed before ban")
 		}
 		if errors.Is(err, cache.ErrNotUpdated) {
-			return fmt.Errorf("risk ban cache not updated: %w", err)
+			logger.WarnContext(ctx, "risk ban committed; cache sync deferred to reconcile job",
+				"code", p.Code, "reason", verdict.Reason, "err", err)
+			return nil
 		}
 		return err
 	}

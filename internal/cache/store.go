@@ -464,6 +464,44 @@ func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to
 }
 
 /*
+Reconcile 供后台 Outbox worker 幂等对齐单条短码缓存，消除异步写失配的 1 小时窗口（ADR 0025）。
+先走 r.next.GetByCode 回源（用 fetchTimeout，不占跳转路径的 missSlots/fallbackSlots）：
+- 未找到或不可跳转 -> 无条件写负缓存；
+- 可跳转 -> 无条件写正缓存并执行 recheckAfterPositiveWrite，防止并发下架写与正缓存交错。
+失败返回错误，由 jobs runner 按退避重试。
+*/
+func (r *Reader) Reconcile(ctx context.Context, code string) error {
+	if code == "" {
+		return nil
+	}
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.fetchTimeout)
+	defer cancel()
+
+	key := keyPrefix + code
+	found, err := r.next.GetByCode(readCtx, code)
+	if errors.Is(err, link.ErrNotFound) {
+		return r.writeCommittedResult(ctx, key, nil)
+	}
+	if err != nil {
+		return fmt.Errorf("reconcile cache read: %w", err)
+	}
+	if !found.Servable(time.Now()) {
+		return r.writeCommittedResult(ctx, key, nil)
+	}
+
+	writeErr := r.writeCommittedResult(ctx, key, found)
+	wroteNegative, recheckErr := r.recheckAfterPositiveWrite(ctx, key, code)
+	switch {
+	case recheckErr != nil:
+		return errors.Join(writeErr, recheckErr)
+	case !wroteNegative && writeErr != nil:
+		return writeErr
+	default:
+		return nil
+	}
+}
+
+/*
 doTyped 把 singleflight.Do 的 any 收成 T。
 
 Group.Do 的结果类型是 any。回调返回 T，断言只留在这里；

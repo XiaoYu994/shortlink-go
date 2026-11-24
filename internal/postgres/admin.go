@@ -151,6 +151,13 @@ enqueued AS (
     FROM updated u
     WHERE $3
 ),
+reconciled AS (
+    INSERT INTO jobs (kind, tenant_id, payload)
+    SELECT $16::text,
+           NULLIF(u.tenant_id, 0),
+           jsonb_build_object('code', u.code)
+    FROM updated u
+),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
     SELECT u.tenant_id,
@@ -219,6 +226,13 @@ audited AS (
            )
     FROM updated u
     WHERE u.newly_banned
+),
+reconciled AS (
+    INSERT INTO jobs (kind, tenant_id, payload)
+    SELECT $9::text,
+           NULLIF(u.tenant_id, 0),
+           jsonb_build_object('code', u.code)
+    FROM updated u
 )
 SELECT ` + linkColumns + ` FROM updated`
 
@@ -261,6 +275,13 @@ audited AS (
            )
     FROM updated u
     WHERE u.newly_banned
+),
+reconciled AS (
+    INSERT INTO jobs (kind, tenant_id, payload)
+    SELECT $10::text,
+           NULLIF(u.tenant_id, 0),
+           jsonb_build_object('code', u.code)
+    FROM updated u
 )
 SELECT COALESCE(u.id, t.id),
        COALESCE(u.code, t.code),
@@ -312,8 +333,47 @@ audited AS (
            ))
     FROM updated u
     WHERE u.was_banned
+),
+reconciled AS (
+    INSERT INTO jobs (kind, tenant_id, payload)
+    SELECT $7::text,
+           NULLIF(u.tenant_id, 0),
+           jsonb_build_object('code', u.code)
+    FROM updated u
 )
 SELECT ` + linkColumns + ` FROM updated`
+
+	enqueueDeleteJobsSQL = `INSERT INTO jobs (kind, tenant_id, payload)
+VALUES ($1, NULLIF($2::bigint, 0), jsonb_build_object('code', $3::text)),
+       ($4, NULLIF($2::bigint, 0), jsonb_build_object('link_id', $5::bigint))`
+
+	/*
+		按完整主键元组分批删除统计行，严禁使用 ctid：
+		三张日表转为范围分区表后 ctid 跨分区不唯一（ADR 0025、ADR 0026）。
+	*/
+	purgeClicksDailyBatchSQL = `DELETE FROM link_clicks_daily
+WHERE (link_id, day) IN (
+    SELECT link_id, day
+    FROM link_clicks_daily
+    WHERE link_id = $1
+    LIMIT $2
+)`
+
+	purgeDimensionDailyBatchSQL = `DELETE FROM link_dimension_daily
+WHERE (link_id, day, dimension, value) IN (
+    SELECT link_id, day, dimension, value
+    FROM link_dimension_daily
+    WHERE link_id = $1
+    LIMIT $2
+)`
+
+	purgeVisitorsDailyBatchSQL = `DELETE FROM link_visitors_daily
+WHERE (link_id, day, visitor_hash) IN (
+    SELECT link_id, day, visitor_hash
+    FROM link_visitors_daily
+    WHERE link_id = $1
+    LIMIT $2
+)`
 )
 
 // rowScanner 让 QueryRow 和 Rows 共用一段扫描逻辑。
@@ -506,12 +566,16 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 	if err != nil {
 		return nil, fmt.Errorf("update link: marshal audit metadata: %w", err)
 	}
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.SystemMeta(""))
+	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("update link: %w", err)
+	}
 
 	row := s.db.QueryRowContext(ctx, updateLinkSQL,
 		code, tenantID, hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue,
 		actorKind, actorID, reqID, string(metaJSON),
-		job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink))
+		job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink),
+		job.KindCacheReconcile)
 	var (
 		got      link.AdminLink
 		isBanned bool
@@ -531,20 +595,15 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 }
 
 /*
-Delete 硬删除链接和它的统计行，放在同一个事务里。
+Delete 在事务内先锁并删除 links 主行、写审计日志，并同事务入队 cache.reconcile 与 link.purge_stats。
+三张日统计表的残留行由 worker 分批异步回收，避免热点短链删表拉长数据库行锁（ADR 0025）。
 已封禁的链接返回 link.ErrBanned，不删任何东西：链接这一行就是封禁记录，
 删掉之后违规 URL、原因和归属租户都没有依据。其他租户的链接仍是 link.ErrNotFound。
-
-先 FOR UPDATE 锁住这一条链接并读出是否封禁，再按固定顺序删三张统计表：
-link_clicks_daily、link_dimension_daily、link_visitors_daily。
-RecordClicks 用同一顺序：先按 id 锁 links，再写这三张表。
-顺序相反时，删除持有链接、点击持有日表行，两边互相等待，
-PostgreSQL 会判死锁并回滚其中一方。
-
-删除不返还本月配额，也不再更新 tenants 行（ADR 0015），
-所以删除不会和同租户的创建争租户行锁。
 */
 func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
+		return fmt.Errorf("delete link: %w", err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("delete link: %w", err)
@@ -569,15 +628,14 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 		return link.ErrBanned
 	}
 
-	for _, table := range []string{"link_clicks_daily", "link_dimension_daily", "link_visitors_daily"} {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE link_id = $1`, id); err != nil {
-			return fmt.Errorf("delete link stats: %w", err)
-		}
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("delete link: %w", err)
 	}
-	if err := insertAuditLogTx(ctx, tx, tenantID, audit.SystemMeta(""), audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
+	if _, err := tx.ExecContext(ctx, enqueueDeleteJobsSQL,
+		job.KindCacheReconcile, tenantID, code, job.KindLinkPurgeStats, id); err != nil {
+		return fmt.Errorf("delete link: enqueue jobs: %w", err)
+	}
+	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
 		"link_id": id,
 		"url":     urlStr,
 	}); err != nil {
@@ -587,6 +645,30 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 		return fmt.Errorf("delete link: %w", err)
 	}
 	return nil
+}
+
+// PurgeLinkStatsBatch 按完整主键元组分批清理已删除链接的三张日统计表残留行。
+func (s *Store) PurgeLinkStatsBatch(ctx context.Context, linkID int64, limit int) (int64, error) {
+	if linkID <= 0 || limit <= 0 {
+		return 0, nil
+	}
+	var deleted int64
+	for _, query := range []string{purgeClicksDailyBatchSQL, purgeDimensionDailyBatchSQL, purgeVisitorsDailyBatchSQL} {
+		remaining := limit - int(deleted)
+		if remaining <= 0 {
+			break
+		}
+		res, err := s.db.ExecContext(ctx, query, linkID, remaining)
+		if err != nil {
+			return deleted, fmt.Errorf("purge link stats: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return deleted, fmt.Errorf("purge link stats rows: %w", err)
+		}
+		deleted += n
+	}
+	return deleted, nil
 }
 
 /*
@@ -620,16 +702,15 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 		return nil, fmt.Errorf("ban link: invalid source %q", source)
 	}
 
-	fallback := audit.SystemMeta("")
-	if source == link.BanSourceOperator {
-		fallback = audit.OperatorMeta("")
+	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ban link: %w", err)
 	}
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, fallback)
 
 	if expectedURL == "" {
 		got, err := scanLink(s.db.QueryRowContext(ctx, banLinkSQL,
 			code, string(reason), string(source), actorKind, actorID, reqID,
-			string(audit.ActionLinkBan), string(audit.TargetLink)))
+			string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile))
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, link.ErrNotFound
 		}
@@ -642,7 +723,7 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 	var urlMatched bool
 	got, err := scanLink(s.db.QueryRowContext(ctx, banLinkIfURLSQL,
 		code, string(reason), string(source), expectedURL, actorKind, actorID, reqID,
-		string(audit.ActionLinkBan), string(audit.TargetLink)), &urlMatched)
+		string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile), &urlMatched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
@@ -661,9 +742,13 @@ Unban 按短码解封，把三个封禁字段一起清空，不要求租户 ID�
 解封后链接可能仍然停用或过期，能不能跳转由调用方看 Servable。
 */
 func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
-	actorKind, actorID, reqID := resolveAuditMeta(ctx, audit.OperatorMeta(""))
+	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unban link: %w", err)
+	}
 	got, err := scanLink(s.db.QueryRowContext(ctx, unbanLinkSQL,
-		code, actorKind, actorID, reqID, string(audit.ActionLinkUnban), string(audit.TargetLink)))
+		code, actorKind, actorID, reqID, string(audit.ActionLinkUnban), string(audit.TargetLink),
+		job.KindCacheReconcile))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}

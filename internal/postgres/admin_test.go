@@ -3,10 +3,12 @@ package postgres
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"shortlink/internal/click"
+	"shortlink/internal/job"
 	"shortlink/internal/link"
 )
 
@@ -22,7 +24,7 @@ func insertTenant(t *testing.T, store *Store, name string) int64 {
 func createLink(t testing.TB, store *Store, tenantID int64, rawURL string) *link.Link {
 	t.Helper()
 	l := mustLink(t, rawURL, tenantID)
-	if err := store.Create(context.Background(), l); err != nil {
+	if err := store.Create(testAuditCtx(context.Background()), l); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	return l
@@ -46,7 +48,7 @@ VALUES ($1, $2, (now() AT TIME ZONE 'UTC')::date, $3)`, tenantID, linkID, clicks
 
 func TestAdminGetForTenant(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	otherTenant := insertTenant(t, store, "other")
 
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
@@ -87,7 +89,7 @@ func TestAdminGetForTenant(t *testing.T) {
 
 func TestAdminListSortAndCursor(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	otherTenant := insertTenant(t, store, "other")
 
 	first := createLink(t, store, tenantID, "https://example.com/1")
@@ -174,7 +176,7 @@ TestAdminListClicksTodayMixedZeroPagination 验证两段式今日点击排序（
 */
 func TestAdminListClicksTodayMixedZeroPagination(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 
 	l1 := createLink(t, store, tenantID, "https://example.com/z1")
 	l2 := createLink(t, store, tenantID, "https://example.com/c2")
@@ -228,7 +230,7 @@ func TestAdminListClicksTodayMixedZeroPagination(t *testing.T) {
 
 func TestAdminUpdate(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	otherTenant := insertTenant(t, store, "other")
 
 	future := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
@@ -329,7 +331,7 @@ func TestAdminUpdate(t *testing.T) {
 
 func TestAdminDeleteRemovesStats(t *testing.T) {
 	store, tenantID := newTestStore(t)
-	ctx := context.Background()
+	ctx := testAuditCtx(context.Background())
 	otherTenant := insertTenant(t, store, "other")
 
 	l := createLink(t, store, tenantID, "https://example.com/delete")
@@ -349,6 +351,34 @@ func TestAdminDeleteRemovesStats(t *testing.T) {
 	}
 	if _, err := store.GetForTenant(ctx, tenantID, l.Code); !errors.Is(err, link.ErrNotFound) {
 		t.Errorf("GetForTenant after delete error = %v, want ErrNotFound", err)
+	}
+	var jobKinds []string
+	rows, err := store.db.QueryContext(ctx, `SELECT kind FROM jobs WHERE payload->>'code' = $1 OR (payload->>'link_id')::bigint = $2`, l.Code, l.ID)
+	if err != nil {
+		t.Fatalf("query delete jobs: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var kind string
+		if err := rows.Scan(&kind); err != nil {
+			t.Fatalf("scan job kind: %v", err)
+		}
+		jobKinds = append(jobKinds, kind)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate delete jobs: %v", err)
+	}
+	if !slices.Contains(jobKinds, job.KindCacheReconcile) || !slices.Contains(jobKinds, job.KindLinkPurgeStats) {
+		t.Fatalf("delete jobs = %v, want cache.reconcile and link.purge_stats", jobKinds)
+	}
+	for {
+		n, err := store.PurgeLinkStatsBatch(ctx, l.ID, 100)
+		if err != nil {
+			t.Fatalf("PurgeLinkStatsBatch: %v", err)
+		}
+		if n < 100 {
+			break
+		}
 	}
 	for _, table := range []string{"link_clicks_daily", "link_dimension_daily", "link_visitors_daily"} {
 		var n int

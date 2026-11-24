@@ -841,3 +841,56 @@ func TestStoreBanIfURLCacheBehavior(t *testing.T) {
 		}
 	})
 }
+
+func TestReaderReconcile(t *testing.T) {
+	t.Run("active link writes positive cache", func(t *testing.T) {
+		rdb := newTestRedis(t)
+		code := newTestCode(t)
+		cleanupTestKey(t, rdb, code)
+		ctx := context.Background()
+
+		if err := rdb.Set(ctx, keyPrefix+code, "null", time.Minute).Err(); err != nil {
+			t.Fatalf("seed stale negative cache: %v", err)
+		}
+		want := &link.Link{ID: 11, Code: code, URL: "https://example.com/reconcile-live"}
+		next := &fakeStore{
+			get: func(context.Context, string) (*link.Link, error) { return want, nil },
+		}
+		r := newTestStore(t, next, rdb)
+		if err := r.Reconcile(ctx, code); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		var cached *link.Link
+		if err := json.Unmarshal([]byte(rdb.Get(ctx, keyPrefix+code).Val()), &cached); err != nil {
+			t.Fatalf("unmarshal positive cache: %v", err)
+		}
+		if cached == nil || cached.URL != want.URL {
+			t.Fatalf("cached = %+v, want %+v", cached, want)
+		}
+	})
+
+	t.Run("deleted or unservable link writes negative cache", func(t *testing.T) {
+		rdb := newTestRedis(t)
+		code := newTestCode(t)
+		cleanupTestKey(t, rdb, code)
+		ctx := context.Background()
+
+		staleBody, err := json.Marshal(&link.Link{ID: 12, Code: code, URL: "https://example.com/stale"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := rdb.Set(ctx, keyPrefix+code, staleBody, time.Hour).Err(); err != nil {
+			t.Fatalf("seed stale positive cache: %v", err)
+		}
+		next := &fakeStore{
+			get: func(context.Context, string) (*link.Link, error) { return nil, link.ErrNotFound },
+		}
+		r := newTestStore(t, next, rdb)
+		if err := r.Reconcile(ctx, code); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if got := rdb.Get(ctx, keyPrefix+code).Val(); got != "null" {
+			t.Fatalf("cached = %q, want null", got)
+		}
+	})
+}
