@@ -141,6 +141,36 @@ services:
       retries: 12
       start_period: 5s
 
+  worker:
+    profiles: ["app"]
+    image: shortlink:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["console", "worker"]
+    environment:
+      WORKER_ADDR: ":8082"
+      DATABASE_URL: postgres://shortlink:shortlink@postgres:5432/shortlink?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      LOG_FORMAT: json
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:28082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8082/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
   gateway:
     profiles: ["app"]
     image: nginx:1.27-alpine

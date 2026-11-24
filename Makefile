@@ -5,8 +5,10 @@ export
 # 跳转进程读 ADDR，管理进程读 CONSOLE_ADDR。两边不能共用一个地址。
 ADDR ?= :8080
 CONSOLE_ADDR ?= :8081
+WORKER_ADDR ?= :8082
 redirector_port := $(lastword $(subst :, ,$(ADDR)))
 console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
+worker_port := $(lastword $(subst :, ,$(WORKER_ADDR)))
 
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
@@ -78,13 +80,14 @@ test-integration: test-db ## 跑全部测试，包含需要 PostgreSQL/Redis 的
 	go test -race -count=1 ./...
 
 smoke: test-db build ## 启动真实进程做冒烟测试（独立端口，使用测试库）
-	./scripts/smoke.sh
+	go build -tags devtest -o bin/console-smoke ./cmd/console
+	CONSOLE_BIN=./bin/console-smoke ./scripts/smoke.sh
 
 selfcheck: test-db verify test-integration smoke ## agent 自测：完整检查、集成测试和冒烟
 
 stack: ## 构建并启动可选应用栈（profile app，不随 up 启动）
 	docker compose up -d --wait postgres redis
-	docker compose --profile app up -d --build --wait redirector console gateway
+	docker compose --profile app up -d --build --wait redirector console worker gateway
 
 up: prometheus-config ## 启动 PostgreSQL、Redis、Dex 和 Prometheus
 	docker compose up -d --wait postgres redis dex
@@ -111,6 +114,10 @@ prometheus-config: ## 按两个监听地址生成 Prometheus 抓取配置
 		printf '%s\n' '    static_configs:'; \
 		printf '%s\n' '      - targets:'; \
 		printf '%s\n' '          - host.docker.internal:$(console_port)'; \
+		printf '%s\n' '  - job_name: worker'; \
+		printf '%s\n' '    static_configs:'; \
+		printf '%s\n' '      - targets:'; \
+		printf '%s\n' '          - host.docker.internal:$(worker_port)'; \
 	} > deploy/prometheus.local.yml
 
 prometheus: prometheus-config ## 启动本地 Prometheus，抓取端口跟随 ADDR / CONSOLE_ADDR

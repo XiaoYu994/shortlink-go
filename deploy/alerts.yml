@@ -13,3 +13,79 @@ groups:
         annotations:
           summary: 点击没有全部记下
           description: 5 分钟内有点击被丢弃，或写出失败。这些点击不会补上。
+
+      - alert: ShortlinkClickRecorderStopped
+        expr: max(shortlink_clicks_recorder_stopped) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 点击记录后台协程已异常停止
+          description: ClickRecorder 因 panic 停机，当前进程的所有跳转点击不再写入数据库，请立即检查日志并重启实例。
+
+      - alert: ShortlinkHigh5xxRate
+        expr: |
+          sum by (job) (rate(shortlink_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum by (job) (rate(shortlink_http_requests_total[5m])), 1e-9) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: HTTP 5xx 错误率超过 1%
+          description: "{{ $labels.job }} 最近 5 分钟 5xx 比例高于 1%。"
+
+      - alert: ShortlinkRedirectHighLatency
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(shortlink_http_request_duration_seconds_bucket{job="redirector",route="GET /r/{code}"}[5m]))) > 0.2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 跳转接口 P99 延迟高于 200ms
+          description: redirector GET /r/{code} 5 分钟内 P99 超过 200ms，排查缓存命中率或 PostgreSQL 延迟。
+
+      - alert: ShortlinkCacheFallback
+        expr: sum(rate(shortlink_cache_gets_total{result="fallback"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis 读缓存发生降级回源
+          description: 存在缓存读失败回源 PostgreSQL 的流量，检查 Redis 连接与可用性。
+
+      - alert: ShortlinkCacheShedding
+        expr: sum by (path) (rate(shortlink_cache_shed_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 缓存回源触发并发限流保护（503）
+          description: "{{ $labels.path }} 通道回源并发许可耗尽，部分长尾或降级请求返回 503。"
+
+      - alert: ShortlinkJobsBacklog
+        expr: max by (kind) (shortlink_jobs_oldest_pending_age_seconds) > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 后台任务队列积压超过 5 分钟
+          description: 任务类型 {{ $labels.kind }} 最老待执行任务等待超过 300 秒，检查 console worker 存活与并发。
+
+      - alert: ShortlinkJobsDead
+        expr: sum by (kind) (increase(shortlink_jobs_processed_total{result="dead"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 有后台任务进入 dead 终态
+          description: 任务类型 {{ $labels.kind }} 最近 5 分钟有任务重试耗尽或永久失败进入 dead，请排查 last_error。
+
+      - alert: ShortlinkWorkerDown
+        expr: up{job="worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: console worker 不可达
+          description: Prometheus 连续 1 分钟无法抓取 worker /metrics，异步风控与清理已停止。

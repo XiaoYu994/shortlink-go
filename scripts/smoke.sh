@@ -181,6 +181,8 @@ wait_ready() { # base pid name
 
 [ -x bin/redirector ] || fail 'bin/redirector 不存在，先运行 make build'
 [ -x bin/console ] || fail 'bin/console 不存在，先运行 make build'
+CONSOLE_BIN=${CONSOLE_BIN:-./bin/console}
+[ -x "$CONSOLE_BIN" ] || fail "$CONSOLE_BIN 不存在"
 
 # 只允许打在测试库和测试 Redis 上，避免把冒烟数据写进开发库。
 [ -n "${TEST_DATABASE_URL:-}" ] || fail 'TEST_DATABASE_URL 未设置，冒烟只允许使用测试库'
@@ -727,11 +729,16 @@ while ! curl -fsS --max-time 1 "http://$RISK_STUB_HOST/safe.html" >/dev/null 2>&
 	sleep 0.1
 done
 
+# 确认生产构建的 ./bin/console 拒绝测试专用开关 --allow-test-host。
+if ./bin/console worker --allow-test-host "$RISK_STUB_HOST" >/dev/null 2>&1; then
+	fail '生产 bin/console 不应允许 --allow-test-host'
+fi
+
 WORKER_ADDR=$worker_addr \
 WORKER_POLL_INTERVAL=50ms \
 RISK_HOST_RATE_LIMIT=100 \
 RISK_BLOCKED_KEYWORDS=smoke-phish-marker:phishing \
-	./bin/console worker --allow-test-host "$RISK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
+	"$CONSOLE_BIN" worker --allow-test-host "$RISK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
 wait_ready "$WORKER_BASE" "$WORKER_PID" worker
 
