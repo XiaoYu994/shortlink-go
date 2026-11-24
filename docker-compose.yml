@@ -84,6 +84,7 @@ services:
     command: ["redirector"]
     environment:
       ADDR: ":8080"
+      OPS_ADDR: ":9090"
       DATABASE_URL: postgres://shortlink:shortlink@postgres:5432/shortlink?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       VISITOR_SALT: dev-only-visitor-salt
@@ -104,7 +105,7 @@ services:
     # 和在途批次写入（2s）。更短的话，容器会在 Shutdown 完成前收到 SIGKILL。
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/readyz"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -119,6 +120,7 @@ services:
     command: ["console", "serve"]
     environment:
       CONSOLE_ADDR: ":8081"
+      CONSOLE_OPS_ADDR: ":9091"
       DATABASE_URL: postgres://shortlink:shortlink@postgres:5432/shortlink?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       LOG_FORMAT: json
@@ -135,7 +137,7 @@ services:
     # 和 redirector 同一份宽限：DRAIN_DELAY 加 SHUTDOWN_TIMEOUT，留出余量。
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/readyz"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9091/readyz"]
       interval: 5s
       timeout: 3s
       retries: 12

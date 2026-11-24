@@ -1,5 +1,6 @@
 /*
-serve 是 console 的 HTTP 模式：提供可选的 OIDC / GitHub OAuth 2.0 登录、短链增删改查、统计、/healthz、/readyz 和 /metrics。
+serve 是 console 的 HTTP 模式：提供可选的 OIDC / GitHub OAuth 2.0 登录、短链增删改查、统计，
+并按 CONSOLE_OPS_ADDR 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
 创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
 密钥、租户和成员命令仍然走 admin.go 的路径，不加载 Redis。
 */
@@ -16,16 +17,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"shortlink/internal/cache"
-	"shortlink/internal/config"
 	"shortlink/internal/console"
 	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
+	"shortlink/internal/identity/oauth"
 	"shortlink/internal/postgres"
 	"shortlink/internal/storemetrics"
 )
 
 func runServe() error {
-	cfg, err := config.LoadConsoleConfig()
+	cfg, err := loadConsoleConfig()
 	if err != nil {
 		return err
 	}
@@ -99,18 +100,22 @@ func runServe() error {
 
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
 	srv := console.New(logger, store, cfg.RequestTimeout, registry, console.Options{
-		Keys:          pgStore,
-		Authorizer:    identity.NewMapAuthorizer(),
-		OIDC:          oidcClient,
-		GitHub:        githubClient,
-		Sessions:      sessions,
-		Members:       members,
-		Orgs:          orgs,
-		Invitations:   invitations,
-		APIKeys:       apiKeys,
-		AuditLogs:     auditLogs,
-		WebDistDir:    cfg.WebDistDir,
-		PublicBaseURL: cfg.PublicBaseURL,
+		Keys:              pgStore,
+		Authorizer:        identity.NewMapAuthorizer(),
+		OIDC:              oidcClient,
+		GitHub:            githubClient,
+		Sessions:          sessions,
+		Members:           members,
+		Orgs:              orgs,
+		Invitations:       invitations,
+		APIKeys:           apiKeys,
+		AuditLogs:         auditLogs,
+		WebDistDir:        cfg.WebDistDir,
+		PublicBaseURL:     cfg.PublicBaseURL,
+		TrustProxyHeaders: cfg.TrustProxyHeaders,
+		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
+		IPRateLimit:       cfg.IPRateLimit,
+		IPRateBurst:       cfg.IPRateBurst,
 	})
 	/*
 		管理进程的 /readyz 只探 PostgreSQL：每个管理请求都要查库鉴权，库不通就一个也处理不了。
@@ -118,7 +123,23 @@ func runServe() error {
 	*/
 	srv.SetReadiness(httpx.ReadyCheck{Name: "postgres", Ping: db.PingContext})
 
-	return httpx.ListenAndServe(srv.Routes(), logger, httpx.ServeConfig{
+	handler := srv.Routes()
+	if cfg.OpsAddr != "" {
+		_, stopOps, err := httpx.StartOpsServer(cfg.OpsAddr, srv.OpsHandler(), logger)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			opsCtx, opsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer opsCancel()
+			if err := stopOps(opsCtx); err != nil {
+				logger.Error("shutdown ops server", "err", err)
+			}
+		}()
+		handler = srv.RoutesBusiness()
+	}
+
+	return httpx.ListenAndServe(handler, logger, httpx.ServeConfig{
 		Addr:            cfg.Addr,
 		RequestTimeout:  cfg.RequestTimeout,
 		DrainDelay:      cfg.DrainDelay,
@@ -131,14 +152,14 @@ func runServe() error {
 initAuthProviders 按配置初始化可选的 OIDC 与 GitHub 登录提供方。
 返回值保持接口类型，只在启用时赋值，避免把带类型的 nil 指针放进 console.Options。
 */
-func initAuthProviders(cfg config.ConsoleConfig, logger *slog.Logger) (console.OIDCClient, console.GitHubClient, error) {
+func initAuthProviders(cfg ConsoleConfig, logger *slog.Logger) (console.OIDCClient, console.GitHubClient, error) {
 	var (
 		oidcClient   console.OIDCClient
 		githubClient console.GitHubClient
 	)
 	if cfg.OIDC.Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		provider, err := identity.NewOIDCProvider(ctx, identity.OIDCConfig{
+		provider, err := oauth.NewOIDCProvider(ctx, oauth.OIDCConfig{
 			Issuer:       cfg.OIDC.Issuer,
 			ClientID:     cfg.OIDC.ClientID,
 			ClientSecret: cfg.OIDC.ClientSecret,
@@ -152,7 +173,7 @@ func initAuthProviders(cfg config.ConsoleConfig, logger *slog.Logger) (console.O
 		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
 	}
 	if cfg.GitHub.Enabled() {
-		provider, err := identity.NewGitHubProvider(identity.GitHubConfig{
+		provider, err := oauth.NewGitHubProvider(oauth.GitHubConfig{
 			ClientID:     cfg.GitHub.ClientID,
 			ClientSecret: cfg.GitHub.ClientSecret,
 			RedirectURL:  cfg.GitHub.RedirectURL,

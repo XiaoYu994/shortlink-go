@@ -122,3 +122,37 @@ func serve(
 	}
 	return nil
 }
+
+/*
+StartOpsServer 在独立地址上同步监听并启动仅服务运维端点的 HTTP 服务器（ADR 0024）。
+先 Listen 再启动 goroutine，端口冲突时立即报错；调用返回的 shutdown 函数才会停止服务，
+保证调用方先执行业务侧 DrainDelay 与 Shutdown 后再关闭运维端口，使编排器在摘流窗口持续观测到 503。
+*/
+func StartOpsServer(addr string, handler http.Handler, logger *slog.Logger) (boundAddr string, shutdown func(context.Context) error, err error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("listen ops %s: %w", addr, err)
+	}
+	httpSrv := &http.Server{
+		Handler:           handler,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       defaultIdleTimeout,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpSrv.Serve(ln)
+	}()
+	bound := ln.Addr().String()
+	logger.Info("ops listening", "addr", bound)
+	return bound, func(ctx context.Context) error {
+		shutdownErr := httpSrv.Shutdown(ctx)
+		serveErr := <-errCh
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			return errors.Join(shutdownErr, serveErr)
+		}
+		return shutdownErr
+	}, nil
+}

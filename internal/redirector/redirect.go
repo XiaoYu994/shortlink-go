@@ -73,7 +73,7 @@ func (s *Server) recordClick(r *http.Request, id int64) {
 		time.Now().UTC(),
 		r.Referer(),
 		r.UserAgent(),
-		httpx.ClientIP(r, s.trustProxy),
+		httpx.ClientIPWithTrustedProxies(r, s.trustProxy, s.trustedProxies),
 		s.visitorSalt,
 	))
 }

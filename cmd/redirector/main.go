@@ -1,9 +1,9 @@
 /*
 Command redirector 是公开短链跳转进程。
 
-只提供 GET /r/{code}、/healthz、/readyz 和 /metrics。读 Redis 缓存，未命中回源 PostgreSQL，
-成功的 GET 异步记录点击。设了 PPROF_ADDR 时另起一个回环监听提供 /debug/pprof/。管理 API 和 API Key 鉴权在 cmd/console，进程之间不互相调用。
-拆分边界见 ADR 0009。
+只提供 GET /r/{code}，并按可选 OPS_ADDR 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
+读 Redis 缓存，未命中回源 PostgreSQL，成功的 GET 异步记录点击。设了 PPROF_ADDR 时另起一个回环监听提供 /debug/pprof/。
+管理 API 和 API Key 鉴权在 cmd/console，本进程完全不引入管理、身份鉴权、风控与任务依赖，见 ADR 0009、ADR 0024。
 */
 package main
 
@@ -23,10 +23,10 @@ import (
 
 	"shortlink/internal/cache"
 	"shortlink/internal/click"
-	"shortlink/internal/config"
 	"shortlink/internal/httpx"
 	"shortlink/internal/logx"
-	"shortlink/internal/postgres"
+	"shortlink/internal/pgdb"
+	"shortlink/internal/pgredirect"
 	"shortlink/internal/redirector"
 	"shortlink/internal/storemetrics"
 )
@@ -40,14 +40,14 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.LoadRedirectorConfig()
+	cfg, err := loadRedirectorConfig()
 	if err != nil {
 		return err
 	}
 	logger, levelVar := cfg.NewLoggerWithService(os.Stdout, "redirector")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	db, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.Pool)
+	db, err := pgdb.Open(ctx, cfg.DatabaseURL, cfg.Pool)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
@@ -82,7 +82,7 @@ func run() error {
 		排空共用这一份 SHUTDOWN_TIMEOUT。已经开始的普通批次不跟着取消，
 		最多再占一次写入超时。进程在排空结束前被杀掉的话，缓冲区里的点击会丢掉。
 	*/
-	pgStore := postgres.NewStore(db)
+	pgStore := pgredirect.NewStore(db)
 	clicks := click.New(pgStore, logger, registry, click.Options{})
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -93,10 +93,10 @@ func run() error {
 	}()
 
 	/*
-		组合顺序：HTTP -> cache -> storemetrics -> postgres。
+		组合顺序：HTTP -> cache.Reader -> storemetrics.Reader -> pgredirect.Store（ADR 0024）。
 		指标装饰器贴着数据库，缓存命中不会计入存储耗时。
 	*/
-	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
+	store := cache.NewReader(storemetrics.NewReader(pgStore, registry), rdb, registry, cache.Options{
 		MissConcurrency: cfg.CacheMissConcurrency,
 		FetchTimeout:    cfg.CacheFetchTimeout,
 		Logger:          logger,
@@ -106,6 +106,7 @@ func run() error {
 		Clicks:                 clicks,
 		VisitorSalt:            []byte(cfg.VisitorSalt),
 		TrustProxyHeaders:      cfg.TrustProxyHeaders,
+		TrustedProxyCIDRs:      cfg.TrustedProxyCIDRs,
 		AccessLogSampleRate:    &sampleRate,
 		AccessLogSlowThreshold: cfg.AccessLogSlowThreshold,
 	})
@@ -125,11 +126,27 @@ func run() error {
 		defer stopPprof()
 	}
 
+	handler := srv.Routes()
+	if cfg.OpsAddr != "" {
+		_, stopOps, err := httpx.StartOpsServer(cfg.OpsAddr, srv.OpsHandler(), logger)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			opsCtx, opsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer opsCancel()
+			if err := stopOps(opsCtx); err != nil {
+				logger.Error("shutdown ops server", "err", err)
+			}
+		}()
+		handler = srv.RoutesBusiness()
+	}
+
 	/*
-		ListenAndServe 收到信号后先摘流等待再 Shutdown；返回后 run 退出，
-		defer 依次关停 pprof、排空点击缓冲，最后关闭 Redis 和数据库。
+		ListenAndServe 收到信号后先摘流等待再 Shutdown；返回后 defer 先关闭独立运维端口、
+		再关停 pprof、排空点击缓冲，最后关闭 Redis 和数据库。
 	*/
-	return httpx.ListenAndServe(srv.Routes(), logger, httpx.ServeConfig{
+	return httpx.ListenAndServe(handler, logger, httpx.ServeConfig{
 		Addr:            cfg.Addr,
 		RequestTimeout:  cfg.RequestTimeout,
 		DrainDelay:      cfg.DrainDelay,
@@ -148,14 +165,6 @@ const (
 /*
 servePprof 在 addr 上单独起一个只有剖析端点的 HTTP 服务，返回关闭它的函数（ADR 0013）。
 addr 已经由 config 校验为回环地址。
-
-先 Listen 再起 goroutine：端口被占用时启动直接失败，不会留下一个没人发现的坏监听。
-block 和 mutex profile 默认关闭，不打开的话对应端点返回的是空数据；
-只在开了剖析端口时才采样，平时没有这份开销。
-
-不设 WriteTimeout：CPU profile 和 trace 要采几十秒，响应在采样结束后才写完。
-goroutine 的退出点：返回的函数调用 Close，Serve 随之返回 ErrServerClosed。
-这里不等在途的采样，进程退出时剖析请求直接断开。
 */
 func servePprof(addr string, logger *slog.Logger, levelVar *slog.LevelVar) (func(), error) {
 	ln, err := net.Listen("tcp", addr)

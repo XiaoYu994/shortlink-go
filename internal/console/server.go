@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -70,54 +71,68 @@ type Options struct {
 	PublicBaseURL string
 	// SessionTTL 是新建服务端会话的有效期；不大于 0 时使用 identity.DefaultSessionTTL。
 	SessionTTL time.Duration
+	// TrustProxyHeaders 与 TrustedProxyCIDRs 控制访问日志与鉴权前按 IP 限流的客户端 IP 解析。
+	TrustProxyHeaders bool
+	TrustedProxyCIDRs []netip.Prefix
+	// IPRateLimit 与 IPRateBurst 控制鉴权前按源 IP 限流（RPS 与突发容量；<=0 时不启用）。
+	IPRateLimit int
+	IPRateBurst int
 }
 
 // Server 持有管理进程需要的依赖，复用 httpx 提供的运维端点与通用中间件。
 type Server struct {
-	base          *httpx.Server
-	logger        *slog.Logger
-	store         LinkCreator
-	admin         LinkAdminStore
-	stats         LinkStatsStore
-	keys          APIKeyAuthenticator
-	sessions      SessionAuthenticator
-	authz         Authorizer
-	csrf          *http.CrossOriginProtection
-	auth          *authHandler
-	members       *memberHandler
-	orgs          *orgHandler
-	invitations   *invitationHandler
-	apiKeys       *apiKeyHandler
-	auditLogs     *auditHandler
-	web           http.Handler
-	publicBaseURL string
-	limiter       *tenantRateLimiter
-	// rateLimited 只属于管理 API；在 newServer 里注册一次，不在 Routes 中重复注册。
-	rateLimited prometheus.Counter
-}
-
-// serverDeps 是 newServer 的参数，避免一长串容易错位的位置参数。
-type serverDeps struct {
+	base           *httpx.Server
 	logger         *slog.Logger
 	store          LinkCreator
 	admin          LinkAdminStore
 	stats          LinkStatsStore
 	keys           APIKeyAuthenticator
 	sessions       SessionAuthenticator
-	authorizer     Authorizer
-	oidc           OIDCClient
-	github         GitHubClient
-	sessionMgr     SessionManager
-	members        MemberStore
-	orgs           OrgStore
-	invitations    InvitationStore
-	apiKeys        APIKeyStore
-	auditLogs      AuditLogStore
-	webDistDir     string
+	authz          Authorizer
+	csrf           *http.CrossOriginProtection
+	auth           *authHandler
+	members        *memberHandler
+	orgs           *orgHandler
+	invitations    *invitationHandler
+	apiKeys        *apiKeyHandler
+	auditLogs      *auditHandler
+	web            http.Handler
 	publicBaseURL  string
-	sessionTTL     time.Duration
-	requestTimeout time.Duration
-	registry       *prometheus.Registry
+	trustProxy     bool
+	trustedProxies []netip.Prefix
+	limiter        *tenantRateLimiter
+	ipLimiter      *ipRateLimiter
+	// rateLimited 与 ipRateLimited 只属于管理 API；在 newServer 里注册一次，不在 Routes 中重复注册。
+	rateLimited   prometheus.Counter
+	ipRateLimited prometheus.Counter
+}
+
+// serverDeps 是 newServer 的参数，避免一长串容易错位的位置参数。
+type serverDeps struct {
+	logger            *slog.Logger
+	store             LinkCreator
+	admin             LinkAdminStore
+	stats             LinkStatsStore
+	keys              APIKeyAuthenticator
+	sessions          SessionAuthenticator
+	authorizer        Authorizer
+	oidc              OIDCClient
+	github            GitHubClient
+	sessionMgr        SessionManager
+	members           MemberStore
+	orgs              OrgStore
+	invitations       InvitationStore
+	apiKeys           APIKeyStore
+	auditLogs         AuditLogStore
+	webDistDir        string
+	publicBaseURL     string
+	sessionTTL        time.Duration
+	trustProxyHeaders bool
+	trustedProxyCIDRs []netip.Prefix
+	ipRateLimit       int
+	ipRateBurst       int
+	requestTimeout    time.Duration
+	registry          *prometheus.Registry
 }
 
 /*
@@ -129,31 +144,41 @@ Store 同时提供链接创建、管理 CRUD 和统计查询。
 */
 func New(logger *slog.Logger, store Store, requestTimeout time.Duration, registry *prometheus.Registry, opts Options) *Server {
 	return newServer(serverDeps{
-		logger:         logger,
-		store:          store,
-		admin:          store,
-		stats:          store,
-		keys:           opts.Keys,
-		sessions:       opts.Sessions,
-		authorizer:     opts.Authorizer,
-		oidc:           opts.OIDC,
-		github:         opts.GitHub,
-		sessionMgr:     opts.Sessions,
-		members:        opts.Members,
-		orgs:           opts.Orgs,
-		invitations:    opts.Invitations,
-		apiKeys:        opts.APIKeys,
-		auditLogs:      opts.AuditLogs,
-		webDistDir:     opts.WebDistDir,
-		publicBaseURL:  opts.PublicBaseURL,
-		sessionTTL:     opts.SessionTTL,
-		requestTimeout: requestTimeout,
-		registry:       registry,
+		logger:            logger,
+		store:             store,
+		admin:             store,
+		stats:             store,
+		keys:              opts.Keys,
+		sessions:          opts.Sessions,
+		authorizer:        opts.Authorizer,
+		oidc:              opts.OIDC,
+		github:            opts.GitHub,
+		sessionMgr:        opts.Sessions,
+		members:           opts.Members,
+		orgs:              opts.Orgs,
+		invitations:       opts.Invitations,
+		apiKeys:           opts.APIKeys,
+		auditLogs:         opts.AuditLogs,
+		webDistDir:        opts.WebDistDir,
+		publicBaseURL:     opts.PublicBaseURL,
+		sessionTTL:        opts.SessionTTL,
+		trustProxyHeaders: opts.TrustProxyHeaders,
+		trustedProxyCIDRs: opts.TrustedProxyCIDRs,
+		ipRateLimit:       opts.IPRateLimit,
+		ipRateBurst:       opts.IPRateBurst,
+		requestTimeout:    requestTimeout,
+		registry:          registry,
 	})
 }
 
 func newServer(d serverDeps) *Server {
 	base := httpx.New(d.logger, d.requestTimeout, d.registry)
+	base.SetAccessLog(httpx.AccessLogOptions{
+		TrustProxyHeaders: d.trustProxyHeaders,
+		TrustedProxyCIDRs: d.trustedProxyCIDRs,
+		SampleRate:        1,
+		SlowThreshold:     httpx.DefaultSlowRequestThreshold,
+	})
 	logger := base.Logger()
 	csrf := http.NewCrossOriginProtection()
 	var auth *authHandler
@@ -185,25 +210,29 @@ func newServer(d serverDeps) *Server {
 		web = newWebSPAHandler(d.webDistDir)
 	}
 	return &Server{
-		base:          base,
-		logger:        logger,
-		store:         d.store,
-		admin:         d.admin,
-		stats:         d.stats,
-		keys:          d.keys,
-		sessions:      d.sessions,
-		authz:         d.authorizer,
-		csrf:          csrf,
-		auth:          auth,
-		members:       members,
-		orgs:          orgs,
-		invitations:   invitations,
-		apiKeys:       apiKeys,
-		auditLogs:     auditLogs,
-		web:           web,
-		publicBaseURL: d.publicBaseURL,
-		limiter:       newTenantRateLimiter(),
-		rateLimited:   newRateLimitedCounter(d.registry),
+		base:           base,
+		logger:         logger,
+		store:          d.store,
+		admin:          d.admin,
+		stats:          d.stats,
+		keys:           d.keys,
+		sessions:       d.sessions,
+		authz:          d.authorizer,
+		csrf:           csrf,
+		auth:           auth,
+		members:        members,
+		orgs:           orgs,
+		invitations:    invitations,
+		apiKeys:        apiKeys,
+		auditLogs:      auditLogs,
+		web:            web,
+		publicBaseURL:  d.publicBaseURL,
+		trustProxy:     d.trustProxyHeaders,
+		trustedProxies: d.trustedProxyCIDRs,
+		limiter:        newTenantRateLimiter(),
+		ipLimiter:      newIPRateLimiter(d.ipRateLimit, d.ipRateBurst, defaultMaxIPBuckets),
+		rateLimited:    newRateLimitedCounter(d.registry),
+		ipRateLimited:  newIPRateLimitedCounter(d.registry),
 	}
 }
 

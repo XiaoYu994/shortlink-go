@@ -106,6 +106,27 @@ func (s *Server) Handler(register func(mux *http.ServeMux)) http.Handler {
 	return s.withMiddleware(mux)
 }
 
+/*
+BusinessHandler 创建仅含业务路由的 ServeMux 并包上标准中间件（不包含 /healthz、/readyz、/metrics）。
+当业务进程配置独立运维端口（OPS_ADDR / CONSOLE_OPS_ADDR）时使用（ADR 0024）。
+*/
+func (s *Server) BusinessHandler(register func(mux *http.ServeMux)) http.Handler {
+	mux := http.NewServeMux()
+	if register != nil {
+		register(mux)
+	}
+	return s.withMiddleware(mux)
+}
+
+/*
+OpsHandler 创建仅含 /healthz、/readyz、/metrics 运维端点的 ServeMux 并包上标准中间件（ADR 0024）。
+*/
+func (s *Server) OpsHandler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerOperational(mux)
+	return s.withMiddleware(mux)
+}
+
 // registerOperational 注册两个进程都有的运维端点。
 func (s *Server) registerOperational(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+healthzPath, s.handleHealthz)

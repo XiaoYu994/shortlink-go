@@ -2,10 +2,12 @@ package console
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -242,4 +244,75 @@ func TestRateLimiterEvictsIdle(t *testing.T) {
 			}
 		}
 	})
+}
+
+type countingAuth struct {
+	calls int
+}
+
+func (a *countingAuth) Authenticate(context.Context, string) (identity.Principal, error) {
+	a.calls++
+	return identity.Principal{}, identity.ErrUnauthenticated
+}
+
+func TestIPRateLimitBlocksForgedTokensBeforeAuth(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		auth := &countingAuth{}
+		srv := newServer(serverDeps{
+			logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+			store:             memorystore.New(),
+			requestTimeout:    5 * time.Second,
+			registry:          newTestRegistry(),
+			keys:              auth,
+			authorizer:        identity.NewMapAuthorizer(),
+			trustProxyHeaders: true,
+			trustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+			ipRateLimit:       1,
+			ipRateBurst:       2,
+		})
+		handler := srv.Routes()
+
+		send := func(ip, xff string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/links", nil)
+			req.RemoteAddr = ip
+			if xff != "" {
+				req.Header.Set("X-Forwarded-For", xff)
+			}
+			// 格式合法但不存在的伪造 Bearer Token，若未被限流会直接穿透到 Authenticate。
+			req.Header.Set("Authorization", "Bearer slk_"+strings.Repeat("12", 32))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			return rec
+		}
+
+		// 前两次消耗 burst=2，放行到鉴权返回 401；第 3 次直接 429，不触发 Authenticate。
+		for i := range 2 {
+			if rec := send("10.0.0.5:1234", "203.0.113.7, 10.0.0.9"); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("req %d = %d, want 401", i, rec.Code)
+			}
+		}
+		rec := send("10.0.0.5:1234", "203.0.113.7, 10.0.0.9")
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("3rd req = %d, want 429", rec.Code)
+		}
+		if rec.Header().Get("Retry-After") == "" {
+			t.Error("missing Retry-After on 429 response")
+		}
+		if auth.calls != 2 {
+			t.Errorf("Authenticate calls = %d, want 2 (blocked before DB lookup)", auth.calls)
+		}
+		if got := testutil.ToFloat64(srv.ipRateLimited); got != 1 {
+			t.Errorf("ipRateLimited = %v, want 1", got)
+		}
+	})
+}
+
+func TestIPRateLimiterBoundedBuckets(t *testing.T) {
+	l := newIPRateLimiter(10, 20, 4)
+	for i := range 12 {
+		l.allow(fmt.Sprintf("203.0.113.%d", i))
+	}
+	if got := len(l.buckets); got > 4 {
+		t.Fatalf("buckets len = %d, want <= 4", got)
+	}
 }

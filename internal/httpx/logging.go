@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"shortlink/internal/logx"
@@ -22,6 +23,7 @@ const (
 // AccessLogOptions 控制 HTTP 访问日志（Canonical Log Line）的分级、采样与慢请求门槛。
 type AccessLogOptions struct {
 	TrustProxyHeaders bool
+	TrustedProxyCIDRs []netip.Prefix
 	// SampleRate 取值 [0, 1]：仅作用于非慢、正常 INFO 流量；5xx、4xx Warn 与慢请求全量保留。
 	SampleRate    float64
 	SlowThreshold time.Duration
@@ -119,7 +121,7 @@ func (a accessLogger) log(
 		slog.Float64("duration_ms", durationMillis(dur)),
 		slog.Int("bytes", bytesWritten),
 	)
-	if ip := ClientIP(r, a.opts.TrustProxyHeaders); ip != "" {
+	if ip := ClientIPWithTrustedProxies(r, a.opts.TrustProxyHeaders, a.opts.TrustedProxyCIDRs); ip != "" {
 		attrs = append(attrs, slog.String("ip", ip))
 	}
 	if snap.TenantID > 0 && logx.TenantIDFrom(ctx) == 0 {

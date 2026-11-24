@@ -9,11 +9,13 @@ WORKER_ADDR ?= :8082
 redirector_port := $(lastword $(subst :, ,$(ADDR)))
 console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
 worker_port := $(lastword $(subst :, ,$(WORKER_ADDR)))
+redirector_ops_port := $(if $(OPS_ADDR),$(lastword $(subst :, ,$(OPS_ADDR))),$(redirector_port))
+console_ops_port := $(if $(CONSOLE_OPS_ADDR),$(lastword $(subst :, ,$(CONSOLE_OPS_ADDR))),$(console_port))
 
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
-.PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check verify selfcheck \
+.PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check arch-check verify selfcheck \
 	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli \
 	web-install web-dev web-build web-fmt web-fmt-check web-lint web-test web-check
 
@@ -68,7 +70,34 @@ fmt-check: ## 检查格式，不修改文件（CI 和 agent 用）
 
 check: fmt-check vet test-unit ## 快速检查：格式、vet、单测（不启动依赖）
 
-verify: check lint build ## 完整代码检查：check + golangci-lint + build
+arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
+	@set -eu; \
+	check_absent() { \
+		pkg=$$1; shift; \
+		deps=$$(go list -deps "$$pkg"); \
+		for forbid in "$$@"; do \
+			if printf '%s\n' "$$deps" | grep -Eq "$$forbid"; then \
+				echo "arch-check 失败: $$pkg 不应依赖 $$forbid" >&2; \
+				exit 1; \
+			fi; \
+		done; \
+	}; \
+	check_absent ./cmd/redirector \
+		'^shortlink/internal/(identity|risk|job|audit|postgres)(/|$$)' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
+	check_absent ./internal/httpx \
+		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit)(/|$$)'; \
+	check_absent ./internal/identity \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2' \
+		'^github\.com/jackc/pgx' \
+		'^github\.com/redis/go-redis'; \
+	check_absent ./internal/config \
+		'^shortlink/internal/(postgres|pgredirect|cache|job|risk|link|identity)(/|$$)'; \
+	echo "arch-check: ok"
+
+verify: check arch-check lint build ## 完整代码检查：check + arch-check + golangci-lint + build
 
 deps-up: ## 只启动 compose 的 PostgreSQL、Redis 和 Dex（本机已有依赖时不要执行）
 	docker compose up -d --wait postgres redis dex
@@ -109,11 +138,11 @@ prometheus-config: ## 按两个监听地址生成 Prometheus 抓取配置
 		printf '%s\n' '  - job_name: redirector'; \
 		printf '%s\n' '    static_configs:'; \
 		printf '%s\n' '      - targets:'; \
-		printf '%s\n' '          - host.docker.internal:$(redirector_port)'; \
+		printf '%s\n' '          - host.docker.internal:$(redirector_ops_port)'; \
 		printf '%s\n' '  - job_name: console'; \
 		printf '%s\n' '    static_configs:'; \
 		printf '%s\n' '      - targets:'; \
-		printf '%s\n' '          - host.docker.internal:$(console_port)'; \
+		printf '%s\n' '          - host.docker.internal:$(console_ops_port)'; \
 		printf '%s\n' '  - job_name: worker'; \
 		printf '%s\n' '    static_configs:'; \
 		printf '%s\n' '      - targets:'; \

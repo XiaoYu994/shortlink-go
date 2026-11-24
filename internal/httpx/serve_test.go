@@ -89,3 +89,78 @@ func TestServeDrainsBeforeShutdown(t *testing.T) {
 		t.Fatalf("Serve() returned error: %v", err)
 	}
 }
+
+func TestStartOpsServerStaysUpDuringDrain(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(logger, 2*time.Second, prometheus.NewRegistry())
+	srv.SetReadiness()
+
+	opsAddr, stopOps, err := StartOpsServer("127.0.0.1:0", srv.OpsHandler(), logger)
+	if err != nil {
+		t.Fatalf("StartOpsServer: %v", err)
+	}
+	defer func() {
+		if err := stopOps(context.Background()); err != nil {
+			t.Errorf("stopOps: %v", err)
+		}
+	}()
+
+	// 用带独立 Listener 的 BusinessHandler 模拟业务端口不暴露 /metrics，运维端口在摘流期间持续可达且 /readyz 变 503。
+	bizLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen biz: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var drained atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, bizLn, srv.BusinessHandler(nil), logger, ServeConfig{
+			RequestTimeout:  2 * time.Second,
+			DrainDelay:      80 * time.Millisecond,
+			ShutdownTimeout: 2 * time.Second,
+			OnShutdown: func() {
+				drained.Store(true)
+				srv.SetDraining()
+			},
+		})
+	}()
+
+	tr := &http.Transport{DisableKeepAlives: true}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Timeout: time.Second, Transport: tr}
+	opsBase := "http://" + opsAddr
+
+	assertStatus := func(url string, want int) {
+		t.Helper()
+		resp, err := client.Get(url)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("GET %s status = %d, want %d", url, resp.StatusCode, want)
+		}
+	}
+
+	assertStatus("http://"+bizLn.Addr().String()+"/metrics", http.StatusNotFound)
+	assertStatus(opsBase+"/readyz", http.StatusOK)
+
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for !drained.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !drained.Load() {
+		t.Fatal("OnShutdown was not called")
+	}
+
+	assertStatus(opsBase+"/readyz", http.StatusServiceUnavailable)
+	assertStatus(opsBase+"/healthz", http.StatusOK)
+
+	if err := <-done; err != nil {
+		t.Fatalf("Serve returned error: %v", err)
+	}
+}

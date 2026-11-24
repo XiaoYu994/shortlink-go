@@ -3,6 +3,7 @@ package httpx
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 )
 
@@ -37,6 +38,91 @@ func TestClientIP(t *testing.T) {
 			}
 			if got := ClientIP(r, tt.trustProxy); got != tt.want {
 				t.Errorf("ClientIP = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientIPWithTrustedProxies(t *testing.T) {
+	trusted := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+	}
+	tests := []struct {
+		name       string
+		remoteAddr string
+		xff        []string
+		trustProxy bool
+		cidrs      []netip.Prefix
+		want       string
+	}{
+		{
+			name:       "untrusted direct peer spoofing xff",
+			remoteAddr: "198.51.100.7:1234",
+			xff:        []string{"203.0.113.10"},
+			trustProxy: true,
+			cidrs:      trusted,
+			want:       "198.51.100.7",
+		},
+		{
+			name:       "cdn plus nginx two-hop skips both trusted proxies",
+			remoteAddr: "10.0.0.5:4567",
+			xff:        []string{"1.2.3.4, 203.0.113.9, 172.16.1.20"},
+			trustProxy: true,
+			cidrs:      trusted,
+			want:       "203.0.113.9",
+		},
+		{
+			name:       "multi-header lines across trusted chain",
+			remoteAddr: "10.0.0.5:4567",
+			xff:        []string{"9.9.9.9, 198.51.100.42", "172.16.0.9"},
+			trustProxy: true,
+			cidrs:      trusted,
+			want:       "198.51.100.42",
+		},
+		{
+			name:       "ipv4-mapped ipv6 proxy normalized before prefix check",
+			remoteAddr: "[::ffff:10.0.0.5]:4567",
+			xff:        []string{"203.0.113.8, ::ffff:172.16.2.3"},
+			trustProxy: true,
+			cidrs:      trusted,
+			want:       "203.0.113.8",
+		},
+		{
+			name:       "invalid token mid-chain falls back to remote addr",
+			remoteAddr: "10.0.0.5:4567",
+			xff:        []string{"203.0.113.8, garbage, 172.16.2.3"},
+			trustProxy: true,
+			cidrs:      trusted,
+			want:       "10.0.0.5",
+		},
+		{
+			name:       "all xff hops inside trusted cidrs returns leftmost valid",
+			remoteAddr: "10.0.0.5:4567",
+			xff:        []string{"10.1.1.1, 172.16.0.2"},
+			trustProxy: true,
+			cidrs:      trusted,
+			want:       "10.1.1.1",
+		},
+		{
+			name:       "trustProxy false ignores cidrs and xff",
+			remoteAddr: "10.0.0.5:4567",
+			xff:        []string{"203.0.113.9"},
+			trustProxy: false,
+			cidrs:      trusted,
+			want:       "10.0.0.5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			for _, line := range tt.xff {
+				r.Header.Add("X-Forwarded-For", line)
+			}
+			if got := ClientIPWithTrustedProxies(r, tt.trustProxy, tt.cidrs); got != tt.want {
+				t.Errorf("ClientIPWithTrustedProxies = %q, want %q", got, tt.want)
 			}
 		})
 	}

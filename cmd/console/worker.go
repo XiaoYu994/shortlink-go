@@ -21,7 +21,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"shortlink/internal/cache"
-	"shortlink/internal/config"
 	"shortlink/internal/httpx"
 	"shortlink/internal/job"
 	"shortlink/internal/postgres"
@@ -72,7 +71,7 @@ func drainCleanupBatches(ctx context.Context, batchLimit, maxBatches int, fn fun
 }
 
 func runWorker(cliOpts workerCLIOptions) error {
-	cfg, err := config.LoadWorkerConfig()
+	cfg, err := loadWorkerConfig()
 	if err != nil {
 		return err
 	}

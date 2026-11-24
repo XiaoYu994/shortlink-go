@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	rateLimitedMetricName = "shortlink_rate_limited_total"
+	rateLimitedMetricName   = "shortlink_rate_limited_total"
+	ipRateLimitedMetricName = "shortlink_ip_rate_limited_total"
+	defaultMaxIPBuckets     = 65536
 	/*
 		limiterIdleTTL 是令牌桶在内存里保留多久。
 		超过这个时间没有请求的租户会被清掉；下次请求重新从满桶开始，
@@ -32,6 +34,16 @@ func newRateLimitedCounter(registry *prometheus.Registry) prometheus.Counter {
 	c := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: rateLimitedMetricName,
 		Help: "Total number of management API requests rejected by the per-tenant rate limiter.",
+	})
+	registry.MustRegister(c)
+	return c
+}
+
+func newIPRateLimitedCounter(registry *prometheus.Registry) prometheus.Counter {
+	// 来源 IP 基数无界，不放入 label，防止 Prometheus 时序膨胀。
+	c := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: ipRateLimitedMetricName,
+		Help: "Total number of management API requests rejected by the pre-auth per-IP rate limiter.",
 	})
 	registry.MustRegister(c)
 	return c
@@ -144,6 +156,116 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		retryAfter, allowed := s.limiter.allow(p.Tenant)
 		if !allowed {
 			s.rateLimited.Inc()
+			seconds := max(int(math.Ceil(retryAfter.Seconds())), 1)
+			logx.SetRateLimited(r.Context(), seconds)
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			httpx.WriteError(s.logger, r.Context(), w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+/*
+ipRateLimiter 是鉴权前的有界源 IP 令牌桶限流器，阻断伪造凭证或未授权洪水穿透查库（ADR 0024）。
+map 设有 maxBuckets 硬上限：超容时先立即清理空闲条目；若仍满则 O(1) 驱逐一个已有条目，
+避免 O(N) 扫描持锁阻塞，确保内存占用严格有界。
+*/
+type ipRateLimiter struct {
+	rps        int
+	burst      int
+	maxBuckets int
+
+	mu        sync.Mutex
+	buckets   map[string]*limiterEntry
+	lastSweep time.Time
+}
+
+func newIPRateLimiter(rps, burst, maxBuckets int) *ipRateLimiter {
+	if rps <= 0 {
+		return nil
+	}
+	if burst <= 0 {
+		burst = rps
+	}
+	if maxBuckets <= 0 {
+		maxBuckets = defaultMaxIPBuckets
+	}
+	return &ipRateLimiter{
+		rps:        rps,
+		burst:      burst,
+		maxBuckets: maxBuckets,
+		buckets:    make(map[string]*limiterEntry),
+		lastSweep:  time.Now(),
+	}
+}
+
+func (l *ipRateLimiter) allow(ip string) (retryAfter time.Duration, allowed bool) {
+	if l == nil || l.rps <= 0 {
+		return 0, true
+	}
+	if ip == "" {
+		ip = "unknown"
+	}
+
+	now := time.Now()
+	l.mu.Lock()
+	entry, ok := l.buckets[ip]
+	if !ok {
+		if len(l.buckets) >= l.maxBuckets {
+			l.sweepLocked(now, true)
+			for len(l.buckets) >= l.maxBuckets {
+				for k := range l.buckets {
+					delete(l.buckets, k)
+					break
+				}
+			}
+		}
+		entry = &limiterEntry{
+			limiter: rate.NewLimiter(rate.Limit(l.rps), l.burst),
+		}
+		l.buckets[ip] = entry
+	}
+	entry.lastSeen = now
+	limiter := entry.limiter
+	l.sweepLocked(now, false)
+	l.mu.Unlock()
+
+	reservation := limiter.Reserve()
+	if !reservation.OK() {
+		return time.Second, false
+	}
+	if delay := reservation.Delay(); delay > 0 {
+		reservation.Cancel()
+		return delay, false
+	}
+	return 0, true
+}
+
+func (l *ipRateLimiter) sweepLocked(now time.Time, force bool) {
+	if !force && now.Sub(l.lastSweep) < limiterSweepPeriod {
+		return
+	}
+	l.lastSweep = now
+	for ip, entry := range l.buckets {
+		if now.Sub(entry.lastSeen) > limiterIdleTTL {
+			delete(l.buckets, ip)
+		}
+	}
+}
+
+func (s *Server) ipRateLimit(next http.Handler) http.Handler {
+	if s.ipLimiter == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if httpx.IsClientGone(s.logger, r) {
+			return
+		}
+		ip := httpx.ClientIPWithTrustedProxies(r, s.trustProxy, s.trustedProxies)
+		retryAfter, allowed := s.ipLimiter.allow(ip)
+		if !allowed {
+			s.ipRateLimited.Inc()
 			seconds := max(int(math.Ceil(retryAfter.Seconds())), 1)
 			logx.SetRateLimited(r.Context(), seconds)
 			w.Header().Set("Retry-After", strconv.Itoa(seconds))

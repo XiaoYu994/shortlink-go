@@ -192,11 +192,15 @@ REDIS_URL=$TEST_REDIS_URL
 export DATABASE_URL REDIS_URL
 
 redirector_addr=${SMOKE_REDIRECTOR_ADDR:-127.0.0.1:18080}
+redirector_ops_addr=${SMOKE_REDIRECTOR_OPS_ADDR:-127.0.0.1:19090}
 console_addr=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
+console_ops_addr=${SMOKE_CONSOLE_OPS_ADDR:-127.0.0.1:19091}
 worker_addr=${SMOKE_WORKER_ADDR:-127.0.0.1:18082}
 risk_stub_port=${SMOKE_RISK_STUB_PORT:-18089}
 REDIRECTOR_BASE=http://$redirector_addr
+REDIRECTOR_OPS_BASE=http://$redirector_ops_addr
 CONSOLE_BASE=http://$console_addr
+CONSOLE_OPS_BASE=http://$console_ops_addr
 WORKER_BASE=http://$worker_addr
 RISK_STUB_HOST=127.0.0.1:$risk_stub_port
 export LOG_LEVEL=error
@@ -231,9 +235,10 @@ mkdir -p "$TMP/webdist"
 printf '%s\n' '<!doctype html><html><body>smoke-web-console</body></html>' >"$TMP/webdist/index.html"
 
 # 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
-ADDR=$redirector_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
+ADDR=$redirector_addr OPS_ADDR=$redirector_ops_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
 CONSOLE_ADDR=$console_addr \
+CONSOLE_OPS_ADDR=$console_ops_addr \
 OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
 OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
 OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
@@ -242,21 +247,29 @@ WEB_DIST_DIR=$TMP/webdist \
 	./bin/console serve >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
-wait_ready "$REDIRECTOR_BASE" "$REDIRECTOR_PID" redirector
-wait_ready "$CONSOLE_BASE" "$CONSOLE_PID" console
+wait_ready "$REDIRECTOR_OPS_BASE" "$REDIRECTOR_PID" redirector
+wait_ready "$CONSOLE_OPS_BASE" "$CONSOLE_PID" console
 
 echo 'smoke: healthz'
-for base in "$REDIRECTOR_BASE" "$CONSOLE_BASE"; do
+for base in "$REDIRECTOR_OPS_BASE" "$CONSOLE_OPS_BASE"; do
 	status=$(request "$base" GET /healthz)
 	assert_eq "$status" 200 "GET $base/healthz 状态码"
 	assert_eq "$(cat "$TMP/body")" 'ok' "GET $base/healthz 响应体"
 done
 
 echo 'smoke: readyz'
-for base in "$REDIRECTOR_BASE" "$CONSOLE_BASE"; do
+for base in "$REDIRECTOR_OPS_BASE" "$CONSOLE_OPS_BASE"; do
 	status=$(request "$base" GET /readyz)
 	assert_eq "$status" 200 "GET $base/readyz 状态码"
 	assert_eq "$(cat "$TMP/body")" 'ok' "GET $base/readyz 响应体"
+done
+
+echo 'smoke: ops isolation'
+for base in "$REDIRECTOR_BASE" "$CONSOLE_BASE"; do
+	for ep in /healthz /readyz /metrics; do
+		status=$(request "$base" GET "$ep")
+		assert_eq "$status" 404 "业务端口不应暴露 $base$ep"
+	done
 done
 
 echo 'smoke: unauthorized'
@@ -777,7 +790,7 @@ grep -Fq "\"target_id\":\"$risk_code\"" "$TMP/body" || fail "异步风控审计�
 grep -Fq '"request_id":"job:' "$TMP/body" || fail "异步风控审计日志缺少 job request_id: $(cat "$TMP/body")"
 
 echo 'smoke: metrics'
-status=$(request "$REDIRECTOR_BASE" GET /metrics)
+status=$(request "$REDIRECTOR_OPS_BASE" GET /metrics)
 assert_eq "$status" 200 'redirector GET /metrics 状态码'
 grep -q 'shortlink_http_requests_total' "$TMP/body" || fail 'redirector 指标里没有 shortlink_http_requests_total'
 grep -q 'shortlink_cache_gets_total{result="hit"}' "$TMP/body" || fail 'redirector 没有缓存命中，创建可能没有写穿'
@@ -788,7 +801,7 @@ if grep -q 'shortlink_store_operations_total{operation="get",result="success"}' 
 fi
 grep -q 'shortlink_clicks_' "$TMP/body" || fail 'redirector 指标里没有点击指标'
 
-status=$(request "$CONSOLE_BASE" GET /metrics)
+status=$(request "$CONSOLE_OPS_BASE" GET /metrics)
 assert_eq "$status" 200 'console GET /metrics 状态码'
 grep -q 'shortlink_http_requests_total' "$TMP/body" || fail 'console 指标里没有 shortlink_http_requests_total'
 grep -q 'shortlink_cache_writes_total{result="success"}' "$TMP/body" || fail 'console 没有成功写缓存，创建可能没有写穿'
