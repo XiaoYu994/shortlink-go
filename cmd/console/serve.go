@@ -29,7 +29,7 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
-	logger := cfg.NewLogger(os.Stdout)
+	logger, _ := cfg.NewLoggerWithService(os.Stdout, "console")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	db, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.Pool)

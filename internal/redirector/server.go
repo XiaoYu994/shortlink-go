@@ -47,6 +47,10 @@ type Options struct {
 		最左一段在代理追加头时可以由客户端伪造。只能开在可信反向代理后面。
 	*/
 	TrustProxyHeaders bool
+	// AccessLogSampleRate 控制正常跳转 INFO 访问日志采样率；nil 默认全量 1.0。
+	AccessLogSampleRate *float64
+	// AccessLogSlowThreshold 为正时覆盖默认慢请求门槛。
+	AccessLogSlowThreshold time.Duration
 }
 
 // Server 持有跳转进程需要的依赖，复用 httpx 提供的运维端点与通用中间件。
@@ -62,6 +66,16 @@ type Server struct {
 // New 组装公开跳转进程，只挂载 /r/{code} 与通用运维端点。
 func New(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, registry *prometheus.Registry, opts Options) *Server {
 	base := httpx.New(logger, requestTimeout, registry)
+	sampleRate := 1.0
+	if opts.AccessLogSampleRate != nil {
+		sampleRate = *opts.AccessLogSampleRate
+	}
+	base.SetAccessLog(httpx.AccessLogOptions{
+		TrustProxyHeaders: opts.TrustProxyHeaders,
+		SampleRate:        sampleRate,
+		SlowThreshold:     opts.AccessLogSlowThreshold,
+		Treat404AsInfo:    true,
+	})
 	return &Server{
 		base:        base,
 		logger:      base.Logger(),

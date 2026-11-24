@@ -11,6 +11,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"shortlink/internal/httpx"
+	"shortlink/internal/logx"
 	"shortlink/internal/tenant"
 )
 
@@ -144,6 +145,7 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		if !allowed {
 			s.rateLimited.Inc()
 			seconds := max(int(math.Ceil(retryAfter.Seconds())), 1)
+			logx.SetRateLimited(r.Context(), seconds)
 			w.Header().Set("Retry-After", strconv.Itoa(seconds))
 			httpx.WriteError(s.logger, r.Context(), w, http.StatusTooManyRequests, "rate limit exceeded")
 			return

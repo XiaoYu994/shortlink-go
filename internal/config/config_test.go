@@ -2,6 +2,9 @@ package config
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"strings"
@@ -10,6 +13,7 @@ import (
 
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/logx"
 	"shortlink/internal/postgres"
 	"shortlink/internal/risk"
 )
@@ -35,6 +39,8 @@ func baseTestEnv() map[string]string {
 		"LOG_LEVEL":                 "",
 		"LOG_FORMAT":                "",
 		"PPROF_ADDR":                "",
+		"ACCESS_LOG_SAMPLE_RATE":    "",
+		"ACCESS_LOG_SLOW_THRESHOLD": "",
 		"OIDC_ISSUER":               "",
 		"OIDC_CLIENT_ID":            "",
 		"OIDC_CLIENT_SECRET":        "",
@@ -79,8 +85,10 @@ func defaultBaseConfig(addr string) BaseConfig {
 func TestLoadRedirectorConfig(t *testing.T) {
 	base := baseTestEnv()
 	defaults := RedirectorConfig{
-		BaseConfig:  defaultBaseConfig(defaultRedirectorAddr),
-		VisitorSalt: "test-salt",
+		BaseConfig:             defaultBaseConfig(defaultRedirectorAddr),
+		VisitorSalt:            "test-salt",
+		AccessLogSampleRate:    defaultAccessLogSampleRate,
+		AccessLogSlowThreshold: defaultAccessLogSlowThreshold,
 	}
 
 	tests := []struct {
@@ -93,21 +101,23 @@ func TestLoadRedirectorConfig(t *testing.T) {
 		{
 			name: "explicit values",
 			env: map[string]string{
-				"ADDR":                   ":9090",
-				"DATABASE_URL":           "postgres://user:pass@db:5432/shortlink?sslmode=disable",
-				"DB_MAX_OPEN_CONNS":      "20",
-				"DB_MAX_IDLE_CONNS":      "4",
-				"DB_CONN_MAX_LIFETIME":   "1h30m",
-				"DB_CONN_MAX_IDLE_TIME":  "5m",
-				"REQUEST_TIMEOUT":        "2s",
-				"SHUTDOWN_TIMEOUT":       "15s",
-				"DRAIN_DELAY":            "3s",
-				"CACHE_MISS_CONCURRENCY": "4",
-				"CACHE_FETCH_TIMEOUT":    "500ms",
-				"REDIS_URL":              "rediss://user:pass@redis:6380/1",
-				"VISITOR_SALT":           "prod-salt",
-				"TRUST_PROXY_HEADERS":    "true",
-				"LOG_FORMAT":             "json",
+				"ADDR":                      ":9090",
+				"DATABASE_URL":              "postgres://user:pass@db:5432/shortlink?sslmode=disable",
+				"DB_MAX_OPEN_CONNS":         "20",
+				"DB_MAX_IDLE_CONNS":         "4",
+				"DB_CONN_MAX_LIFETIME":      "1h30m",
+				"DB_CONN_MAX_IDLE_TIME":     "5m",
+				"REQUEST_TIMEOUT":           "2s",
+				"SHUTDOWN_TIMEOUT":          "15s",
+				"DRAIN_DELAY":               "3s",
+				"CACHE_MISS_CONCURRENCY":    "4",
+				"CACHE_FETCH_TIMEOUT":       "500ms",
+				"REDIS_URL":                 "rediss://user:pass@redis:6380/1",
+				"VISITOR_SALT":              "prod-salt",
+				"TRUST_PROXY_HEADERS":       "true",
+				"LOG_FORMAT":                "json",
+				"ACCESS_LOG_SAMPLE_RATE":    "0.1",
+				"ACCESS_LOG_SLOW_THRESHOLD": "150ms",
 			},
 			want: RedirectorConfig{
 				BaseConfig: BaseConfig{
@@ -127,8 +137,10 @@ func TestLoadRedirectorConfig(t *testing.T) {
 					CacheMissConcurrency: 4,
 					CacheFetchTimeout:    500 * time.Millisecond,
 				},
-				VisitorSalt:       "prod-salt",
-				TrustProxyHeaders: true,
+				VisitorSalt:            "prod-salt",
+				TrustProxyHeaders:      true,
+				AccessLogSampleRate:    0.1,
+				AccessLogSlowThreshold: 150 * time.Millisecond,
 			},
 		},
 		{
@@ -203,6 +215,36 @@ func TestLoadRedirectorConfig(t *testing.T) {
 			name:    "pprof without port",
 			env:     map[string]string{"PPROF_ADDR": "127.0.0.1"},
 			wantErr: "PPROF_ADDR",
+		},
+		{
+			name:    "invalid access log sample rate",
+			env:     map[string]string{"ACCESS_LOG_SAMPLE_RATE": "abc"},
+			wantErr: "ACCESS_LOG_SAMPLE_RATE",
+		},
+		{
+			name:    "negative access log sample rate",
+			env:     map[string]string{"ACCESS_LOG_SAMPLE_RATE": "-0.1"},
+			wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1",
+		},
+		{
+			name:    "access log sample rate above 1",
+			env:     map[string]string{"ACCESS_LOG_SAMPLE_RATE": "1.5"},
+			wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1",
+		},
+		{
+			name:    "nan access log sample rate",
+			env:     map[string]string{"ACCESS_LOG_SAMPLE_RATE": "NaN"},
+			wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1",
+		},
+		{
+			name:    "invalid access log slow threshold",
+			env:     map[string]string{"ACCESS_LOG_SLOW_THRESHOLD": "abc"},
+			wantErr: "ACCESS_LOG_SLOW_THRESHOLD",
+		},
+		{
+			name:    "non-positive access log slow threshold",
+			env:     map[string]string{"ACCESS_LOG_SLOW_THRESHOLD": "0s"},
+			wantErr: "ACCESS_LOG_SLOW_THRESHOLD must be positive",
 		},
 		{
 			name:    "invalid log format",
@@ -661,8 +703,101 @@ func TestNewLoggerFormat(t *testing.T) {
 	buf.Reset()
 	cfg.LogFormat = logFormatText
 	cfg.NewLogger(&buf).Info("listening", "addr", ":8080")
-	if !strings.Contains(buf.String(), "msg=listening") || strings.Contains(buf.String(), `"msg"`) {
-		t.Fatalf("text log = %q", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "listening") || !strings.Contains(out, "addr=:8080") || strings.Contains(out, `"msg"`) {
+		t.Fatalf("text log = %q", out)
+	}
+}
+
+func TestNewLoggerWithServiceAndDynamicLevel(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := BaseConfig{LogLevel: slog.LevelInfo, LogFormat: logFormatJSON}
+	logger, levelVar := cfg.NewLoggerWithService(&buf, "console-worker")
+
+	logger.Debug("skipped")
+	if buf.Len() != 0 {
+		t.Fatalf("unexpected debug log: %s", buf.String())
+	}
+
+	levelVar.Set(slog.LevelDebug)
+	ctx := logx.WithRequestID(context.Background(), "req-99")
+	ctx = logx.WithJob(ctx, 17, "link.risk_scan", 5)
+	logger.DebugContext(ctx, "running")
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("decode log: %v\n%s", err, buf.String())
+	}
+	if entry["service"] != "console-worker" || entry["request_id"] != "req-99" ||
+		entry["job_id"] != float64(17) || entry["job_kind"] != "link.risk_scan" || entry["tenant_id"] != float64(5) {
+		t.Errorf("entry = %+v", entry)
+	}
+}
+
+func TestConfigRedaction(t *testing.T) {
+	base := BaseConfig{
+		Addr:        ":8080",
+		DatabaseURL: "postgres://shortlink:pg-secret-pass@db:5432/shortlink?sslmode=disable",
+		RedisURL:    "rediss://:redis-secret-pass@redis:6380/0",
+		LogFormat:   logFormatJSON,
+	}
+	redCfg := RedirectorConfig{
+		BaseConfig:  base,
+		VisitorSalt: "top-secret-salt",
+	}
+	oidcCfg := OIDCConfig{
+		Issuer:       "https://dex.example.com",
+		ClientID:     "shortlink-console",
+		ClientSecret: "oidc-top-secret",
+		RedirectURL:  "https://console.example.com/api/v1/auth/callback",
+	}
+	ghCfg := GitHubConfig{
+		ClientID:     "gh-client",
+		ClientSecret: "github-top-secret",
+		RedirectURL:  "https://console.example.com/api/v1/auth/github/callback",
+	}
+	conCfg := ConsoleConfig{
+		BaseConfig: base,
+		OIDC:       oidcCfg,
+		GitHub:     ghCfg,
+	}
+	workerCfg := WorkerConfig{
+		BaseConfig:          base,
+		Concurrency:         8,
+		RiskBlockedKeywords: map[string]link.BanReason{"evil": link.BanReasonPhishing},
+	}
+
+	var buf bytes.Buffer
+	logger, _ := base.NewLoggerWithService(&buf, "config-test")
+	logger.Info("dump",
+		"base", base,
+		"redirector", redCfg,
+		"console", conCfg,
+		"worker", workerCfg,
+		"oidc", oidcCfg,
+		"github", ghCfg,
+	)
+
+	formatted := fmt.Sprintf("%+v %+v %+v %+v %+v %+v", base, redCfg, conCfg, workerCfg, oidcCfg, ghCfg)
+	combined := buf.String() + "\n" + formatted
+
+	secrets := []string{
+		"pg-secret-pass",
+		"redis-secret-pass",
+		"top-secret-salt",
+		"oidc-top-secret",
+		"github-top-secret",
+	}
+	for _, secret := range secrets {
+		if strings.Contains(combined, secret) {
+			t.Errorf("secret %q leaked in config output: %s", secret, combined)
+		}
+	}
+	if !strings.Contains(buf.String(), logx.Redacted) {
+		t.Errorf("expected redacted placeholder in log output: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "sslmode=disable") {
+		t.Errorf("safe DSN parameter lost in log output: %s", buf.String())
 	}
 }
 

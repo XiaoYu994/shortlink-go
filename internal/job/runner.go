@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"shortlink/internal/logx"
 )
 
 const (
@@ -150,6 +152,8 @@ func New(queue Queue, handlers map[string]Handler, logger *slog.Logger, registry
 	opts = opts.withDefaults()
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	} else {
+		logger = slog.New(logx.WrapContext(logger.Handler()))
 	}
 	copiedHandlers := make(map[string]Handler, len(handlers))
 	seen := make(map[string]struct{}, len(handlers))
@@ -339,21 +343,21 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 	err := r.invokeHandler(parentCtx, j)
 	r.duration.WithLabelValues(j.Kind).Observe(time.Since(start).Seconds())
 
-	// 回写结果脱离 inFlightCtx 的普通取消，给数据库短超时收尾。
-	commitCtx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+	// 回写结果脱离 inFlightCtx 的普通取消，给数据库短超时收尾，同时保留任务关联字段进日志。
+	commitCtx, cancel := context.WithTimeout(logx.WithJob(context.Background(), j.ID, j.Kind, jobTenantID(j)), commitTimeout)
 	defer cancel()
 
 	switch {
 	case err == nil:
 		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion); cerr != nil {
-			r.logCommitError("complete job", j, cerr)
+			r.logCommitError(commitCtx, "complete job", j, cerr)
 			return
 		}
 		r.processed.WithLabelValues(j.Kind, resultDone).Inc()
 
 	case IsSkipped(err):
 		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion); cerr != nil {
-			r.logCommitError("complete skipped job", j, cerr)
+			r.logCommitError(commitCtx, "complete skipped job", j, cerr)
 			return
 		}
 		r.processed.WithLabelValues(j.Kind, resultSkipped).Inc()
@@ -368,17 +372,17 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 			LastError:      err.Error(),
 			ConsumeAttempt: false,
 		}); rerr != nil {
-			r.logCommitError("defer job", j, rerr)
+			r.logCommitError(commitCtx, "defer job", j, rerr)
 			return
 		}
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 
 	case IsPermanent(err) || j.Attempts >= j.MaxAttempts:
 		if derr := r.queue.Dead(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion, err.Error()); derr != nil {
-			r.logCommitError("mark job dead", j, derr)
+			r.logCommitError(commitCtx, "mark job dead", j, derr)
 			return
 		}
-		r.logger.Warn("job moved to dead", "job_id", j.ID, "kind", j.Kind, "attempts", j.Attempts, "err", err)
+		r.logger.WarnContext(commitCtx, "job moved to dead", "attempts", j.Attempts, "err", err)
 		r.processed.WithLabelValues(j.Kind, resultDead).Inc()
 
 	default:
@@ -391,22 +395,29 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 			LastError:      err.Error(),
 			ConsumeAttempt: true,
 		}); rerr != nil {
-			r.logCommitError("retry job", j, rerr)
+			r.logCommitError(commitCtx, "retry job", j, rerr)
 			return
 		}
-		r.logger.Warn("job scheduled for retry",
-			"job_id", j.ID, "kind", j.Kind, "attempts", j.Attempts, "delay", delay, "err", err)
+		r.logger.WarnContext(commitCtx, "job scheduled for retry",
+			"attempts", j.Attempts, "delay", delay, "err", err)
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 	}
 }
 
-func (r *Runner) logCommitError(op string, j Job, err error) {
+func (r *Runner) logCommitError(ctx context.Context, op string, j Job, err error) {
 	if errors.Is(err, ErrLeaseLost) {
-		r.logger.Warn("job lease lost before commit",
-			"op", op, "job_id", j.ID, "kind", j.Kind, "lock_version", j.LockVersion)
+		r.logger.WarnContext(ctx, "job lease lost before commit",
+			"op", op, "lock_version", j.LockVersion)
 		return
 	}
-	r.logger.Error(op, "job_id", j.ID, "kind", j.Kind, "err", err)
+	r.logger.ErrorContext(ctx, op, "err", err)
+}
+
+func jobTenantID(j Job) int64 {
+	if j.TenantID == nil {
+		return 0
+	}
+	return *j.TenantID
 }
 
 func isDeferred(err error) bool {
@@ -424,13 +435,13 @@ func (r *Runner) invokeHandler(parentCtx context.Context, j Job) (err error) {
 		return Permanent(fmt.Errorf("unknown job kind %q", j.Kind))
 	}
 
-	jobCtx, cancel := context.WithTimeout(parentCtx, r.opts.JobTimeout)
+	jobCtx, cancel := context.WithTimeout(logx.WithJob(parentCtx, j.ID, j.Kind, jobTenantID(j)), r.opts.JobTimeout)
 	defer cancel()
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			r.logger.Error("job handler panic",
-				"job_id", j.ID, "kind", j.Kind, "panic", rec, "stack", string(debug.Stack()))
+			r.logger.ErrorContext(jobCtx, "job handler panic",
+				"panic", rec, "stack", string(debug.Stack()))
 			err = fmt.Errorf("handler panic: %v", rec)
 		}
 	}()

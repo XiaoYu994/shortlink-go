@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/logx"
 	"shortlink/internal/postgres"
 	"shortlink/internal/risk"
 )
@@ -48,6 +50,9 @@ const (
 
 	defaultWorkerCleanupInterval = time.Hour
 	defaultWorkerRetention       = 7 * 24 * time.Hour
+
+	defaultAccessLogSampleRate    = 1.0
+	defaultAccessLogSlowThreshold = 200 * time.Millisecond
 )
 
 /*
@@ -96,6 +101,10 @@ type RedirectorConfig struct {
 		只接受回环地址：剖析数据里有堆内容，端点也没有鉴权。见 ADR 0013。
 	*/
 	PprofAddr string
+	// AccessLogSampleRate 是 redirector 正常 INFO 访问日志的采样率（[0, 1]，默认 1 全量；5xx 与慢请求全保）。
+	AccessLogSampleRate float64
+	// AccessLogSlowThreshold 是判定慢请求并升为 Warn 全量保留的耗时门槛（默认 200ms）。
+	AccessLogSlowThreshold time.Duration
 }
 
 // ConsoleConfig 是管理进程 HTTP 模式（cmd/console serve）的完整启动配置。
@@ -176,9 +185,11 @@ func LoadRedirectorConfig() (RedirectorConfig, error) {
 	}
 
 	cfg := RedirectorConfig{
-		BaseConfig:  base,
-		VisitorSalt: os.Getenv("VISITOR_SALT"),
-		PprofAddr:   os.Getenv("PPROF_ADDR"),
+		BaseConfig:             base,
+		VisitorSalt:            os.Getenv("VISITOR_SALT"),
+		PprofAddr:              os.Getenv("PPROF_ADDR"),
+		AccessLogSampleRate:    defaultAccessLogSampleRate,
+		AccessLogSlowThreshold: defaultAccessLogSlowThreshold,
 	}
 	if cfg.VisitorSalt == "" {
 		return RedirectorConfig{}, errors.New("VISITOR_SALT is required")
@@ -192,6 +203,18 @@ func LoadRedirectorConfig() (RedirectorConfig, error) {
 	}
 	if cfg.PprofAddr != "" && !isLoopbackAddr(cfg.PprofAddr) {
 		return RedirectorConfig{}, errors.New("PPROF_ADDR must be a loopback address such as 127.0.0.1:6060")
+	}
+	if cfg.AccessLogSampleRate, err = envFloat("ACCESS_LOG_SAMPLE_RATE", cfg.AccessLogSampleRate); err != nil {
+		return RedirectorConfig{}, err
+	}
+	if math.IsNaN(cfg.AccessLogSampleRate) || cfg.AccessLogSampleRate < 0 || cfg.AccessLogSampleRate > 1 {
+		return RedirectorConfig{}, errors.New("ACCESS_LOG_SAMPLE_RATE must be between 0 and 1")
+	}
+	if cfg.AccessLogSlowThreshold, err = envDuration("ACCESS_LOG_SLOW_THRESHOLD", cfg.AccessLogSlowThreshold); err != nil {
+		return RedirectorConfig{}, err
+	}
+	if cfg.AccessLogSlowThreshold <= 0 {
+		return RedirectorConfig{}, errors.New("ACCESS_LOG_SLOW_THRESHOLD must be positive")
 	}
 	return cfg, nil
 }
@@ -416,19 +439,22 @@ func loadBaseConfig(addr string) (BaseConfig, error) {
 }
 
 /*
-NewLogger 按 LOG_FORMAT 构造日志。调用前格式已经校验过。
+NewLogger 按 LOG_FORMAT 构造日志，并装配统一 context 提取与敏感字段脱敏。调用前格式已经校验过。
 text 方便在终端里读；json 给生产采集。这里只认 json，其余按 text，
 避免配置加载之外的调用方因为拼写把进程打成没日志。
 */
 func (cfg BaseConfig) NewLogger(w io.Writer) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
-	var handler slog.Handler
-	if cfg.LogFormat == logFormatJSON {
-		handler = slog.NewJSONHandler(w, opts)
-	} else {
-		handler = slog.NewTextHandler(w, opts)
-	}
-	return slog.New(handler)
+	logger, _ := cfg.NewLoggerWithService(w, "")
+	return logger
+}
+
+// NewLoggerWithService 构造绑定固定 service 标签的根日志器，并返回支持运行时调级的 *slog.LevelVar。
+func (cfg BaseConfig) NewLoggerWithService(w io.Writer, service string) (*slog.Logger, *slog.LevelVar) {
+	return logx.New(w, logx.Options{
+		Format:  cfg.LogFormat,
+		Level:   cfg.LogLevel,
+		Service: service,
+	})
 }
 
 func parseLogFormat(raw string) (string, error) {
@@ -579,4 +605,17 @@ func envDuration(name string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return d, nil
+}
+
+// envFloat 读取浮点数环境变量。变量未设置时返回 def。
+func envFloat(name string, def float64) (float64, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return f, nil
 }

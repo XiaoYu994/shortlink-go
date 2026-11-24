@@ -86,7 +86,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 	if err != nil {
 		return err
 	}
-	logger := cfg.NewLogger(os.Stdout)
+	logger, _ := cfg.NewLoggerWithService(os.Stdout, "console-worker")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	db, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.Pool)

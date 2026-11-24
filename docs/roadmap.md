@@ -159,4 +159,4 @@
 
 - [ ] PostgreSQL 行级安全（RLS）作为租户隔离的第二道防线（`SET LOCAL` 绑定当前租户）
 - [ ] OpenTelemetry 追踪：串联跳转、管理与 worker 请求里的缓存、singleflight 和数据库 span，日志带 `trace_id`
-- [ ] 日志体系加固：根 logger 统一上下文透传、`Canonical Log Lines` 宽访问日志、数据面采样、脱敏与动态调级，具体问题清单见 [日志体系架构审查](postmortems/2026-11-24-logging-system-audit.md)
+- [ ] 日志体系加固：根 logger 统一上下文透传、`Canonical Log Lines` 宽访问日志、数据面采样、脱敏与动态调级（Phase A/B 已落地：接入 `tint`、统一 `internal/logx` 根日志/脱敏/`LevelVar`、`RequestEvent` 宽访问日志、状态分级与 `redirector` 采样；Phase C 待与 OpenTelemetry 合流），具体问题清单见 [日志体系架构审查](postmortems/2026-11-24-logging-system-audit.md)

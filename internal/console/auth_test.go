@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"shortlink/internal/identity"
 	"shortlink/internal/link"
+	"shortlink/internal/logx"
 	"shortlink/internal/memorystore"
 	"shortlink/internal/tenant"
 )
@@ -614,5 +616,66 @@ func TestConsoleRouteAPIKeyScopes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestAuthenticateInjectsTenantIDIntoLogContext(t *testing.T) {
+	var buf bytes.Buffer
+	baseLogger, _ := logx.New(&buf, logx.Options{Format: logx.FormatJSON, Level: slog.LevelInfo, Service: "console"})
+	downstreamLogger := baseLogger.With("component", "cache")
+
+	srv := newServer(serverDeps{
+		logger:         baseLogger,
+		store:          memorystore.New(),
+		requestTimeout: 5 * time.Second,
+		registry:       newTestRegistry(),
+		keys: principalKey{testAPIKey: {
+			Tenant:    tenant.Tenant{ID: 77},
+			ActorKind: identity.ActorAPIKey,
+			ActorID:   10,
+			Scopes:    []identity.Perm{identity.PermLinksRead},
+		}},
+		authorizer: identity.NewMapAuthorizer(),
+	})
+
+	wrapped := srv.base.Handler(func(mux *http.ServeMux) {
+		mux.Handle("GET /probe", srv.authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			downstreamLogger.WarnContext(r.Context(), "cache fallback")
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Request-ID", "req-tenant-77")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+
+	var sawDownstream, sawAccess bool
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		var entry map[string]any
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("decode log: %v\n%s", err, line)
+		}
+		switch entry["msg"] {
+		case "cache fallback":
+			sawDownstream = true
+			if entry["request_id"] != "req-tenant-77" || entry["tenant_id"] != float64(77) || entry["service"] != "console" {
+				t.Errorf("downstream log = %+v", entry)
+			}
+		case "request":
+			sawAccess = true
+			if entry["request_id"] != "req-tenant-77" || entry["tenant_id"] != float64(77) ||
+				entry["actor"] != "api_key:10" || entry["route"] != "GET /probe" {
+				t.Errorf("access log missing enriched fields: %+v", entry)
+			}
+		}
+	}
+	if !sawDownstream || !sawAccess {
+		t.Fatalf("sawDownstream=%v sawAccess=%v\n%s", sawDownstream, sawAccess, buf.String())
 	}
 }

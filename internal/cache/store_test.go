@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"shortlink/internal/link"
+	"shortlink/internal/logx"
 )
 
 /*
@@ -859,3 +860,56 @@ func TestJitteredTTL(t *testing.T) {
 TestStoreGetByCodeSingleflightSurvivesLeaderCancel 固定共享回源不跟随领头取消：
 领头请求断开后，还在等待的请求应该拿到链接，而不是 context.Canceled。
 */
+
+func TestStoreGetByCodePopulatesRequestEvent(t *testing.T) {
+	rdb := newTestRedis(t)
+	code := newTestCode(t)
+	cleanupTestKey(t, rdb, code)
+
+	next := &fakeStore{get: func(_ context.Context, c string) (*link.Link, error) {
+		return &link.Link{ID: 7, Code: c, URL: "https://example.com"}, nil
+	}}
+	s := newTestStore(t, next, rdb)
+
+	// 1. miss
+	ctx, ev := logx.WithRequestEvent(context.Background())
+	if _, err := s.GetByCode(ctx, code); err != nil {
+		t.Fatalf("GetByCode miss: %v", err)
+	}
+	if got := ev.Snapshot().Cache; got != resultMiss {
+		t.Errorf("first GetByCode cache = %q, want %q", got, resultMiss)
+	}
+
+	// 2. hit
+	ctx, ev = logx.WithRequestEvent(context.Background())
+	if _, err := s.GetByCode(ctx, code); err != nil {
+		t.Fatalf("GetByCode hit: %v", err)
+	}
+	if got := ev.Snapshot().Cache; got != resultHit {
+		t.Errorf("second GetByCode cache = %q, want %q", got, resultHit)
+	}
+
+	// 3. neg_hit
+	if err := rdb.Set(context.Background(), keyPrefix+code, "null", time.Minute).Err(); err != nil {
+		t.Fatalf("set negative cache: %v", err)
+	}
+	ctx, ev = logx.WithRequestEvent(context.Background())
+	if _, err := s.GetByCode(ctx, code); !errors.Is(err, link.ErrNotFound) {
+		t.Fatalf("GetByCode neg_hit err = %v, want ErrNotFound", err)
+	}
+	if got := ev.Snapshot().Cache; got != "neg_hit" {
+		t.Errorf("neg_hit cache = %q, want neg_hit", got)
+	}
+
+	// 4. fallback (unavailable Redis)
+	badRDB := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = badRDB.Close() })
+	fallbackStore := newTestStore(t, next, badRDB)
+	ctx, ev = logx.WithRequestEvent(context.Background())
+	if _, err := fallbackStore.GetByCode(ctx, code); err != nil {
+		t.Fatalf("GetByCode fallback: %v", err)
+	}
+	if got := ev.Snapshot().Cache; got != resultFallback {
+		t.Errorf("fallback cache = %q, want %q", got, resultFallback)
+	}
+}

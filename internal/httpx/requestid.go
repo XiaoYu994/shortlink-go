@@ -5,10 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"shortlink/internal/logx"
 )
 
 // requestIDHeader 是响应里带回的请求编号，调用方报障时可以拿出这个值来查日志。
@@ -16,9 +17,6 @@ const requestIDHeader = "X-Request-ID"
 
 // maxRequestIDLen 限制调用方传入的编号长度，避免超长字符串把日志撑爆。
 const maxRequestIDLen = 128
-
-// requestIDContextKey 用空结构体做键，这样不会和别的包放进 context 的字符串键撞上。
-type requestIDContextKey struct{}
 
 /*
 requestID 为每个请求确定编号，写进响应头和 context。
@@ -42,13 +40,12 @@ func requestID() middleware {
 }
 
 func withRequestID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, requestIDContextKey{}, id)
+	return logx.WithRequestID(ctx, id)
 }
 
 // RequestIDFrom 从请求 context 取出当前请求的编号；不存在时返回空字符串。
 func RequestIDFrom(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDContextKey{}).(string)
-	return id
+	return logx.RequestIDFrom(ctx)
 }
 
 // validRequestID 只接受短的可见 ASCII，拒绝空格、换行和其他符号。
@@ -80,28 +77,4 @@ func newRequestID() string {
 		return fmt.Sprintf("fallback-%d-%d", time.Now().UnixNano(), n)
 	}
 	return hex.EncodeToString(buf[:])
-}
-
-/*
-requestIDHandler 从 context 取出编号，加到每一条带 context 的日志上。
-不带 context 的日志（例如启动日志）不会被加上 request_id。
-WithAttrs 和 WithGroup 必须继续包回这一层，否则 logger.With 会把这层丢掉。
-*/
-type requestIDHandler struct {
-	slog.Handler
-}
-
-func (h requestIDHandler) Handle(ctx context.Context, rec slog.Record) error {
-	if id := RequestIDFrom(ctx); id != "" {
-		rec.AddAttrs(slog.String("request_id", id))
-	}
-	return h.Handler.Handle(ctx, rec)
-}
-
-func (h requestIDHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return requestIDHandler{Handler: h.Handler.WithAttrs(attrs)}
-}
-
-func (h requestIDHandler) WithGroup(name string) slog.Handler {
-	return requestIDHandler{Handler: h.Handler.WithGroup(name)}
 }

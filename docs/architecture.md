@@ -29,7 +29,8 @@ shortlink/
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
-│   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、/healthz、/readyz、/debug/pprof/、ClientIP、优雅启停与 JSON/错误写出
+│   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、/healthz、/readyz、/debug/pprof/、/debug/log/level、ClientIP、优雅启停与 JSON/错误写出
+│   ├── logx/            # 结构化日志底座：根 slog 构造（text 接入 lmittmann/tint 自动识别 TTY/NO_COLOR、json 保持标准库、service 标签、LevelVar）、WithGroup 顶层 context 字段注入、RequestEvent 宽事件收集槽与敏感信息脱敏（零业务依赖）
 │   ├── redirector/      # 公开跳转进程 HTTP 层：GET /r/{code}、点击记录与只读 LinkStore、ClickRecorder 接口
 │   ├── console/         # 管理进程 HTTP 层：authHandler、orgHandler、memberHandler、invitationHandler、apiKeyHandler、auditHandler、webhandler、按租户限流、短链 CRUD 与统计；定义各消费方 Store/Client/Authorizer 接口
 │   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、OIDC 与 GitHub OAuth 2.0 客户端、权限表与成员规则
@@ -59,24 +60,25 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/redirector -> redirector, httpx, postgres, storemetrics, cache, click, config
-cmd/console    -> console, httpx, audit, identity, job, link, postgres, risk, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令和 worker 模式还要 cache/risk/job
+cmd/redirector -> redirector, httpx, logx, postgres, storemetrics, cache, click, config
+cmd/console    -> console, httpx, logx, audit, identity, job, link, postgres, risk, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令和 worker 模式还要 cache/risk/job
 cmd/migrate    -> golang-migrate
-config         -> postgres, cache, job, link, risk
+config         -> postgres, cache, job, link, logx, risk
 redirector     -> httpx, link, click, idgen, Prometheus
-console        -> httpx, audit, link, click, idgen, identity, tenant, golang.org/x/time/rate, Prometheus
-httpx          -> 标准库、Prometheus
-identity       -> tenant, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
+console        -> httpx, logx, audit, link, click, idgen, identity, tenant, golang.org/x/time/rate, Prometheus
+httpx          -> logx, 标准库、Prometheus
+identity       -> tenant, logx, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
 audit          -> 标准库
-job            -> 标准库、Prometheus
+job            -> logx, 标准库、Prometheus
 risk           -> cache, audit, job, link, golang.org/x/time/rate, go-redis, Prometheus
 postgres       -> audit, link, click, idgen, identity, job, tenant
 memorystore    -> link, idgen
 storemetrics   -> link
-cache          -> link
+cache          -> link, logx
 click          -> link、标准库、Prometheus
 link           -> 标准库
 idgen          -> 标准库
+logx           -> 标准库、github.com/lmittmann/tint
 ```
 
 `redirector.LinkStore` 与 `console.Store` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 与 `audit` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OrgStore`、`InvitationStore`、`APIKeyStore`、`AuditLogStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`identity.OIDCProvider`、`identity.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
@@ -88,8 +90,7 @@ idgen          -> 标准库
 ```txt
 POST /api/v1/links
   -> requestID
-  -> logging
-  -> metrics
+  -> observe（访问日志 + HTTP 指标）
   -> recoverer
   -> timeout
   -> authenticate：Authorization 优先走 API Key（忽略 sl_session 和 X-Org-ID）；否则校验唯一的 sl_session、CrossOriginProtection 与 X-Org-ID 成员关系，构造 identity.Principal 放进 context。会话路径的响应带 Cache-Control: no-store
@@ -109,8 +110,7 @@ POST /api/v1/links
 ```txt
 GET /r/{code}
   -> requestID
-  -> logging
-  -> metrics
+  -> observe（访问日志 + HTTP 指标）
   -> recoverer
   -> timeout
   -> handleRedirect
@@ -147,7 +147,7 @@ GET /api/v1/links/{code}/stats
   -> 200：日趋势和访客补零，设备和客户端固定类别
 ```
 
-`chain` 里靠前的中间件在外层。`requestID` 确定编号，写入响应头 `X-Request-ID` 和请求 context。`logging` 记录方法、路径、状态码和耗时；`metrics` 按路由模式、方法和状态码记录请求数和耗时，方法为 GET、HEAD、POST、PATCH、DELETE，其余记成 `other`。它放在 `recoverer` 外面，panic 被写成 500 后也能记到这个状态码；`recoverer` 把 handler 的 panic 写成 500。带 context 的日志会自动加上 `request_id`。`http.ErrAbortHandler` 会继续抛出，那是 `net/http` 用来中止当前连接的哨兵。
+`chain` 里靠前的中间件在外层。`requestID` 确定编号，写入响应头 `X-Request-ID` 和请求 context。`observe` 合并了访问日志（Canonical Log Line）与 HTTP 指标（共用单次 `statusWriter` 与耗时统计）：记录方法、路由模板、路径、状态码、毫秒耗时（`duration_ms`）、响应字节数、客户端 `ip`，并从请求内层的 `RequestEvent` 汇总 `tenant_id`、`actor`、`cache`、`retry_after` 与 `err_msg`；级别按 `>=500 -> Error`、慢请求 / 非放行 `4xx -> Warn`、`2xx/3xx` 与 `redirector` 404 -> `Info`、`/healthz`/`/readyz` 2xx -> `Debug`，且 `redirector` 支持正常 `INFO` 流量采样（`5xx` 与慢请求全保）。指标按路由模式、方法和状态码记录请求数和耗时，方法为 GET、HEAD、POST、PATCH、DELETE，其余记成 `other`。`observe` 放在 `recoverer` 外面，panic 被写成 500 后也能记到状态码和 `err_msg=panic`。各进程根日志器统一通过 `logx` 装配，本地 `text` 模式使用 `lmittmann/tint` 彩色可读格式（非终端或设 `NO_COLOR` 自动去色），生产 `json` 模式输出严格 JSON；带 context 的日志即使经过 `WithGroup` 也会在顶层自动带上 `request_id`、`tenant_id`、`job_id` 和 `job_kind`，并自动脱敏连接串密码与密钥；启用回环 `PPROF_ADDR` 时同时暴露 `GET/PUT /debug/log/level` 支持动态调级。`http.ErrAbortHandler` 会继续抛出，那是 `net/http` 用来中止当前连接的哨兵。
 
 `timeout` 在最里层，给请求 context 加处理时限。到点后 handler 里的数据库查询被取消（pgx 会中断正在执行的 SQL），handler 返回 504。`http.Server` 的 `ReadTimeout`、`WriteTimeout` 只管连接的读写，不会取消 handler 的 context，处理时限只能靠这一层。这两个连接超时都是 `REQUEST_TIMEOUT` 加 5 秒：读超时包住请求体，写超时留给 504 的写出。
 
@@ -183,6 +183,7 @@ GET /api/v1/links/{code}/stats
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
+- `ACCESS_LOG_SAMPLE_RATE` / `ACCESS_LOG_SLOW_THRESHOLD`：可选，仅 redirector 使用。控制正常 `INFO` 跳转访问日志的采样率（`[0, 1]`，默认 `1`）与慢请求门槛（默认 `200ms`，超门槛及 `5xx` 全量保留）
 - `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URL`：可选，仅 console 使用。三个要么全配、要么全空（只配一部分时启动失败）；可与 OIDC 独立启用或同时启用，两者都为空时不挂载登录、登出、/me、自助建组织、成员、邀请与 API Key 管理路由，只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)、[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）
 - `WEB_DIST_DIR`：可选，仅 console 使用。指向 `make web-build` 生成的静态目录后在 `/` 提供最小前端控制台 SPA，同时严格隔离 `/api/*`、`/r/*`、`/healthz`、`/readyz`、`/metrics`（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）

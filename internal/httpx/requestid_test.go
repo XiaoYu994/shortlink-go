@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"shortlink/internal/logx"
 )
 
 func TestRequestIDKeepsValidInboundHeader(t *testing.T) {
@@ -99,7 +101,7 @@ func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 
 func TestRequestIDTiesPanicAndAccessLog(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(requestIDHandler{Handler: slog.NewJSONHandler(&buf, nil)})
+	logger := slog.New(logx.WrapContext(slog.NewJSONHandler(&buf, nil)))
 	handler := chain(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}), requestID(), logging(logger), recoverer(logger))
@@ -116,7 +118,7 @@ func TestRequestIDTiesPanicAndAccessLog(t *testing.T) {
 
 func TestRequestIDAbsentWithoutContext(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(requestIDHandler{Handler: slog.NewJSONHandler(&buf, nil)})
+	logger := slog.New(logx.WrapContext(slog.NewJSONHandler(&buf, nil)))
 	logger.Info("listening")
 
 	if got := RequestIDFrom(context.Background()); got != "" {
@@ -125,6 +127,32 @@ func TestRequestIDAbsentWithoutContext(t *testing.T) {
 	entry := oneLogEntry(t, &buf)
 	if _, ok := entry["request_id"]; ok {
 		t.Errorf("startup log has request_id: %+v", entry)
+	}
+}
+
+func TestNewWithLogxLoggerDoesNotDuplicateRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	baseLogger, _ := logx.New(&buf, logx.Options{Format: logx.FormatJSON, Level: slog.LevelInfo, Service: "redirector"})
+	srv := New(baseLogger, 5*time.Second, newTestRegistry())
+	handler := srv.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+			srv.Logger().InfoContext(r.Context(), "inside handler")
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	req.Header.Set(requestIDHeader, "req-dedup-01")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("log lines = %d, want 2:\n%s", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		if count := strings.Count(string(line), `"request_id"`); count != 1 {
+			t.Errorf("request_id appeared %d times in line: %s", count, line)
+		}
 	}
 }
 

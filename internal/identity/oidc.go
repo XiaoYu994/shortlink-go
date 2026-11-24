@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"shortlink/internal/logx"
 )
 
 const (
@@ -40,6 +43,21 @@ type OIDCConfig struct {
 	RedirectURL  string
 	// HTTPClient 可选，用于发现文档、令牌交换和 JWKS 拉取；为空时使用带超时的默认客户端。
 	HTTPClient *http.Client
+}
+
+// LogValue 掩码 ClientSecret，防止日志直接打印 OIDCConfig 时泄漏密钥。
+func (c OIDCConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("issuer", c.Issuer),
+		slog.String("client_id", c.ClientID),
+		slog.String("client_secret", logx.RedactSecret(c.ClientSecret)),
+		slog.String("redirect_url", c.RedirectURL),
+	)
+}
+
+// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 ClientSecret。
+func (c OIDCConfig) String() string {
+	return c.LogValue().String()
 }
 
 // OAuthFlow 保存纯 OAuth 2.0 授权码登录生成的随机 state 和 PKCE code_verifier（没有 ID Token，所以不需要 nonce）。

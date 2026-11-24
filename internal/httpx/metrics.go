@@ -49,34 +49,11 @@ func newHTTPMetrics(registry *prometheus.Registry) *httpMetrics {
 	return m
 }
 
-/*
-httpMiddleware 记录请求数和耗时。
-label 只放取值有限的维度：route 用 ServeMux 的模式，未匹配统一记成 unmatched；
-短码和 request_id 不做 label。方法收成有限集合，见 methodLabel。
-中间件放在 recoverer 外层，panic 被 recoverer 写成 500 后才能记到这个状态码。
-*/
-func (m *httpMetrics) httpMiddleware(mux *http.ServeMux) middleware {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 抓取请求不算业务请求，别让 /metrics 自己变成一条时间序列。
-			if isMetricsRequest(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			start := time.Now()
-			sw := &statusWriter{ResponseWriter: w}
-			defer func() {
-				status := responseStatus(sw, r)
-				route := routePattern(mux, r)
-				method := methodLabel(r.Method)
-				statusLabel := strconv.Itoa(status)
-				m.requests.WithLabelValues(route, method, statusLabel).Inc()
-				m.duration.WithLabelValues(route, method, statusLabel).Observe(time.Since(start).Seconds())
-			}()
-			next.ServeHTTP(sw, r)
-		})
-	}
+func (m *httpMetrics) observe(route, method string, status int, dur time.Duration) {
+	method = methodLabel(method)
+	statusLabel := strconv.Itoa(status)
+	m.requests.WithLabelValues(route, method, statusLabel).Inc()
+	m.duration.WithLabelValues(route, method, statusLabel).Observe(dur.Seconds())
 }
 
 /*

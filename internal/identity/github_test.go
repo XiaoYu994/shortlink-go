@@ -1,10 +1,14 @@
 package identity_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"shortlink/internal/identity"
@@ -262,4 +266,19 @@ func TestGitHubProviderClassifiesErrors(t *testing.T) {
 			t.Fatalf("canceled ctx err = %v, want context.Canceled", err)
 		}
 	})
+}
+
+func TestGitHubConfigRedactsSecret(t *testing.T) {
+	cfg := identity.GitHubConfig{
+		ClientID:     "gh-client",
+		ClientSecret: "github-secret-value",
+		RedirectURL:  "https://console.example.com/api/v1/auth/github/callback",
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("github", "cfg", cfg)
+
+	combined := buf.String() + "\n" + fmt.Sprintf("%+v", cfg)
+	if strings.Contains(combined, "github-secret-value") {
+		t.Fatalf("GitHubConfig leaked client secret: %s", combined)
+	}
 }

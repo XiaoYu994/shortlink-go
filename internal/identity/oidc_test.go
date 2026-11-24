@@ -1,10 +1,14 @@
 package identity_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"shortlink/internal/identity"
@@ -203,5 +207,21 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 				t.Errorf("outage was classified as authentication failure: %v", err)
 			}
 		})
+	}
+}
+
+func TestOIDCConfigRedactsSecret(t *testing.T) {
+	cfg := identity.OIDCConfig{
+		Issuer:       "https://dex.example.com",
+		ClientID:     "shortlink-console",
+		ClientSecret: "oidc-secret-value",
+		RedirectURL:  "https://console.example.com/api/v1/auth/callback",
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("oidc", "cfg", cfg)
+
+	combined := buf.String() + "\n" + fmt.Sprintf("%+v", cfg)
+	if strings.Contains(combined, "oidc-secret-value") {
+		t.Fatalf("OIDCConfig leaked client secret: %s", combined)
 	}
 }

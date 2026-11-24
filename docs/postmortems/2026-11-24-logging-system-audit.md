@@ -2,7 +2,7 @@
 
 - 日期：2026-11-24
 - 来源：架构审查（对照 Stripe Canonical Log Lines、Caddy / Envoy 数据面采样、Prometheus / Kubernetes、Go `log/slog` 与 OpenTelemetry 最佳实践）
-- 状态：待演进（已纳入路线图 [阶段 16](../roadmap.md#阶段-16租户隔离兜底与可观测性待立-adr)）
+- 状态：Phase A / B 已落地（Phase C 待在路线图 [阶段 16](../roadmap.md#阶段-16租户隔离兜底与可观测性待立-adr) 与 OpenTelemetry 合流）
 - 关联：[ADR 0005](../adr/0005-prometheus-before-tracing.md)、[ADR 0023](../adr/0023-audit-logs.md)、[internal/httpx/logging.go](../../internal/httpx/logging.go)、[internal/httpx/requestid.go](../../internal/httpx/requestid.go)、[internal/config/config.go](../../internal/config/config.go)
 
 ## 现状评估
@@ -81,14 +81,15 @@
 1. **安全/业务审计日志（`audit_logs` 表，阶段 14 已落地）**：只记录会改变持久化状态的组织/短链/成员/密钥行为，追求事务强一致与长期可追溯。
 2. **指标与直方图（Prometheus `/metrics`，阶段 5 已落地）**：承载高频聚合统计（QPS、P99、缓存命中率、队列堆积、连接池水位）。
 3. **运行与访问日志（`slog` 结构化流）**：负责故障排障、慢请求宽事件与异步任务轨迹，按下面三步渐进演进：
-   - **Phase A（快速止血，无需改架构）**：
+   - **Phase A（快速止血，无需改架构，已落地）**：
      - 抽出轻量的根日志上下文包装并放到 `BaseConfig.NewLogger` 统一装配，绑定固定 `service`（`redirector` / `console` / `console-worker`）和 `slog.LevelVar`，修复 `cache.Store` 与 `worker`/`risk` 丢失关联 ID 的问题；
      - 在 JSON 输出中规范 `duration_ms`；启动 fatal 错误沿用环境变量配置的 handler（`LOG_FORMAT`）；
      - `/healthz` 和 `/readyz` 成功（200）访问日志降为 `Debug`；`WriteJSON` 遇到客户端断连（`EPIPE`/`ECONNRESET`/`context.Canceled`）降为 `Debug`；
      - 配置及密钥类型实现 `slog.LogValuer` 脱敏。
-   - **Phase B（高并发与可分析性增强）**：
-     - 升级 `httpx/logging` 为 Canonical Log Line：复用 `routePattern`，补充 `bytes_written`，收集内层 `authenticate` 写出的 `tenant_id`/`actor_kind` 及限流/缓存摘要，并按 `>=500 -> Error`、`>=400 -> Warn`、`2xx/3xx -> Info` 分级；
-     - 为 `redirector` 增加访问日志采样与慢请求全保门槛（如 `ACCESS_LOG_SAMPLE_RATE` + `ACCESS_LOG_SLOW_THRESHOLD`）。
+   - **Phase B（高并发与可分析性增强，已落地）**：
+     - 本地 `text` 格式接入 `github.com/lmittmann/tint` 彩色可读终端输出（自动识别 TTY / `NO_COLOR`），`json` 保持严格结构化；
+     - 合并 `httpx` 日志与指标中间件，升级为 Canonical Log Line（`logx.RequestEvent`）：复用 `routePattern`、补充 `bytes` / `ip`，收集 `tenant_id`、`actor`、`cache`、`retry_after`、`err_msg`，并按 `>=500 -> Error`、`>=400` / 慢请求 `-> Warn`、`2xx/3xx` 与 `redirector` 404 `-> Info` 分级；
+     - 为 `redirector` 增加 `ACCESS_LOG_SAMPLE_RATE` 与 `ACCESS_LOG_SLOW_THRESHOLD` 慢请求/异常全保采样策略。
    - **Phase C（与阶段 16 OpenTelemetry 合流）**：
      - 在统一 `ContextHandler` 内接入 `trace.SpanFromContext(ctx)`，自动输出 `trace_id`、`span_id`，配合已有 `request_id`，打通 **审计日志 <-> 进程结构化日志 <-> 分布式链路追踪**。
 

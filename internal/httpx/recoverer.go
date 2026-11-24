@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+
+	"shortlink/internal/logx"
 )
 
 /*
@@ -26,6 +28,7 @@ func recoverer(logger *slog.Logger) middleware {
 				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 					panic(rec)
 				}
+				logx.SetError(r.Context(), "panic")
 				logger.ErrorContext(r.Context(), "panic",
 					"err", rec,
 					"method", r.Method,

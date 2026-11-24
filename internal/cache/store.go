@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"shortlink/internal/link"
+	"shortlink/internal/logx"
 )
 
 const (
@@ -268,12 +269,17 @@ func (s *Store) GetByCode(ctx context.Context, code string) (*link.Link, error) 
 			带着停用或封禁信息的正缓存也按找不到处理，防写缓存的地方漏判。
 		*/
 		if cached == nil || !cached.Servable(time.Now()) {
+			logx.SetCacheResult(ctx, "neg_hit")
 			if cached != nil {
 				_ = s.rdb.Del(ctx, key).Err()
 			}
 			return nil, link.ErrNotFound
 		}
+		logx.SetCacheResult(ctx, resultHit)
 		return cached, nil
+	}
+	if result != resultSkipped {
+		logx.SetCacheResult(ctx, result)
 	}
 
 	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数。

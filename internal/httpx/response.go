@@ -6,6 +6,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"syscall"
+
+	"shortlink/internal/logx"
 )
 
 type errorResponse struct {
@@ -37,12 +40,24 @@ func WriteJSON(logger *slog.Logger, ctx context.Context, w http.ResponseWriter, 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := w.Write(data); err != nil {
+		if isClientDisconnect(ctx, err) {
+			logger.DebugContext(ctx, "write JSON response canceled by client", "err", err)
+			return
+		}
 		logger.ErrorContext(ctx, "write JSON response", "err", err)
 	}
 }
 
-// WriteError 统一输出 {"error": msg} 格式的 JSON 错误响应。
+func isClientDisconnect(ctx context.Context, err error) bool {
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return true
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
+// WriteError 统一输出 {"error": msg} 格式的 JSON 错误响应，并在请求宽事件里记录 err_msg。
 func WriteError(logger *slog.Logger, ctx context.Context, w http.ResponseWriter, status int, msg string) {
+	logx.SetError(ctx, msg)
 	WriteJSON(logger, ctx, w, status, errorResponse{Error: msg})
 }
 

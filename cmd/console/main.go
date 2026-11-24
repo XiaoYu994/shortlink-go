@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 
 	"shortlink/internal/audit"
 	"shortlink/internal/cache"
+	"shortlink/internal/logx"
 	"shortlink/internal/postgres"
 )
 
@@ -43,7 +43,7 @@ func main() {
 			os.Exit(2)
 		}
 		if err := runServe(); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+			logx.NewFallback(os.Stderr, "console").Error("fatal", "err", err)
 			os.Exit(1)
 		}
 		return
@@ -60,7 +60,7 @@ func main() {
 			return
 		}
 		if err := runWorker(opts); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+			logx.NewFallback(os.Stderr, "console-worker").Error("fatal", "err", err)
 			os.Exit(1)
 		}
 		return
@@ -159,7 +159,7 @@ func openLinkStore(ctx context.Context) (linkStore, io.Closer, error) {
 	}
 	store := cache.New(postgres.NewStore(db), rdb, prometheus.NewRegistry(), cache.Options{
 		// 复查读库失败要留一条日志；标准错误和命令结果分开。
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Logger: logx.NewFallback(os.Stderr, "console-cli"),
 	})
 	return store, multiCloser{db, rdb}, nil
 }

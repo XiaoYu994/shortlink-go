@@ -10,6 +10,7 @@ import (
 	"shortlink/internal/audit"
 	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
+	"shortlink/internal/logx"
 )
 
 const orgIDHeader = "X-Org-ID"
@@ -104,7 +105,9 @@ func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request, next
 		return
 	}
 	auditCtx := audit.WithMeta(r.Context(), audit.APIKeyMeta(p.ActorID, httpx.RequestIDFrom(r.Context())))
-	next.ServeHTTP(w, r.WithContext(withPrincipal(auditCtx, p)))
+	logx.SetActor(auditCtx, p.Tenant.ID, string(p.ActorKind), p.ActorID)
+	reqCtx := logx.WithTenantID(withPrincipal(auditCtx, p), p.Tenant.ID)
+	next.ServeHTTP(w, r.WithContext(reqCtx))
 }
 
 func (s *Server) authenticateSession(w http.ResponseWriter, r *http.Request, next http.Handler) {
@@ -170,7 +173,9 @@ func (s *Server) authenticateSession(w http.ResponseWriter, r *http.Request, nex
 		return
 	}
 	auditCtx := audit.WithMeta(r.Context(), audit.UserMeta(p.ActorID, httpx.RequestIDFrom(r.Context())))
-	next.ServeHTTP(w, r.WithContext(withPrincipal(auditCtx, p)))
+	logx.SetActor(auditCtx, p.Tenant.ID, string(p.ActorKind), p.ActorID)
+	reqCtx := logx.WithTenantID(withPrincipal(auditCtx, p), p.Tenant.ID)
+	next.ServeHTTP(w, r.WithContext(reqCtx))
 }
 
 func checkCrossOrigin(logger *slog.Logger, csrf *http.CrossOriginProtection, w http.ResponseWriter, r *http.Request) bool {

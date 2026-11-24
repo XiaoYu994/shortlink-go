@@ -1,8 +1,11 @@
 package job
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +14,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"shortlink/internal/logx"
 )
 
 type fakeQueue struct {
@@ -632,6 +637,88 @@ func TestRunnerReaperDrainsAcrossBatches(t *testing.T) {
 
 		if got := testutil.ToFloat64(runner.reaped.WithLabelValues(KindLinkRiskScan)); got != 5 {
 			t.Errorf("reaped = %v, want 5 across batches", got)
+		}
+	})
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+
+func TestRunnerInjectsJobContextIntoLogs(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf lockedBuffer
+		logger, _ := logx.New(&buf, logx.Options{Format: logx.FormatJSON, Level: slog.LevelInfo, Service: "console-worker"})
+		downstream := logger.With("component", "verdict_cache")
+
+		q := newFakeQueue()
+		tenantID := int64(42)
+		jobID := q.add(Job{Kind: KindLinkRiskScan, TenantID: &tenantID, MaxAttempts: 2})
+
+		doneCh := make(chan struct{})
+		runner := New(q, map[string]Handler{
+			KindLinkRiskScan: func(ctx context.Context, _ Job) error {
+				downstream.WarnContext(ctx, "downstream cache miss")
+				close(doneCh)
+				return errors.New("temporary fetch failure")
+			},
+		}, logger, prometheus.NewRegistry(), Options{
+			Concurrency:     1,
+			PollInterval:    20 * time.Millisecond,
+			BaseBackoff:     time.Second,
+			MetricsInterval: time.Hour,
+			ReapInterval:    time.Hour,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- runner.Run(ctx) }()
+
+		<-doneCh
+		synctest.Wait()
+		cancel()
+		if err := <-errCh; err != nil {
+			t.Fatalf("Run error = %v", err)
+		}
+
+		var sawHandler, sawRetry bool
+		for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			var entry map[string]any
+			if err := json.Unmarshal(line, &entry); err != nil {
+				t.Fatalf("decode log: %v\n%s", err, line)
+			}
+			switch entry["msg"] {
+			case "downstream cache miss":
+				sawHandler = true
+				if entry["job_id"] != float64(jobID) || entry["job_kind"] != KindLinkRiskScan ||
+					entry["tenant_id"] != float64(42) || entry["service"] != "console-worker" {
+					t.Errorf("handler log = %+v", entry)
+				}
+			case "job scheduled for retry":
+				sawRetry = true
+				if entry["job_id"] != float64(jobID) || entry["job_kind"] != KindLinkRiskScan || entry["tenant_id"] != float64(42) {
+					t.Errorf("retry log = %+v", entry)
+				}
+			}
+		}
+		if !sawHandler || !sawRetry {
+			t.Fatalf("sawHandler=%v sawRetry=%v\n%s", sawHandler, sawRetry, string(buf.Bytes()))
 		}
 	})
 }

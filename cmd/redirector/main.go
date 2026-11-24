@@ -25,6 +25,7 @@ import (
 	"shortlink/internal/click"
 	"shortlink/internal/config"
 	"shortlink/internal/httpx"
+	"shortlink/internal/logx"
 	"shortlink/internal/postgres"
 	"shortlink/internal/redirector"
 	"shortlink/internal/storemetrics"
@@ -33,7 +34,7 @@ import (
 func main() {
 	// 逻辑都放在 run 里并返回 error，这样 run 里的 defer 才会执行。
 	if err := run(); err != nil {
-		slog.Error("fatal", "err", err)
+		logx.NewFallback(os.Stderr, "redirector").Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
@@ -43,7 +44,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger := cfg.NewLogger(os.Stdout)
+	logger, levelVar := cfg.NewLoggerWithService(os.Stdout, "redirector")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	db, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.Pool)
@@ -100,10 +101,13 @@ func run() error {
 		FetchTimeout:    cfg.CacheFetchTimeout,
 		Logger:          logger,
 	})
+	sampleRate := cfg.AccessLogSampleRate
 	srv := redirector.New(logger, store, cfg.RequestTimeout, registry, redirector.Options{
-		Clicks:            clicks,
-		VisitorSalt:       []byte(cfg.VisitorSalt),
-		TrustProxyHeaders: cfg.TrustProxyHeaders,
+		Clicks:                 clicks,
+		VisitorSalt:            []byte(cfg.VisitorSalt),
+		TrustProxyHeaders:      cfg.TrustProxyHeaders,
+		AccessLogSampleRate:    &sampleRate,
+		AccessLogSlowThreshold: cfg.AccessLogSlowThreshold,
 	})
 	/*
 		跳转进程的 /readyz 不探 PostgreSQL 和 Redis，走到这里（两边都连上了）就算就绪。
@@ -114,7 +118,7 @@ func run() error {
 	srv.SetReadiness()
 
 	if cfg.PprofAddr != "" {
-		stopPprof, err := servePprof(cfg.PprofAddr, logger)
+		stopPprof, err := servePprof(cfg.PprofAddr, logger, levelVar)
 		if err != nil {
 			return err
 		}
@@ -153,7 +157,7 @@ block 和 mutex profile 默认关闭，不打开的话对应端点返回的是�
 goroutine 的退出点：返回的函数调用 Close，Serve 随之返回 ErrServerClosed。
 这里不等在途的采样，进程退出时剖析请求直接断开。
 */
-func servePprof(addr string, logger *slog.Logger) (func(), error) {
+func servePprof(addr string, logger *slog.Logger, levelVar *slog.LevelVar) (func(), error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen pprof: %w", err)
@@ -162,7 +166,7 @@ func servePprof(addr string, logger *slog.Logger) (func(), error) {
 	runtime.SetMutexProfileFraction(mutexProfileFraction)
 
 	srv := &http.Server{
-		Handler:           httpx.PprofHandler(),
+		Handler:           httpx.DebugHandler(levelVar),
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

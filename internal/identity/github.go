@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"golang.org/x/oauth2"
+
+	"shortlink/internal/logx"
 )
 
 const (
@@ -41,6 +44,20 @@ type GitHubConfig struct {
 	TokenURL   string
 	APIBaseURL string
 	HTTPClient *http.Client
+}
+
+// LogValue 掩码 ClientSecret，防止日志直接打印 GitHubConfig 时泄漏密钥。
+func (c GitHubConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("client_id", c.ClientID),
+		slog.String("client_secret", logx.RedactSecret(c.ClientSecret)),
+		slog.String("redirect_url", c.RedirectURL),
+	)
+}
+
+// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 ClientSecret。
+func (c GitHubConfig) String() string {
+	return c.LogValue().String()
 }
 
 /*

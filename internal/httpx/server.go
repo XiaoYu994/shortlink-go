@@ -15,14 +15,25 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"shortlink/internal/logx"
 )
 
-// metricsPath 是抓取路径。logging 和 HTTP 指标跳过它，避免抓取污染业务指标。
-const metricsPath = "/metrics"
+const (
+	healthzPath = "/healthz"
+	readyzPath  = "/readyz"
+	// metricsPath 是抓取路径。logging 和 HTTP 指标跳过它，避免抓取污染业务指标。
+	metricsPath = "/metrics"
+)
 
 // isMetricsRequest 判断请求是否打到抓取端点；logging 和 HTTP 指标都跳过它。
 func isMetricsRequest(r *http.Request) bool {
 	return r.URL.Path == metricsPath
+}
+
+// isProbeRequest 判断请求是否打到存活或就绪探针。
+func isProbeRequest(r *http.Request) bool {
+	return r.URL.Path == healthzPath || r.URL.Path == readyzPath
 }
 
 /*
@@ -32,6 +43,7 @@ Server 提供两个进程共用的 HTTP 底座：已包装 requestIDHandler 的 
 */
 type Server struct {
 	logger         *slog.Logger
+	accessLog      accessLogger
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
@@ -49,20 +61,34 @@ type Server struct {
 }
 
 /*
-New 创建 HTTP 底座：给 logger 套上 requestIDHandler，并在 registry 上注册一次 HTTP 指标。
+New 创建 HTTP 底座：给 logger 幂等套上 logx.WrapContext，并在 registry 上注册一次 HTTP 指标。
 requestTimeout 是每个请求的处理时限，由 timeout 中间件执行，必须为正。
 registry 由 main 创建并注入，测试每次传一个新的 Registry，避免同名指标重复注册。
 */
 func New(logger *slog.Logger, requestTimeout time.Duration, registry *prometheus.Registry) *Server {
+	var handler slog.Handler
+	if logger != nil {
+		handler = logger.Handler()
+	}
+	wrapped := slog.New(logx.WrapContext(handler))
 	return &Server{
-		logger:         slog.New(requestIDHandler{Handler: logger.Handler()}),
+		logger: wrapped,
+		accessLog: newAccessLogger(wrapped, AccessLogOptions{
+			SampleRate:    1,
+			SlowThreshold: DefaultSlowRequestThreshold,
+		}),
 		requestTimeout: requestTimeout,
 		registry:       registry,
 		metrics:        newHTTPMetrics(registry),
 	}
 }
 
-// Logger 返回已经包好 requestIDHandler 的日志器；带请求 context 的日志会自动写上 request_id。
+// SetAccessLog 配置 HTTP 访问日志的分级、采样与慢请求门槛。
+func (s *Server) SetAccessLog(opts AccessLogOptions) {
+	s.accessLog = newAccessLogger(s.logger, opts)
+}
+
+// Logger 返回已经包好上下文提取器的日志器；带请求 context 的日志会自动写上关联字段。
 func (s *Server) Logger() *slog.Logger {
 	return s.logger
 }
@@ -82,26 +108,49 @@ func (s *Server) Handler(register func(mux *http.ServeMux)) http.Handler {
 
 // registerOperational 注册两个进程都有的运维端点。
 func (s *Server) registerOperational(mux *http.ServeMux) {
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET "+healthzPath, s.handleHealthz)
+	mux.HandleFunc("GET "+readyzPath, s.handleReadyz)
 	// /metrics 用注入的 Registry；promhttp.Handler() 抓的是 DefaultGatherer，注入的指标不会出现。
 	mux.Handle("GET "+metricsPath, promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 }
 
 /*
 withMiddleware 给一组路由套上中间件。
-requestID 在最外层，里面的 logging、recoverer 和 handler 拿到的 context 里已经有编号。
-logging 在 recoverer 外面：panic 被写成 500 之后，访问日志里的状态码也是 500。
-HTTP 指标也放在 recoverer 外面，才能把 recoverer 写的 500 记进去。
+requestID 在最外层，里面的 observe、recoverer 和 handler 拿到的 context 里已经有编号。
+observe 合并了访问日志和 HTTP 指标（共用同一次 statusWriter 与耗时统计），
+放在 recoverer 外面：panic 被写成 500 之后，访问日志和指标里的状态码也是 500。
 timeout 在最里层：它只约束 handler，日志和 panic 兜底要完整执行，不能被时限打断。
-mux 必须是这组路由自己的，指标中间件靠它查路由模式。
+mux 必须是这组路由自己的，observe 靠它查路由模式。
 */
 func (s *Server) withMiddleware(mux *http.ServeMux) http.Handler {
 	return chain(mux,
 		requestID(),
-		logging(s.logger),
-		s.metrics.httpMiddleware(mux),
+		s.observe(mux),
 		recoverer(s.logger),
 		timeout(s.requestTimeout),
 	)
+}
+
+func (s *Server) observe(mux *http.ServeMux) middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isMetricsRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			ctx, ev := logx.WithRequestEvent(r.Context())
+			r = r.WithContext(ctx)
+			start := time.Now()
+			sw := &statusWriter{ResponseWriter: w}
+			defer func() {
+				dur := time.Since(start)
+				status := responseStatus(sw, r)
+				route := routePattern(mux, r)
+				s.metrics.observe(route, r.Method, status, dur)
+				s.accessLog.log(r.Context(), r, route, status, sw.bytes, dur, ev.Snapshot())
+			}()
+			next.ServeHTTP(sw, r)
+		})
+	}
 }

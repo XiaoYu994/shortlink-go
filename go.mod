@@ -6,6 +6,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.12.0
+	github.com/lmittmann/tint v1.2.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/redis/go-redis/v9 v9.23.0
