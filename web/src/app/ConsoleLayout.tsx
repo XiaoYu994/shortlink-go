@@ -29,6 +29,7 @@ import { useLogout } from '@/features/auth/api';
 import { canManageAPIKeys, canReadAuditLogs, ROLE_LABELS } from '@/features/auth/permissions';
 import { setLastOrgId } from '@/features/orgs/api';
 import { CreateOrgDialog } from '@/features/orgs/CreateOrgDialog';
+import { getErrorMessage } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
 import { formatNumber } from '@/lib/format';
 import { useCurrentOrg } from './org-context';
@@ -76,8 +77,9 @@ export function ConsoleLayout() {
     try {
       await logout.mutateAsync();
       toast.success('已退出登录');
-    } finally {
       navigate(routes.login(), { replace: true });
+    } catch (err) {
+      toast.error(getErrorMessage(err));
     }
   }
 
@@ -294,7 +296,7 @@ export function ConsoleLayout() {
 
         <div className="flex-1 bg-white lg:rounded-2xl lg:shadow-[0_1px_3px_rgba(0,0,0,0.03)] lg:ring-1 lg:ring-zinc-200/80">
           <main className="mx-auto w-full max-w-5xl px-4 py-7 sm:px-8 lg:px-10">
-            <Outlet />
+            <Outlet key={org.id} />
           </main>
         </div>
       </div>

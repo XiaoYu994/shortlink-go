@@ -115,15 +115,21 @@ export function LinkCard({
 
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-zinc-500">
             <CornerDownRight className="size-3 shrink-0 text-zinc-400" />
-            <a
-              href={link.url}
-              target="_blank"
-              rel="noreferrer"
-              title={link.url}
-              className="truncate hover:text-zinc-800 hover:underline"
-            >
-              {link.url}
-            </a>
+            {isBanned ? (
+              <span title={link.url} className="truncate text-zinc-400 line-through">
+                {link.url}
+              </span>
+            ) : (
+              <a
+                href={link.url}
+                target="_blank"
+                rel="noreferrer"
+                title={link.url}
+                className="truncate hover:text-zinc-800 hover:underline"
+              >
+                {link.url}
+              </a>
+            )}
             <span className="hidden shrink-0 text-zinc-300 sm:inline">·</span>
             <span
               title={`创建于 ${formatDateTime(link.created_at)}`}

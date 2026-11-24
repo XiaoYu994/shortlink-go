@@ -82,7 +82,7 @@ export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: postLogout,
-    onSettled: () => {
+    onSuccess: () => {
       queryClient.clear();
     },
   });

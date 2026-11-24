@@ -45,9 +45,14 @@ export function translateAPIError(raw: string, status?: number): string {
   if (key.includes('invalid url') || key.includes('url is required')) {
     return '请输入有效的 http 或 https 链接地址';
   }
+  if (key === 'failed to fetch' || key.includes('networkerror') || key.includes('load failed')) {
+    return '网络连接失败，请检查网络或服务状态后重试';
+  }
+  if (status === 400) return '请求参数无效，请检查输入后重试';
   if (status === 401) return '登录状态已失效，请重新登录';
   if (status === 403) return '你当前的角色没有执行此操作的权限';
+  if (status === 404) return '请求的资源不存在或已被移除';
   if (status === 429) return '操作过于频繁，请稍候片刻再试';
   if (status !== undefined && status >= 500) return '服务暂时不可用，请稍后重试';
-  return raw || '请求失败，请稍后重试';
+  return '请求失败，请稍后重试';
 }

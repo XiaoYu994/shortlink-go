@@ -16,12 +16,7 @@ import { getErrorMessage } from '@/lib/api-client';
 import { ENDPOINTS } from '@/lib/endpoints';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import { useAuthProviders, useMe } from './api';
-
-function sanitizeReturnTo(raw: string | null): string {
-  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return '/';
-  if (raw.startsWith('/api') || raw.startsWith('/r/') || raw === '/r') return '/';
-  return raw;
-}
+import { sanitizeReturnTo } from './return-to';
 
 export function LoginPage() {
   useDocumentTitle('登录');

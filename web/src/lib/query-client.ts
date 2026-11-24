@@ -1,5 +1,16 @@
-import { QueryClient } from '@tanstack/react-query';
+import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query';
 import { APIError } from './api-client';
+
+export interface QueryClientOptions {
+  // 当接口返回 403 或 organization not found 404 时回调，由装配层决定如何刷新会话权限视图。
+  onOrgAccessDenied?: () => void;
+}
+
+function isOrgAccessDenied(error: unknown): boolean {
+  if (!(error instanceof APIError)) return false;
+  if (error.status === 403) return true;
+  return error.status === 404 && error.rawMessage === 'organization not found';
+}
 
 /*
   TanStack Query 的全局实例工厂（类比后端里的缓存客户端 + 默认策略配置）。
@@ -8,8 +19,16 @@ import { APIError } from './api-client';
   2. 自动透传 AbortSignal，解决快速切换组织/排序时的“旧请求晚返回覆盖新数据”竞态；
   3. 明确区分「服务端状态（来自 API）」与「客户端 UI 状态（弹窗开关、输入草稿）」。
 */
-export function createQueryClient(): QueryClient {
+export function createQueryClient(opts: QueryClientOptions = {}): QueryClient {
+  const handleError = (error: unknown) => {
+    if (isOrgAccessDenied(error)) {
+      opts.onOrgAccessDenied?.();
+    }
+  };
+
   return new QueryClient({
+    queryCache: new QueryCache({ onError: handleError }),
+    mutationCache: new MutationCache({ onError: handleError }),
     defaultOptions: {
       queries: {
         // 30 秒内视为新鲜，切回页面不会立刻闪烁重载；写操作后由 mutation 主动 invalidate。

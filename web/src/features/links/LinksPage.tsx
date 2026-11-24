@@ -84,10 +84,20 @@ export function LinksPage() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [writable, formOpen, deletingLink, qrLink]);
 
-  const allLinks = useMemo(
-    () => linksQuery.data?.pages.flatMap((page) => page.items) ?? [],
-    [linksQuery.data],
-  );
+  const allLinks = useMemo(() => {
+    const pages = linksQuery.data?.pages;
+    if (!pages) return [];
+    const seen = new Set<string>();
+    const deduped: AdminLink[] = [];
+    for (const page of pages) {
+      for (const item of page.items) {
+        if (seen.has(item.code)) continue;
+        seen.add(item.code);
+        deduped.push(item);
+      }
+    }
+    return deduped;
+  }, [linksQuery.data]);
 
   const trimmedSearch = search.trim();
   const filteredLinks = useMemo(() => {

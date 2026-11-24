@@ -129,4 +129,46 @@ describe('AuthGuard', () => {
       '/login?return_to=%2Forgs%2F3%2Fmembers',
     );
   });
+
+  it('keeps rendering workspace when background /me refetch fails with cached data', async () => {
+    let meCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === ENDPOINTS.auth.me) {
+        meCalls += 1;
+        if (meCalls === 1) {
+          return jsonResponse({
+            user: { id: 7, email: 'alice@example.com', name: 'Alice' },
+            expires_at: '2026-12-01T00:00:00Z',
+            organizations: [
+              { id: 3, name: 'Beta Org', role: 'owner', link_usage: 5, link_quota: 1000 },
+            ],
+          });
+        }
+        return jsonResponse({ error: 'internal error' }, 500);
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/orgs/3/links']}>
+          <Routes>
+            <Route path={ROUTE_PATTERNS.orgRoot} element={<OrgRouteGuard />}>
+              <Route path="links" element={<div data-testid="org-links-page">links</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByTestId('org-links-page')).toBeInTheDocument();
+
+    await queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
+    expect(await screen.findByTestId('org-links-page')).toBeInTheDocument();
+    expect(screen.queryByText(/加载会话失败/)).not.toBeInTheDocument();
+  });
 });

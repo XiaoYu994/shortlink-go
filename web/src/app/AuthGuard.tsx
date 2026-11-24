@@ -28,7 +28,7 @@ export function RootRedirect() {
 
   if (meQuery.isPending) return <FullPageLoading />;
 
-  if (meQuery.isError) {
+  if (meQuery.isError && !meQuery.data) {
     if (
       meQuery.error instanceof APIError &&
       (meQuery.error.status === 401 || meQuery.error.status === 404)
@@ -94,7 +94,7 @@ export function OrgRouteGuard() {
 
   if (meQuery.isPending) return <FullPageLoading />;
 
-  if (meQuery.isError) {
+  if (meQuery.isError && !meQuery.data) {
     if (
       meQuery.error instanceof APIError &&
       (meQuery.error.status === 401 || meQuery.error.status === 404)

@@ -170,4 +170,60 @@ describe('LinksPage', () => {
     await user.click(screen.getByRole('button', { name: '完成' }));
     expect(await screen.findByText('127.0.0.1:8080/r/New12345')).toBeInTheDocument();
   });
+
+  it('deduplicates overlapping items across cursor pages and does not render banned url as link', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/auth/providers') {
+        return jsonResponse({ oidc: true, github: false });
+      }
+      if (url.includes('cursor=p2')) {
+        return jsonResponse({
+          items: [
+            {
+              code: 'Dup11111',
+              url: 'https://example.com/dup',
+              status: 'active',
+              created_at: '2026-11-23T08:00:00Z',
+              clicks: 12,
+              clicks_today: 2,
+            },
+            {
+              code: 'Ban22222',
+              url: 'https://evil.example/phish',
+              status: 'banned',
+              ban_reason: 'phishing',
+              created_at: '2026-11-23T07:00:00Z',
+              clicks: 3,
+              clicks_today: 1,
+            },
+          ],
+        });
+      }
+      return jsonResponse({
+        items: [
+          {
+            code: 'Dup11111',
+            url: 'https://example.com/dup',
+            status: 'active',
+            created_at: '2026-11-23T08:00:00Z',
+            clicks: 10,
+            clicks_today: 1,
+          },
+        ],
+        next_cursor: 'p2',
+      });
+    });
+
+    renderWithOrg(<LinksPage />, { orgId: 2, role: 'member' });
+    expect(await screen.findByText('/r/Dup11111')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '加载更多短链' }));
+    expect(await screen.findByText('https://evil.example/phish')).toBeInTheDocument();
+    expect(screen.getAllByText('/r/Dup11111')).toHaveLength(1);
+    expect(
+      screen.queryByRole('link', { name: 'https://evil.example/phish' }),
+    ).not.toBeInTheDocument();
+  });
 });

@@ -75,7 +75,7 @@ export function fetchLinkStats(
   signal?: AbortSignal,
 ): Promise<LinkStats> {
   const to = new Date();
-  const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+  const from = new Date(to.getTime() - Math.max(days - 1, 0) * 24 * 60 * 60 * 1000);
   const q = new URLSearchParams({
     from: from.toISOString(),
     to: to.toISOString(),
