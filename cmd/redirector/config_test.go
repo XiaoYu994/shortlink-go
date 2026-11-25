@@ -41,6 +41,8 @@ func baseRedirectorTestEnv() map[string]string {
 		"ACCESS_LOG_SLOW_THRESHOLD": "",
 		"OIDC_ISSUER":               "",
 		"GITHUB_CLIENT_ID":          "",
+		"FEATURE_ANALYTICS":         "",
+		"FEATURE_RISK_SCAN":         "",
 	}
 }
 
@@ -58,6 +60,7 @@ func defaultRedirectorConfig() RedirectorConfig {
 			LogFormat:         config.LogFormatText,
 			CacheFetchTimeout: cache.DefaultFetchTimeout,
 		},
+		Features:               config.FeatureFlags{Analytics: true, RiskScan: true},
 		VisitorSalt:            "test-salt",
 		CacheMissConcurrency:   cache.DefaultMissConcurrency,
 		AccessLogSampleRate:    defaultAccessLogSampleRate,
@@ -117,6 +120,7 @@ func TestLoadRedirectorConfig(t *testing.T) {
 					LogFormat:         config.LogFormatJSON,
 					CacheFetchTimeout: 500 * time.Millisecond,
 				},
+				Features:               config.FeatureFlags{Analytics: true, RiskScan: true},
 				VisitorSalt:            "prod-salt",
 				TrustProxyHeaders:      true,
 				TrustedProxyCIDRs:      []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12")},
@@ -142,6 +146,21 @@ func TestLoadRedirectorConfig(t *testing.T) {
 			name: "pprof on localhost",
 			env:  map[string]string{"PPROF_ADDR": "localhost:6060"},
 			want: func() RedirectorConfig { c := defaults; c.PprofAddr = "localhost:6060"; return c }(),
+		},
+		{
+			name: "minimal mode allows empty redis and empty visitor salt when analytics disabled",
+			env: map[string]string{
+				"REDIS_URL":         "",
+				"FEATURE_ANALYTICS": "false",
+				"VISITOR_SALT":      "",
+			},
+			want: func() RedirectorConfig {
+				c := defaults
+				c.RedisURL = ""
+				c.Features.Analytics = false
+				c.VisitorSalt = ""
+				return c
+			}(),
 		},
 		{name: "ops addr collides with addr", env: map[string]string{"ADDR": ":8080", "OPS_ADDR": ":8080"}, wantErr: "OPS_ADDR must differ from ADDR"},
 		{name: "trusted cidrs without trust header", env: map[string]string{"TRUSTED_PROXY_CIDRS": "10.0.0.0/8"}, wantErr: "TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HEADERS=true"},
@@ -188,6 +207,7 @@ func TestLoadRedirectorConfig(t *testing.T) {
 
 func redirectorConfigEqual(a, b RedirectorConfig) bool {
 	return a.BaseConfig == b.BaseConfig &&
+		a.Features == b.Features &&
 		a.VisitorSalt == b.VisitorSalt &&
 		a.TrustProxyHeaders == b.TrustProxyHeaders &&
 		slices.Equal(a.TrustedProxyCIDRs, b.TrustedProxyCIDRs) &&

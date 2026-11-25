@@ -218,7 +218,7 @@ export VISITOR_SALT
 SMOKE_OIDC_ISSUER=${SMOKE_OIDC_ISSUER:-http://127.0.0.1:5556/dex}
 SMOKE_OIDC_CLIENT_ID=${SMOKE_OIDC_CLIENT_ID:-shortlink-console}
 SMOKE_OIDC_CLIENT_SECRET=${SMOKE_OIDC_CLIENT_SECRET:-shortlink-console-secret}
-SMOKE_OIDC_REDIRECT_URL=${SMOKE_OIDC_REDIRECT_URL:-$CONSOLE_BASE/api/v1/auth/callback}
+SMOKE_OIDC_REDIRECT_URL=${SMOKE_OIDC_REDIRECT_URL:-$CONSOLE_BASE/api/v1/auth/oidc/callback}
 SMOKE_OIDC_USER_EMAIL=${SMOKE_OIDC_USER_EMAIL:-alice@example.com}
 SMOKE_OIDC_USER_PASSWORD=${SMOKE_OIDC_USER_PASSWORD:-password}
 
@@ -255,6 +255,8 @@ OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
 OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
 OIDC_REDIRECT_URL=$SMOKE_OIDC_REDIRECT_URL \
 WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
+SMTP_HOST=127.0.0.1 \
+SMTP_FROM=noreply@shortlink.local \
 WEB_DIST_DIR=$TMP/webdist \
 	"$CONSOLE_BIN" serve --allow-test-host "$WEBHOOK_STUB_HOST" >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
@@ -534,10 +536,10 @@ oidc_cookies=$TMP/oidc_cookies.txt
 login_meta=$(curl -sS --max-time 10 -L \
 	-c "$oidc_cookies" -b "$oidc_cookies" \
 	-o "$TMP/dex_login.html" -w '%{http_code} %{url_effective}' \
-	"$CONSOLE_BASE/api/v1/auth/login") || fail '访问 /api/v1/auth/login 失败'
+	"$CONSOLE_BASE/api/v1/auth/oidc/login") || fail '访问 /api/v1/auth/oidc/login 失败'
 dex_status=${login_meta%% *}
 dex_login_url=${login_meta#* }
-assert_eq "$dex_status" 200 'GET /api/v1/auth/login 跳转 Dex 登录页状态码'
+assert_eq "$dex_status" 200 'GET /api/v1/auth/oidc/login 跳转 Dex 登录页状态码'
 case "$dex_login_url" in
 	"$SMOKE_OIDC_ISSUER"/*) ;;
 	*) fail "未跳转到 Dex 登录页: $dex_login_url" ;;
@@ -598,10 +600,13 @@ grep -q '"cross-origin request rejected"' "$TMP/body" || fail "跨站拒绝响�
 
 echo 'smoke: tenant self-service'
 status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
-	"$CONSOLE_BASE/api/v1/auth/providers")
-assert_eq "$status" 200 'GET /api/v1/auth/providers 状态码'
-grep -q '"oidc":true' "$TMP/body" || fail "auth/providers 缺少 oidc=true: $(cat "$TMP/body")"
-grep -q '"webhooks":true' "$TMP/body" || fail "auth/providers 缺少 webhooks=true: $(cat "$TMP/body")"
+	"$CONSOLE_BASE/api/v1/capabilities")
+assert_eq "$status" 200 'GET /api/v1/capabilities 状态码'
+grep -Fq '"id":"oidc","kind":"redirect","login_url":"/api/v1/auth/oidc/login"' "$TMP/body" || fail "capabilities 缺少 oidc 登录方式: $(cat "$TMP/body")"
+grep -Fq '"analytics":true' "$TMP/body" || fail "capabilities 缺少 analytics=true: $(cat "$TMP/body")"
+grep -Fq '"webhooks":true' "$TMP/body" || fail "capabilities 缺少 webhooks=true: $(cat "$TMP/body")"
+grep -Fq '"risk_scan":true' "$TMP/body" || fail "capabilities 缺少 risk_scan=true: $(cat "$TMP/body")"
+grep -Fq '"email":true' "$TMP/body" || fail "capabilities 缺少 email=true: $(cat "$TMP/body")"
 
 status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 	-X POST -H 'Content-Type: application/json' \
@@ -710,7 +715,7 @@ return_cookies=$TMP/return_to_cookies.txt
 return_meta=$(curl -sS --max-time 10 -L \
 	-c "$return_cookies" -b "$return_cookies" \
 	-o "$TMP/dex_return.html" -w '%{http_code} %{url_effective}' \
-	"$CONSOLE_BASE/api/v1/auth/login?return_to=/") || fail '访问带 return_to 的 login 失败'
+	"$CONSOLE_BASE/api/v1/auth/oidc/login?return_to=/") || fail '访问带 return_to 的 oidc login 失败'
 return_dex_url=${return_meta#* }
 return_end=$(curl -sS --max-time 10 -L \
 	-c "$return_cookies" -b "$return_cookies" \
@@ -1081,8 +1086,8 @@ done
 
 status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$wh_code" "{\"url\":\"$wh_safe_url?v=2\"}")
 assert_eq "$status" 200 'Webhook 生命周期 PATCH 短链状态码'
-./bin/console link ban --code "$wh_code" --reason spam || fail 'Webhook 生命周期 link ban 失败'
-./bin/console link unban --code "$wh_code" || fail 'Webhook 生命周期 link unban 失败'
+WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY ./bin/console link ban --code "$wh_code" --reason spam || fail 'Webhook 生命周期 link ban 失败'
+WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY ./bin/console link unban --code "$wh_code" || fail 'Webhook 生命周期 link unban 失败'
 status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$wh_code")
 assert_eq "$status" 204 'Webhook 生命周期 DELETE 短链状态码'
 
@@ -1187,5 +1192,96 @@ WORKER_PID=
 assert_eq "$redirector_status" 0 'redirector SIGTERM 后的退出码'
 assert_eq "$console_status" 0 'console SIGTERM 后的退出码'
 assert_eq "$worker_status" 0 'worker SIGTERM 后的退出码'
+
+echo 'smoke: minimal single-pg mode (no redis, no analytics, no risk scan)'
+psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DELETE FROM jobs" \
+	|| fail '清理极简模式前置 jobs 失败'
+
+REDIS_URL= \
+VISITOR_SALT= \
+FEATURE_ANALYTICS=false \
+FEATURE_RISK_SCAN=false \
+ADDR=$redirector_addr \
+OPS_ADDR=$redirector_ops_addr \
+	./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
+REDIRECTOR_PID=$!
+
+REDIS_URL= \
+FEATURE_ANALYTICS=false \
+FEATURE_RISK_SCAN=false \
+OIDC_ISSUER= \
+OIDC_CLIENT_ID= \
+OIDC_CLIENT_SECRET= \
+OIDC_REDIRECT_URL= \
+GITHUB_CLIENT_ID= \
+GITHUB_CLIENT_SECRET= \
+GITHUB_REDIRECT_URL= \
+WEBHOOK_SECRET_KEY= \
+SMTP_HOST= \
+WEB_DIST_DIR= \
+CONSOLE_ADDR=$console_addr \
+CONSOLE_OPS_ADDR=$console_ops_addr \
+	./bin/console serve >"$CONSOLE_LOG" 2>&1 &
+CONSOLE_PID=$!
+
+wait_ready "$REDIRECTOR_OPS_BASE" "$REDIRECTOR_PID" redirector-minimal
+wait_ready "$CONSOLE_OPS_BASE" "$CONSOLE_PID" console-minimal
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' "$CONSOLE_BASE/api/v1/capabilities")
+assert_eq "$status" 200 '极简模式 GET /api/v1/capabilities 状态码'
+grep -Fq '"auth_methods":[]' "$TMP/body" || fail "极简模式 auth_methods 应为空: $(cat "$TMP/body")"
+grep -Fq '"analytics":false' "$TMP/body" || fail "极简模式 analytics 应为 false: $(cat "$TMP/body")"
+grep -Fq '"webhooks":false' "$TMP/body" || fail "极简模式 webhooks 应为 false: $(cat "$TMP/body")"
+grep -Fq '"risk_scan":false' "$TMP/body" || fail "极简模式 risk_scan 应为 false: $(cat "$TMP/body")"
+grep -Fq '"email":false' "$TMP/body" || fail "极简模式 email 应为 false: $(cat "$TMP/body")"
+
+minimal_url="https://example.com/smoke-minimal-$$"
+status=$(request "$CONSOLE_BASE" POST /api/v1/links "{\"url\":\"$minimal_url\"}")
+assert_eq "$status" 201 '极简模式创建短链状态码'
+if grep -q '"clicks"' "$TMP/body"; then
+	fail "极简模式创建响应不应包含 clicks 字段: $(cat "$TMP/body")"
+fi
+minimal_loc=$(header Location)
+minimal_code=${minimal_loc#/r/}
+
+status=$(request "$REDIRECTOR_BASE" GET "/r/$minimal_code")
+assert_eq "$status" 302 '极简模式直连 PG 跳转状态码'
+assert_eq "$(header Location)" "$minimal_url" '极简模式跳转 Location'
+
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$minimal_code")
+assert_eq "$status" 200 '极简模式查询详情状态码'
+if grep -q '"clicks"' "$TMP/body"; then
+	fail "极简模式详情响应不应包含 clicks 字段: $(cat "$TMP/body")"
+fi
+
+status=$(request "$CONSOLE_BASE" GET '/api/v1/links?sort=clicks')
+assert_eq "$status" 400 '极简模式 sort=clicks 应返回 400'
+status=$(request "$CONSOLE_BASE" GET '/api/v1/links?sort=clicks_today')
+assert_eq "$status" 400 '极简模式 sort=clicks_today 应返回 400'
+status=$(request "$CONSOLE_BASE" GET "/api/v1/links/$minimal_code/stats")
+assert_eq "$status" 404 '极简模式 GET /stats 应返回 404'
+
+status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$minimal_code")
+assert_eq "$status" 204 '极简模式删除短链状态码'
+status=$(request "$REDIRECTOR_BASE" GET "/r/$minimal_code")
+assert_eq "$status" 404 '极简模式删除后跳转应立即 404'
+
+minimal_jobs=$(psql_cmd "$TEST_DATABASE_URL" -Atc "SELECT count(*) FROM jobs")
+assert_eq "$minimal_jobs" 0 '极简模式写库不应产生任何外围异步任务'
+
+( sleep 15; kill -KILL "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null ) &
+WATCHDOG_PID=$!
+kill -TERM "$REDIRECTOR_PID" "$CONSOLE_PID" 2>/dev/null || true
+redirector_status=0
+console_status=0
+wait "$REDIRECTOR_PID" || redirector_status=$?
+wait "$CONSOLE_PID" || console_status=$?
+kill "$WATCHDOG_PID" 2>/dev/null || true
+wait "$WATCHDOG_PID" 2>/dev/null || true
+WATCHDOG_PID=
+REDIRECTOR_PID=
+CONSOLE_PID=
+assert_eq "$redirector_status" 0 '极简模式 redirector SIGTERM 后的退出码'
+assert_eq "$console_status" 0 '极简模式 console SIGTERM 后的退出码'
 
 echo 'smoke: ok'

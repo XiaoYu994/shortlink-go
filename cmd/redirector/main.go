@@ -55,15 +55,6 @@ func run() error {
 	defer func() { _ = db.Close() }()
 	logger.Info("connected to postgres")
 
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	rdb, err := cache.Open(ctx, cfg.RedisURL)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("connect redis: %w", err)
-	}
-	defer func() { _ = rdb.Close() }()
-	logger.Info("connected to redis")
-
 	/*
 		自建 Registry：每个进程自己暴露 /metrics，redirector 和 console 各自抓取。
 		自建 Registry 默认是空的，Go 运行时、进程和连接池指标要单独注册。
@@ -75,36 +66,76 @@ func run() error {
 		collectors.NewDBStatsCollector(db, "shortlink"),
 	)
 
+	pgStore := pgredirect.NewStore(db)
+	var store redirector.LinkStore = storemetrics.NewReader(pgStore, registry)
+	if cfg.RedisURL != "" {
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		rdb, err := cache.Open(ctx, cfg.RedisURL)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("connect redis: %w", err)
+		}
+		defer func() { _ = rdb.Close() }()
+		logger.Info("connected to redis")
+
+		/*
+			组合顺序：HTTP -> cache.Reader -> storemetrics.Reader -> pgredirect.Store（ADR 0024）。
+			指标装饰器贴着数据库，缓存命中不会计入存储耗时。
+		*/
+		store = cache.NewReader(store, rdb, registry, cache.Options{
+			MissConcurrency: cfg.CacheMissConcurrency,
+			FetchTimeout:    cfg.CacheFetchTimeout,
+			Logger:          logger,
+		})
+	} else {
+		logger.Info("redis cache disabled: REDIS_URL is not set")
+	}
+
 	/*
 		点击写出直接用 pgStore，不经过缓存，也不算进存储耗时。
 		这个 defer 注册在 db.Close 和 rdb.Close 之后，run 返回时会先执行：
 		先把缓冲里的点击写完，再关 Redis 和数据库。
-		排空共用这一份 SHUTDOWN_TIMEOUT。已经开始的普通批次不跟着取消，
-		最多再占一次写入超时。进程在排空结束前被杀掉的话，缓冲区里的点击会丢掉。
+		FEATURE_ANALYTICS=false 时完全不启动 ClickRecorder，传递未装箱 nil 接口给 redirector（ADR 0029）。
 	*/
-	pgStore := pgredirect.NewStore(db)
-	clicks := click.New(pgStore, logger, registry, click.Options{})
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		if err := clicks.Close(closeCtx); err != nil {
-			logger.Error("close click recorder", "err", err)
-		}
-	}()
+	var (
+		clicks      redirector.ClickRecorder
+		visitorSalt []byte
+	)
+	if cfg.Features.Analytics {
+		rec := click.New(pgStore, logger, registry, click.Options{})
+		clicks = rec
+		visitorSalt = []byte(cfg.VisitorSalt)
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			defer cancel()
+			if err := rec.Close(closeCtx); err != nil {
+				logger.Error("close click recorder", "err", err)
+			}
+		}()
+	} else {
+		logger.Info("click analytics disabled: FEATURE_ANALYTICS=false")
+	}
 
-	/*
-		组合顺序：HTTP -> cache.Reader -> storemetrics.Reader -> pgredirect.Store（ADR 0024）。
-		指标装饰器贴着数据库，缓存命中不会计入存储耗时。
-	*/
-	store := cache.NewReader(storemetrics.NewReader(pgStore, registry), rdb, registry, cache.Options{
-		MissConcurrency: cfg.CacheMissConcurrency,
-		FetchTimeout:    cfg.CacheFetchTimeout,
-		Logger:          logger,
-	})
+	var enabledFeatures, disabledFeatures []string
+	if cfg.RedisURL != "" {
+		enabledFeatures = append(enabledFeatures, "cache")
+	} else {
+		disabledFeatures = append(disabledFeatures, "cache")
+	}
+	if cfg.Features.Analytics {
+		enabledFeatures = append(enabledFeatures, "analytics")
+	} else {
+		disabledFeatures = append(disabledFeatures, "analytics")
+	}
+	logger.Info("redirector features configured",
+		"enabled_features", enabledFeatures,
+		"disabled_features", disabledFeatures,
+	)
+
 	sampleRate := cfg.AccessLogSampleRate
 	srv := redirector.New(logger, store, cfg.RequestTimeout, registry, redirector.Options{
 		Clicks:                 clicks,
-		VisitorSalt:            []byte(cfg.VisitorSalt),
+		VisitorSalt:            visitorSalt,
 		TrustProxyHeaders:      cfg.TrustProxyHeaders,
 		TrustedProxyCIDRs:      cfg.TrustedProxyCIDRs,
 		AccessLogSampleRate:    &sampleRate,

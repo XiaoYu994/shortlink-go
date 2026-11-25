@@ -23,9 +23,10 @@ const (
 type RedirectorConfig struct {
 	config.BaseConfig
 
+	Features config.FeatureFlags
 	/*
-		VisitorSalt 是按天访客哈希的 HMAC 密钥。redirector 启动时要求非空；
-		为空时不记访客会导致 UV 一直是 0，与其静默降级不如启动失败。
+		VisitorSalt 是按天访客哈希的 HMAC 密钥。FEATURE_ANALYTICS=true 时启动必填；
+		为空时不记访客会导致 UV 一直是 0，与其静默降级不如启动失败；关闭点击统计时允许留空（ADR 0029）。
 		盐不能提交到仓库，生产从密钥管理注入。
 	*/
 	VisitorSalt string
@@ -53,6 +54,7 @@ type RedirectorConfig struct {
 func (cfg RedirectorConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
+		slog.Bool("feature_analytics", cfg.Features.Analytics),
 		slog.String("visitor_salt", logx.RedactSecret(cfg.VisitorSalt)),
 		slog.Bool("trust_proxy_headers", cfg.TrustProxyHeaders),
 		slog.Int("trusted_proxy_cidrs_count", len(cfg.TrustedProxyCIDRs)),
@@ -83,8 +85,14 @@ func loadRedirectorConfig() (RedirectorConfig, error) {
 		return RedirectorConfig{}, err
 	}
 
+	features, err := config.LoadFeatureFlags()
+	if err != nil {
+		return RedirectorConfig{}, err
+	}
+
 	cfg := RedirectorConfig{
 		BaseConfig:             base,
+		Features:               features,
 		VisitorSalt:            os.Getenv("VISITOR_SALT"),
 		PprofAddr:              os.Getenv("PPROF_ADDR"),
 		CacheMissConcurrency:   cache.DefaultMissConcurrency,
@@ -94,8 +102,8 @@ func loadRedirectorConfig() (RedirectorConfig, error) {
 	if cfg.OpsAddr != "" && cfg.OpsAddr == cfg.Addr {
 		return RedirectorConfig{}, errors.New("OPS_ADDR must differ from ADDR")
 	}
-	if cfg.VisitorSalt == "" {
-		return RedirectorConfig{}, errors.New("VISITOR_SALT is required")
+	if cfg.Features.Analytics && cfg.VisitorSalt == "" {
+		return RedirectorConfig{}, errors.New("VISITOR_SALT is required when FEATURE_ANALYTICS=true")
 	}
 	if cfg.TrustProxyHeaders, err = config.EnvBool("TRUST_PROXY_HEADERS", false); err != nil {
 		return RedirectorConfig{}, err
