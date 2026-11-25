@@ -42,6 +42,8 @@ var (
 	ErrAPIKeyNotFound = errors.New("api key not found")
 	// ErrAPIKeyRevoked 表示这把密钥已经吊销过。
 	ErrAPIKeyRevoked = errors.New("api key already revoked")
+	// ErrInvalidAPIKeyName 表示 API Key 名称过长或包含非法控制字符。
+	ErrInvalidAPIKeyName = errors.New("invalid api key name")
 	// ErrExpiresNotFuture 表示签发密钥时给出的过期时间不在将来。
 	ErrExpiresNotFuture = errors.New("expires_at must be in the future")
 )

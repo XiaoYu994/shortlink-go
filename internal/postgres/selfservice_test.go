@@ -149,20 +149,21 @@ func TestOrgAPIKeysCreatedByAndTenantIsolation(t *testing.T) {
 	issued, err := store.IssueOrgAPIKey(ctx, identity.IssueOrgAPIKeyParams{
 		TenantID:  tenantA,
 		CreatedBy: 42,
+		Name:      "  org-ci  ",
 		Scopes:    []identity.Perm{identity.PermLinksRead, identity.PermLinksWrite},
 	})
 	if err != nil {
 		t.Fatalf("IssueOrgAPIKey: %v", err)
 	}
-	if issued.Key.CreatedBy == nil || *issued.Key.CreatedBy != 42 {
-		t.Fatalf("CreatedBy = %v, want 42", issued.Key.CreatedBy)
+	if issued.Key.CreatedBy == nil || *issued.Key.CreatedBy != 42 || issued.Key.Name != "org-ci" {
+		t.Fatalf("Issued.Key = %+v, want CreatedBy=42 Name=org-ci", issued.Key)
 	}
 
 	list, err := store.ListOrgAPIKeys(ctx, tenantA)
 	if err != nil {
 		t.Fatalf("ListOrgAPIKeys: %v", err)
 	}
-	if len(list) != 1 || list[0].ID != issued.Key.ID || list[0].CreatedBy == nil || *list[0].CreatedBy != 42 {
+	if len(list) != 1 || list[0].ID != issued.Key.ID || list[0].Name != "org-ci" || list[0].CreatedBy == nil || *list[0].CreatedBy != 42 {
 		t.Fatalf("list = %+v", list)
 	}
 

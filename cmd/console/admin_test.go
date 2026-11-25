@@ -117,6 +117,20 @@ func TestConsoleRejectsBadExpiryWithoutOpeningStore(t *testing.T) {
 	}
 }
 
+func TestConsoleRejectsBadKeyNameWithoutOpeningStore(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"key", "issue", "--tenant", "1", "--key-name", "bad\nname"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
+		t.Fatal("store opened")
+		return nil, nil, nil
+	}, failLinkOpen(t))
+	if err == nil || !errors.Is(err, identity.ErrInvalidAPIKeyName) || !strings.Contains(err.Error(), "parse key-name") {
+		t.Fatalf("run error = %v, want parse key-name wrapping ErrInvalidAPIKeyName", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 func TestConsoleRejectsBadScopeWithoutOpeningStore(t *testing.T) {
 	tests := []struct {
 		name string
@@ -146,12 +160,14 @@ func TestConsoleRejectsBadScopeWithoutOpeningStore(t *testing.T) {
 
 func TestConsoleIssueListRevoke(t *testing.T) {
 	expires := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	lastUsed := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 	plaintext := "slk_" + strings.Repeat("ab", 32)
 	store := &fakeAdmin{issued: postgres.IssuedAPIKey{
 		Tenant: tenant.Tenant{ID: 7, ExternalID: "platform-1"},
 		Key: postgres.APIKey{
 			ID:        9,
 			TenantID:  7,
+			Name:      "ci-bot",
 			Scopes:    identity.AllAPIKeyScopes(),
 			CreatedAt: expires,
 			ExpiresAt: &expires,
@@ -159,14 +175,14 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 		Plaintext: plaintext,
 	}}
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"key", "issue", "--name", "acme", "--external-id", "platform-1", "--expires", "2026-12-01T00:00:00Z"},
+	err := run([]string{"key", "issue", "--name", "acme", "--external-id", "platform-1", "--key-name", "  ci-bot  ", "--expires", "2026-12-01T00:00:00Z"},
 		&stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 			return store, io.NopCloser(nil), nil
 		}, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
-	if store.params.Name != "acme" || store.params.ExternalID != "platform-1" || store.params.TenantID != 0 {
+	if store.params.Name != "acme" || store.params.KeyName != "ci-bot" || store.params.ExternalID != "platform-1" || store.params.TenantID != 0 {
 		t.Fatalf("params = %+v", store.params)
 	}
 	if store.params.ExpiresAt == nil || !store.params.ExpiresAt.Equal(expires) {
@@ -177,6 +193,7 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "tenant_id: 7\n") ||
 		!strings.Contains(stdout.String(), "key_id: 9\n") ||
+		!strings.Contains(stdout.String(), "key_name: ci-bot\n") ||
 		!strings.Contains(stdout.String(), "scopes: links:read,links:write,stats:read\n") ||
 		!strings.Contains(stdout.String(), "api_key: "+plaintext+"\n") {
 		t.Fatalf("stdout = %q", stdout.String())
@@ -187,11 +204,13 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 
 	stdout.Reset()
 	store.keys = []postgres.APIKey{{
-		ID:        9,
-		TenantID:  7,
-		Scopes:    []identity.Perm{identity.PermLinksRead, identity.PermStatsRead},
-		CreatedAt: expires,
-		ExpiresAt: &expires,
+		ID:         9,
+		TenantID:   7,
+		Name:       "ci-bot",
+		Scopes:     []identity.Perm{identity.PermLinksRead, identity.PermStatsRead},
+		CreatedAt:  expires,
+		LastUsedAt: &lastUsed,
+		ExpiresAt:  &expires,
 	}}
 	if err := run([]string{"key", "list", "--tenant", "7"}, &stdout, &stderr, func(context.Context) (adminStore, io.Closer, error) {
 		return store, io.NopCloser(nil), nil
@@ -201,8 +220,9 @@ func TestConsoleIssueListRevoke(t *testing.T) {
 	if store.listed != 7 {
 		t.Fatalf("listed tenant = %d, want 7", store.listed)
 	}
-	if !strings.Contains(stdout.String(), "id\ttenant_id\tcreated_at\texpires_at\trevoked_at\tscopes\n") ||
-		!strings.Contains(stdout.String(), "9\t7\t") ||
+	if !strings.Contains(stdout.String(), "id\ttenant_id\tname\tcreated_at\tlast_used_at\texpires_at\trevoked_at\tscopes\n") ||
+		!strings.Contains(stdout.String(), "9\t7\tci-bot\t") ||
+		!strings.Contains(stdout.String(), "\t2026-11-24T12:00:00Z\t") ||
 		!strings.Contains(stdout.String(), "\tlinks:read,stats:read\n") ||
 		strings.Contains(stdout.String(), plaintext) {
 		t.Fatalf("list stdout = %q", stdout.String())

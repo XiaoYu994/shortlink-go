@@ -36,13 +36,15 @@ func newAPIKeyHandler(logger *slog.Logger, apiKeys APIKeyStore) *apiKeyHandler {
 }
 
 type apiKeyResponse struct {
-	ID        int64      `json:"id"`
-	Scopes    []string   `json:"scopes"`
-	Status    string     `json:"status"`
-	CreatedBy *int64     `json:"created_by,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	ID         int64      `json:"id"`
+	Name       string     `json:"name,omitempty"`
+	Scopes     []string   `json:"scopes"`
+	Status     string     `json:"status"`
+	CreatedBy  *int64     `json:"created_by,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 }
 
 type listAPIKeysResponse struct {
@@ -50,6 +52,7 @@ type listAPIKeysResponse struct {
 }
 
 type issueAPIKeyRequest struct {
+	Name      string     `json:"name,omitempty"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
@@ -65,13 +68,15 @@ func newAPIKeyResponse(k identity.APIKeyInfo, now time.Time) apiKeyResponse {
 		scopes[i] = string(s)
 	}
 	return apiKeyResponse{
-		ID:        k.ID,
-		Scopes:    scopes,
-		Status:    k.Status(now),
-		CreatedBy: k.CreatedBy,
-		CreatedAt: k.CreatedAt.UTC(),
-		ExpiresAt: k.ExpiresAt,
-		RevokedAt: k.RevokedAt,
+		ID:         k.ID,
+		Name:       k.Name,
+		Scopes:     scopes,
+		Status:     k.Status(now),
+		CreatedBy:  k.CreatedBy,
+		CreatedAt:  k.CreatedAt.UTC(),
+		LastUsedAt: k.LastUsedAt,
+		ExpiresAt:  k.ExpiresAt,
+		RevokedAt:  k.RevokedAt,
 	}
 }
 
@@ -126,6 +131,12 @@ func (h *apiKeyHandler) handleIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	keyName, err := identity.NormalizeAPIKeyName(req.Name)
+	if err != nil {
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, identity.ErrInvalidAPIKeyName.Error())
+		return
+	}
+
 	rawScopes := make([]identity.Perm, len(req.Scopes))
 	for i, s := range req.Scopes {
 		rawScopes[i] = identity.Perm(s)
@@ -139,6 +150,7 @@ func (h *apiKeyHandler) handleIssue(w http.ResponseWriter, r *http.Request) {
 	issued, err := h.apiKeys.IssueOrgAPIKey(r.Context(), identity.IssueOrgAPIKeyParams{
 		TenantID:  p.Tenant.ID,
 		CreatedBy: p.ActorID,
+		Name:      keyName,
 		Scopes:    scopes,
 		ExpiresAt: req.ExpiresAt,
 	})
@@ -180,6 +192,8 @@ func (h *apiKeyHandler) handleRevoke(w http.ResponseWriter, r *http.Request) {
 
 func (h *apiKeyHandler) handleAPIKeyError(w http.ResponseWriter, r *http.Request, op string, err error) {
 	switch {
+	case errors.Is(err, identity.ErrInvalidAPIKeyName):
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, identity.ErrInvalidAPIKeyName.Error())
 	case errors.Is(err, identity.ErrInvalidAPIKeyScope):
 		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, identity.ErrInvalidAPIKeyScope.Error())
 	case errors.Is(err, identity.ErrExpiresNotFuture):

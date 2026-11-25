@@ -145,9 +145,11 @@ curl -s localhost:8081/api/v1/links?limit=20 \
 | --- | --- |
 | `limit` | 每页条数，默认 20，最大 100；其他值返回 400 |
 | `sort` | `id`（默认）、`clicks`（历史累计）、`clicks_today`（今日） |
+| `status` | 可选状态过滤：`active`、`disabled`、`expired`、`banned`（按 `banned > disabled > expired > active` 互斥分类）；非法值返回 400 |
+| `q` | 可选关键词搜索：在当前租户内对短码 `code` 和目标 `url` 做大小写不敏感子串匹配（首尾空白忽略，最长 200 字节且不可含控制字符，超限返回 400） |
 | `cursor` | 上一页响应里的 `next_cursor`，原样传回；不透明 |
 
-列表固定降序，包含已过期、已停用和已封禁的链接，不提供状态过滤；客户端根据 `status` 判断。列表只有当前租户的行。
+列表固定降序，未传 `status` 时包含全部状态的链接。列表只有当前租户的行。
 
 ```json
 {
@@ -440,8 +442,8 @@ curl -i -X POST -b cookies.txt \
 
 三个接口均走管理 API 鉴权链，使用新增权限 `apikeys:read` / `apikeys:write`（**仅授 `owner` 与 `admin` 会话**；API Key 永远不能拥有这两个 scope，携带 API Key 调用一律 403），响应一律带 `Cache-Control: no-store`：
 
-- `GET /api/v1/api-keys`（需要 `apikeys:read`）：返回当前组织全部 API Key 的元数据（`id`、`scopes`、`status`、`created_by`、`created_at`、`expires_at`、`revoked_at`），永不返回明文或哈希。
-- `POST /api/v1/api-keys`（需要 `apikeys:write`）：请求体 `{"scopes":["links:read","links:write"],"expires_at":"..."}`（`scopes` 必填且仅允许 `links:read`/`links:write`/`stats:read`，`expires_at` 可选且须为将来时间）。写入 `created_by = 当前用户 ID`，返回 `201 Created` 与仅此一次出现的明文 `"api_key":"slk_..."`。
+- `GET /api/v1/api-keys`（需要 `apikeys:read`）：返回当前组织全部 API Key 的元数据（`id`、可选 `name`、`scopes`、`status`、`created_by`、`created_at`、可选 `last_used_at`、`expires_at`、`revoked_at`），永不返回明文或哈希。`last_used_at` 在密钥通过鉴权时按 5 分钟节流窗口更新。
+- `POST /api/v1/api-keys`（需要 `apikeys:write`）：请求体 `{"name":"prod-ci","scopes":["links:read","links:write"],"expires_at":"..."}`（`name` 可选，最长 100 字节且不可含控制字符；`scopes` 必填且仅允许 `links:read`/`links:write`/`stats:read`；`expires_at` 可选且须为将来时间）。写入 `created_by = 当前用户 ID`，返回 `201 Created` 与仅此一次出现的明文 `"api_key":"slk_..."`。
 - `DELETE /api/v1/api-keys/{id}`（需要 `apikeys:write`）：按 `(id, tenant_id)` 隔离吊销当前组织的 API Key，成功返回 `204 No Content`（立即生效）；其他组织或不存在的 ID 返回 404，已吊销返回 409。
 
 ### 组织操作审计日志

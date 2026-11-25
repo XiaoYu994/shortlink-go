@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"shortlink/internal/audit"
@@ -33,83 +34,39 @@ const (
 	linkColumns = `id, code, url, expires_at, created_at, tenant_id, disabled_at, banned_at, ban_reason, ban_source`
 
 	/*
-		第一页和后续页分开写 SQL，不把游标藏在 ($2 = 0 OR ...) 里。
-		带 OR 的谓词不是 sargable，PostgreSQL 可能退化成从租户最新一行往下扫；
-		单独的 id < $2 / 行比较才能用索引定位到游标。
-	*/
-	listLinksFirstByIDSQL = `SELECT ` + adminLinkColumns + `
-FROM links l` + todayJoin + `
-WHERE l.tenant_id = $1
-ORDER BY l.id DESC
-LIMIT $2`
-
-	listLinksAfterIDSQL = `SELECT ` + adminLinkColumns + `
-FROM links l` + todayJoin + `
-WHERE l.tenant_id = $1 AND l.id < $2
-ORDER BY l.id DESC
-LIMIT $3`
-
-	listLinksFirstByClicksSQL = `SELECT ` + adminLinkColumns + `
-FROM links l` + todayJoin + `
-WHERE l.tenant_id = $1
-ORDER BY l.clicks DESC, l.id DESC
-LIMIT $2`
-
-	listLinksAfterClicksSQL = `SELECT ` + adminLinkColumns + `
-FROM links l` + todayJoin + `
-WHERE l.tenant_id = $1 AND (l.clicks, l.id) < ($2, $3)
-ORDER BY l.clicks DESC, l.id DESC
-LIMIT $4`
-
-	/*
+		statusFilter* 与 link.Link.Status(now) 的优先级严格一致（banned > disabled > expired > active），
+		拆出独立条件避免用 OR 混合不同列破坏部分索引（迁移 014）与租户索引命中。
 		按今日点击排序拆成两段有序索引扫描，消除旧版 LEFT JOIN + COALESCE 导致的整租户全量排序（ADR 0022）：
 		1. 今日有点击段：以 link_clicks_daily 为驱动表，直接走 idx_link_clicks_daily_tenant_day_clicks；
 		2. 今日 0 点击段：仅在第一段不足 limit 或游标已落入 clicks_today = 0 时，沿 idx_links_tenant_id 逆序补齐。
-		两段在同一只读 REPEATABLE READ 事务内执行，共用同一个数据库 now() 日期与 MVCC 快照。
 	*/
-	listLinksFirstClickedTodaySQL = `SELECT ` + adminLinkColumns + `
+	statusFilterBannedSQL   = ` AND l.banned_at IS NOT NULL`
+	statusFilterDisabledSQL = ` AND l.banned_at IS NULL AND l.disabled_at IS NOT NULL`
+	statusFilterExpiredSQL  = ` AND l.banned_at IS NULL AND l.disabled_at IS NULL AND l.expires_at IS NOT NULL AND l.expires_at <= now()`
+	statusFilterActiveSQL   = ` AND l.banned_at IS NULL AND l.disabled_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > now())`
+
+	listLinksBaseSQL = `SELECT ` + adminLinkColumns + `
+FROM links l` + todayJoin + `
+WHERE l.tenant_id = $1`
+
+	listClickedTodayBaseSQL = `SELECT ` + adminLinkColumns + `
 FROM link_clicks_daily d
 JOIN links l ON l.id = d.link_id
 WHERE d.tenant_id = $1
   AND d.day = (now() AT TIME ZONE 'UTC')::date
-  AND l.tenant_id = $1
-ORDER BY d.clicks DESC, d.link_id DESC
-LIMIT $2`
+  AND l.tenant_id = $1`
 
-	listLinksAfterClickedTodaySQL = `SELECT ` + adminLinkColumns + `
-FROM link_clicks_daily d
-JOIN links l ON l.id = d.link_id
-WHERE d.tenant_id = $1
-  AND d.day = (now() AT TIME ZONE 'UTC')::date
-  AND l.tenant_id = $1
-  AND (d.clicks, d.link_id) < ($2, $3)
-ORDER BY d.clicks DESC, d.link_id DESC
-LIMIT $4`
-
-	listLinksFirstUnclickedTodaySQL = `SELECT ` + zeroTodayLinkColumns + `
+	listUnclickedTodayBaseSQL = `SELECT ` + zeroTodayLinkColumns + `
 FROM links l
-WHERE l.tenant_id = $1
+WHERE l.tenant_id = $1`
+
+	notExistsClickedTodaySQL = `
   AND NOT EXISTS (
       SELECT 1
       FROM link_clicks_daily d
       WHERE d.link_id = l.id
         AND d.day = (now() AT TIME ZONE 'UTC')::date
-  )
-ORDER BY l.id DESC
-LIMIT $2`
-
-	listLinksAfterUnclickedTodaySQL = `SELECT ` + zeroTodayLinkColumns + `
-FROM links l
-WHERE l.tenant_id = $1
-  AND l.id < $2
-  AND NOT EXISTS (
-      SELECT 1
-      FROM link_clicks_daily d
-      WHERE d.link_id = l.id
-        AND d.day = (now() AT TIME ZONE 'UTC')::date
-  )
-ORDER BY l.id DESC
-LIMIT $3`
+  )`
 
 	getForTenantSQL = `SELECT ` + adminLinkColumns + `
 FROM links l` + todayJoin + `
@@ -397,8 +354,100 @@ func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (
 	return got, nil
 }
 
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func appendLinkFilters(b *strings.Builder, args *[]any, status link.Status, query string) error {
+	if status != "" {
+		switch status {
+		case link.StatusBanned:
+			b.WriteString(statusFilterBannedSQL)
+		case link.StatusDisabled:
+			b.WriteString(statusFilterDisabledSQL)
+		case link.StatusExpired:
+			b.WriteString(statusFilterExpiredSQL)
+		case link.StatusActive:
+			b.WriteString(statusFilterActiveSQL)
+		default:
+			return fmt.Errorf("list links: invalid status %q", status)
+		}
+	}
+	if query != "" {
+		*args = append(*args, "%"+likeEscaper.Replace(query)+"%")
+		idx := len(*args)
+		fmt.Fprintf(b, ` AND (l.code ILIKE $%d ESCAPE '\' OR l.url ILIKE $%d ESCAPE '\')`, idx, idx)
+	}
+	return nil
+}
+
+func buildListLinksQuery(sort link.Sort, cursor *link.ListCursor, tenantID int64, limit int, status link.Status, query string) (string, []any, error) {
+	var b strings.Builder
+	var args []any
+	var orderBy string
+
+	switch sort {
+	case link.SortID:
+		b.WriteString(listLinksBaseSQL)
+		args = []any{tenantID}
+		if cursor != nil {
+			args = append(args, cursor.ID)
+			fmt.Fprintf(&b, " AND l.id < $%d", len(args))
+		}
+		orderBy = "\nORDER BY l.id DESC\nLIMIT $%d"
+	case link.SortClicks:
+		b.WriteString(listLinksBaseSQL)
+		args = []any{tenantID}
+		if cursor != nil {
+			args = append(args, cursor.Clicks, cursor.ID)
+			fmt.Fprintf(&b, " AND (l.clicks, l.id) < ($%d, $%d)", len(args)-1, len(args))
+		}
+		orderBy = "\nORDER BY l.clicks DESC, l.id DESC\nLIMIT $%d"
+	default:
+		return "", nil, fmt.Errorf("list links: unknown sort %q", sort)
+	}
+
+	if err := appendLinkFilters(&b, &args, status, query); err != nil {
+		return "", nil, err
+	}
+	args = append(args, limit)
+	fmt.Fprintf(&b, orderBy, len(args))
+	return b.String(), args, nil
+}
+
+func buildClickedTodayQuery(cursor *link.ListCursor, tenantID int64, limit int, status link.Status, query string) (string, []any, error) {
+	var b strings.Builder
+	b.WriteString(listClickedTodayBaseSQL)
+	args := []any{tenantID}
+	if cursor != nil {
+		args = append(args, cursor.ClicksToday, cursor.ID)
+		fmt.Fprintf(&b, "\n  AND (d.clicks, d.link_id) < ($%d, $%d)", len(args)-1, len(args))
+	}
+	if err := appendLinkFilters(&b, &args, status, query); err != nil {
+		return "", nil, err
+	}
+	args = append(args, limit)
+	fmt.Fprintf(&b, "\nORDER BY d.clicks DESC, d.link_id DESC\nLIMIT $%d", len(args))
+	return b.String(), args, nil
+}
+
+func buildUnclickedTodayQuery(afterID *int64, tenantID int64, limit int, status link.Status, query string) (string, []any, error) {
+	var b strings.Builder
+	b.WriteString(listUnclickedTodayBaseSQL)
+	args := []any{tenantID}
+	if afterID != nil {
+		args = append(args, *afterID)
+		fmt.Fprintf(&b, "\n  AND l.id < $%d", len(args))
+	}
+	b.WriteString(notExistsClickedTodaySQL)
+	if err := appendLinkFilters(&b, &args, status, query); err != nil {
+		return "", nil, err
+	}
+	args = append(args, limit)
+	fmt.Fprintf(&b, "\nORDER BY l.id DESC\nLIMIT $%d", len(args))
+	return b.String(), args, nil
+}
+
 /*
-List 返回租户的链接，包含已过期链接，按 opts.Sort 固定降序。
+List 返回租户的链接，包含已过期链接，按 opts.Sort 固定降序，并支持按状态和关键词筛选。
 调用方要判断有没有下一页时把 Limit 多要一条；这里不额外查询总数。
 排序字段会随点击变化，sort=clicks / clicks_today 的翻页可能重复或漏项，
 默认 sort=id 保持稳定。见 ADR 0011。
@@ -407,34 +456,19 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 	if opts.Limit <= 0 {
 		return nil, fmt.Errorf("list links: limit must be positive")
 	}
+	if opts.Status != "" && !opts.Status.Valid() {
+		return nil, fmt.Errorf("list links: invalid status %q", opts.Status)
+	}
 
-	var (
-		rows   *sql.Rows
-		err    error
-		cursor link.ListCursor
-	)
-	if opts.Cursor != nil {
-		cursor = *opts.Cursor
-	}
-	switch opts.Sort {
-	case link.SortID:
-		if opts.Cursor == nil {
-			rows, err = s.db.QueryContext(ctx, listLinksFirstByIDSQL, opts.TenantID, opts.Limit)
-		} else {
-			rows, err = s.db.QueryContext(ctx, listLinksAfterIDSQL, opts.TenantID, cursor.ID, opts.Limit)
-		}
-	case link.SortClicks:
-		if opts.Cursor == nil {
-			rows, err = s.db.QueryContext(ctx, listLinksFirstByClicksSQL, opts.TenantID, opts.Limit)
-		} else {
-			rows, err = s.db.QueryContext(ctx, listLinksAfterClicksSQL,
-				opts.TenantID, cursor.Clicks, cursor.ID, opts.Limit)
-		}
-	case link.SortClicksToday:
+	if opts.Sort == link.SortClicksToday {
 		return s.listByClicksToday(ctx, opts)
-	default:
-		return nil, fmt.Errorf("list links: unknown sort %q", opts.Sort)
 	}
+
+	query, args, err := buildListLinksQuery(opts.Sort, opts.Cursor, opts.TenantID, opts.Limit, opts.Status, opts.Query)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list links: %w", err)
 	}
@@ -446,8 +480,12 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 func (s *Store) listByClicksToday(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
 	// 游标已经落入今日 0 点击段时，跳过 link_clicks_daily 直接按 links (tenant_id, id DESC) 翻页。
 	if opts.Cursor != nil && opts.Cursor.ClicksToday <= 0 {
-		return queryAdminLinks(ctx, s.db, opts.Limit, listLinksAfterUnclickedTodaySQL,
-			opts.TenantID, opts.Cursor.ID, opts.Limit)
+		afterID := opts.Cursor.ID
+		query, args, err := buildUnclickedTodayQuery(&afterID, opts.TenantID, opts.Limit, opts.Status, opts.Query)
+		if err != nil {
+			return nil, err
+		}
+		return queryAdminLinks(ctx, s.db, opts.Limit, query, args...)
 	}
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
@@ -459,16 +497,9 @@ func (s *Store) listByClicksToday(ctx context.Context, opts link.ListOptions) ([
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var (
-		query string
-		args  []any
-	)
-	if opts.Cursor == nil {
-		query = listLinksFirstClickedTodaySQL
-		args = []any{opts.TenantID, opts.Limit}
-	} else {
-		query = listLinksAfterClickedTodaySQL
-		args = []any{opts.TenantID, opts.Cursor.ClicksToday, opts.Cursor.ID, opts.Limit}
+	query, args, err := buildClickedTodayQuery(opts.Cursor, opts.TenantID, opts.Limit, opts.Status, opts.Query)
+	if err != nil {
+		return nil, err
 	}
 	result, err := queryAdminLinks(ctx, tx, opts.Limit, query, args...)
 	if err != nil {
@@ -476,7 +507,11 @@ func (s *Store) listByClicksToday(ctx context.Context, opts link.ListOptions) ([
 	}
 
 	if remaining := opts.Limit - len(result); remaining > 0 {
-		more, err := queryAdminLinks(ctx, tx, remaining, listLinksFirstUnclickedTodaySQL, opts.TenantID, remaining)
+		unclickedQuery, unclickedArgs, err := buildUnclickedTodayQuery(nil, opts.TenantID, remaining, opts.Status, opts.Query)
+		if err != nil {
+			return nil, err
+		}
+		more, err := queryAdminLinks(ctx, tx, remaining, unclickedQuery, unclickedArgs...)
 		if err != nil {
 			return nil, err
 		}

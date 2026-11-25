@@ -27,18 +27,22 @@ import { usePublicBaseUrl } from '@/features/auth/api';
 import { canWriteLinks } from '@/features/auth/permissions';
 import { getErrorMessage } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
+import { MAX_LINK_SEARCH_BYTES } from '@/lib/constants';
 import { formatNumber } from '@/lib/format';
 import { buildShortUrl, isExactShortCode } from '@/lib/short-url';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import {
   type AdminLink,
   type LinkSort,
+  type LinkStatusFilter,
   useDeleteLink,
   useInfiniteLinks,
   useUpdateLink,
 } from './api';
 import { LinkCard, type LinksViewMode } from './LinkCard';
 import { LinkFormDialog } from './LinkFormDialog';
+
+const utf8Encoder = new TextEncoder();
 
 export function LinksPage() {
   const { org } = useCurrentOrg();
@@ -49,14 +53,25 @@ export function LinksPage() {
   useDocumentTitle(`短链管理 · ${org.name}`);
 
   const [sort, setSort] = useState<LinkSort>('id');
+  const [statusFilter, setStatusFilter] = useState<LinkStatusFilter>('');
   const [view, setView] = useState<LinksViewMode>('cards');
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [formOpen, setFormOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<AdminLink | null>(null);
   const [qrLink, setQrLink] = useState<AdminLink | null>(null);
   const [deletingLink, setDeletingLink] = useState<AdminLink | null>(null);
 
-  const linksQuery = useInfiniteLinks(org.id, sort);
+  useEffect(() => {
+    const trimmed = search.trim();
+    if (utf8Encoder.encode(trimmed).length > MAX_LINK_SEARCH_BYTES) return;
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(trimmed);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  const linksQuery = useInfiniteLinks(org.id, sort, statusFilter, debouncedSearch);
   const updateLink = useUpdateLink(org.id);
   const deleteLink = useDeleteLink(org.id);
 
@@ -100,14 +115,14 @@ export function LinksPage() {
   }, [linksQuery.data]);
 
   const trimmedSearch = search.trim();
-  const filteredLinks = useMemo(() => {
-    const keyword = trimmedSearch.toLowerCase();
-    if (!keyword) return allLinks;
-    return allLinks.filter(
-      (item) =>
-        item.code.toLowerCase().includes(keyword) || item.url.toLowerCase().includes(keyword),
-    );
-  }, [allLinks, trimmedSearch]);
+  const searchTooLong = utf8Encoder.encode(trimmedSearch).length > MAX_LINK_SEARCH_BYTES;
+  const hasActiveFilters = statusFilter !== '' || debouncedSearch !== '';
+
+  function handleClearFilters() {
+    setStatusFilter('');
+    setSearch('');
+    setDebouncedSearch('');
+  }
 
   const summary = useMemo(() => {
     let active = 0;
@@ -206,7 +221,7 @@ export function LinksPage() {
           </div>
           <div className="px-4 py-3">
             <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-              已加载短链
+              {hasActiveFilters ? '当前筛选已加载' : '已加载短链'}
               {linksQuery.hasNextPage && (
                 <span className="rounded bg-zinc-200/70 px-1 py-0.5 text-[10px] text-zinc-600">
                   含更多页
@@ -222,7 +237,11 @@ export function LinksPage() {
           </div>
           <div className="px-4 py-3">
             <div className="text-xs text-zinc-500">
-              {linksQuery.hasNextPage ? '已加载短链点击' : '累计点击'}
+              {hasActiveFilters
+                ? '筛选结果点击'
+                : linksQuery.hasNextPage
+                  ? '已加载短链点击'
+                  : '累计点击'}
             </div>
             <div className="mt-1 flex items-baseline gap-2">
               <span className="font-mono text-lg font-semibold tabular-nums text-zinc-950">
@@ -238,22 +257,33 @@ export function LinksPage() {
         </div>
       )}
 
-      {/* 工具栏：筛选已加载项或输入 8 位短码精确直达 + 排序 + 视图切换 */}
+      {/* 工具栏：服务端关键词搜索 / 8 位短码精确直达 + 状态筛选 + 排序 + 视图切换 */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="relative w-full sm:max-w-sm">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-400" />
           <Input
-            aria-label="筛选短链"
-            placeholder="筛选已加载短链，或输入 8 位短码直达…"
+            aria-label="搜索短链"
+            placeholder="搜索短码或目标 URL，或输入 8 位短码直达…"
             className="pl-9 pr-8"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const trimmed = search.trim();
+                if (utf8Encoder.encode(trimmed).length <= MAX_LINK_SEARCH_BYTES) {
+                  setDebouncedSearch(trimmed);
+                }
+              }
+            }}
           />
           {search && (
             <button
               type="button"
               aria-label="清空搜索"
-              onClick={() => setSearch('')}
+              onClick={() => {
+                setSearch('');
+                setDebouncedSearch('');
+              }}
               className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 cursor-pointer"
             >
               <X className="size-3.5" />
@@ -261,7 +291,19 @@ export function LinksPage() {
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            aria-label="状态筛选"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as LinkStatusFilter)}
+          >
+            <option value="">全部状态</option>
+            <option value="active">活跃</option>
+            <option value="disabled">已停用</option>
+            <option value="expired">已过期</option>
+            <option value="banned">已封禁</option>
+          </Select>
+
           <Select
             aria-label="排序方式"
             value={sort}
@@ -295,6 +337,10 @@ export function LinksPage() {
         </div>
       </div>
 
+      {searchTooLong && (
+        <ErrorAlert compact message={`搜索关键词不能超过 ${MAX_LINK_SEARCH_BYTES} 字节`} />
+      )}
+
       {linksQuery.isError && (
         <ErrorAlert
           message={`加载短链失败：${getErrorMessage(linksQuery.error)}`}
@@ -308,7 +354,7 @@ export function LinksPage() {
           <Skeleton className="h-[74px] w-full rounded-xl" />
           <Skeleton className="h-[74px] w-full rounded-xl" />
         </div>
-      ) : allLinks.length === 0 ? (
+      ) : allLinks.length === 0 && !hasActiveFilters ? (
         <EmptyState
           icon={Link2}
           title="当前组织还没有短链"
@@ -331,14 +377,14 @@ export function LinksPage() {
             ) : undefined
           }
         />
-      ) : filteredLinks.length === 0 ? (
+      ) : allLinks.length === 0 ? (
         <EmptyState
           icon={Search}
-          title="已加载列表中未找到匹配项"
+          title="未找到匹配的短链"
           description={
-            linksQuery.hasNextPage
-              ? `当前仅在已加载的 ${allLinks.length} 条记录中筛选，目标短链可能在后续分页中。`
-              : `全部 ${allLinks.length} 条记录中未找到包含「${trimmedSearch}」的短链。`
+            debouncedSearch
+              ? `当前筛选条件下没有匹配「${debouncedSearch}」的短链。`
+              : '当前状态筛选下没有符合条件的短链。'
           }
           action={
             <div className="flex flex-wrap items-center justify-center gap-2">
@@ -348,7 +394,7 @@ export function LinksPage() {
                   <ArrowRight className="size-3.5" />
                 </Button>
               )}
-              <Button variant="outline" size="sm" onClick={() => setSearch('')}>
+              <Button variant="outline" size="sm" onClick={handleClearFilters}>
                 清空筛选
               </Button>
             </div>
@@ -363,7 +409,7 @@ export function LinksPage() {
                 : 'overflow-hidden rounded-xl border border-zinc-200/90 bg-white',
             )}
           >
-            {filteredLinks.map((link) => (
+            {allLinks.map((link) => (
               <LinkCard
                 key={link.code}
                 orgId={org.id}

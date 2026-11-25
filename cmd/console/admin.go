@@ -21,8 +21,8 @@ var errUsage = errors.New("usage")
 const usageText = `用法:
   console serve
   console worker
-  console key issue --name NAME [--external-id ID] [--expires RFC3339] [--scope SCOPE]...
-  console key issue --tenant ID [--expires RFC3339] [--scope SCOPE]...
+  console key issue --name NAME [--external-id ID] [--key-name KEY_NAME] [--expires RFC3339] [--scope SCOPE]...
+  console key issue --tenant ID [--key-name KEY_NAME] [--expires RFC3339] [--scope SCOPE]...
   console key list --tenant ID
   console key revoke --id ID
   console tenant show --tenant ID
@@ -33,7 +33,7 @@ const usageText = `用法:
 
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
 worker 启动后台任务引擎（异步 URL 风控、租约回收与过期会话/已完成任务清理），需要 DATABASE_URL 和 REDIS_URL。
-issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；
+issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；--key-name 为密钥可选备注名；
 --scope 省略表示拥有全部密钥权限（links:read、links:write、stats:read），
 可重复传入或用逗号分隔。
 --name 会新建租户；已有租户用 --tenant。密钥、租户和成员命令只读 DATABASE_URL，不连接 Redis。
@@ -255,6 +255,7 @@ func parseIssue(args []string, stderr io.Writer) (command, error) {
 	name := fs.String("name", "", "新租户名称")
 	externalID := fs.String("external-id", "", "外部租户编号，只在新建租户时写入")
 	tenantID := fs.Int64("tenant", 0, "已有租户 ID")
+	keyName := fs.String("key-name", "", "API Key 可选名称/备注")
 	expires := fs.String("expires", "", "RFC3339 到期时间，省略表示不过期")
 	var scopes scopeFlag
 	fs.Var(&scopes, "scope", "权限范围（links:read、links:write、stats:read），可重复传入或用逗号分隔")
@@ -262,9 +263,15 @@ func parseIssue(args []string, stderr io.Writer) (command, error) {
 		return nil, err
 	}
 
+	normalizedKeyName, err := identity.NormalizeAPIKeyName(*keyName)
+	if err != nil {
+		return nil, fmt.Errorf("parse key-name: %w", err)
+	}
+
 	params := postgres.IssueAPIKeyParams{
 		TenantID:   *tenantID,
 		Name:       *name,
+		KeyName:    normalizedKeyName,
 		ExternalID: *externalID,
 	}
 	if *expires != "" {
@@ -474,8 +481,15 @@ func printTenantLimits(w io.Writer, limits postgres.TenantLimits) error {
 }
 
 func printIssued(w io.Writer, issued postgres.IssuedAPIKey) error {
-	if _, err := fmt.Fprintf(w, "tenant_id: %d\nkey_id: %d\nscopes: %s\n",
-		issued.Tenant.ID, issued.Key.ID, formatScopes(issued.Key.Scopes)); err != nil {
+	if _, err := fmt.Fprintf(w, "tenant_id: %d\nkey_id: %d\n", issued.Tenant.ID, issued.Key.ID); err != nil {
+		return err
+	}
+	if issued.Key.Name != "" {
+		if _, err := fmt.Fprintf(w, "key_name: %s\n", issued.Key.Name); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(w, "scopes: %s\n", formatScopes(issued.Key.Scopes)); err != nil {
 		return err
 	}
 	if issued.Key.ExpiresAt != nil {
@@ -488,13 +502,18 @@ func printIssued(w io.Writer, issued postgres.IssuedAPIKey) error {
 }
 
 func printKeys(w io.Writer, keys []postgres.APIKey) error {
-	if _, err := fmt.Fprint(w, "id\ttenant_id\tcreated_at\texpires_at\trevoked_at\tscopes\n"); err != nil {
+	if _, err := fmt.Fprint(w, "id\ttenant_id\tname\tcreated_at\tlast_used_at\texpires_at\trevoked_at\tscopes\n"); err != nil {
 		return err
 	}
 	for _, key := range keys {
-		if _, err := fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\n",
-			key.ID, key.TenantID,
+		keyName := key.Name
+		if keyName == "" {
+			keyName = "-"
+		}
+		if _, err := fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			key.ID, key.TenantID, keyName,
 			key.CreatedAt.UTC().Format(time.RFC3339),
+			formatOptional(key.LastUsedAt),
 			formatOptional(key.ExpiresAt),
 			formatOptional(key.RevokedAt),
 			formatScopes(key.Scopes),

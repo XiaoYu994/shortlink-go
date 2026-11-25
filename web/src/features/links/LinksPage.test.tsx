@@ -226,4 +226,98 @@ describe('LinksPage', () => {
       screen.queryByRole('link', { name: 'https://evil.example/phish' }),
     ).not.toBeInTheDocument();
   });
+
+  it('filters links by status and debounced server search q, and resets on clear', async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/auth/providers') {
+        return jsonResponse({ oidc: true, github: false });
+      }
+      if (url.includes('q=missing')) {
+        return jsonResponse({ items: [] });
+      }
+      if (url.includes('status=banned') && url.includes('q=phish')) {
+        return jsonResponse({
+          items: [
+            {
+              code: 'Ban77777',
+              url: 'https://evil.example/phish',
+              status: 'banned',
+              ban_reason: 'phishing',
+              created_at: '2026-11-23T07:00:00Z',
+              clicks: 0,
+              clicks_today: 0,
+            },
+          ],
+        });
+      }
+      if (url.includes('status=banned')) {
+        return jsonResponse({
+          items: [
+            {
+              code: 'Ban77777',
+              url: 'https://evil.example/phish',
+              status: 'banned',
+              ban_reason: 'phishing',
+              created_at: '2026-11-23T07:00:00Z',
+              clicks: 0,
+              clicks_today: 0,
+            },
+          ],
+        });
+      }
+      return jsonResponse({
+        items: [
+          {
+            code: 'Actv1234',
+            url: 'https://example.com/ok',
+            status: 'active',
+            created_at: '2026-11-23T08:00:00Z',
+            clicks: 5,
+            clicks_today: 1,
+          },
+        ],
+      });
+    });
+
+    renderWithOrg(<LinksPage />, { orgId: 9, role: 'owner' });
+    expect(await screen.findByText('/r/Actv1234')).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText('状态筛选'), 'banned');
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/links?limit=20&sort=id&status=banned',
+        expect.anything(),
+      );
+    });
+    expect(await screen.findByText('/r/Ban77777')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('搜索短链'), 'phish');
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/links?limit=20&sort=id&status=banned&q=phish',
+        expect.anything(),
+      );
+    });
+
+    await user.clear(screen.getByLabelText('搜索短链'));
+    await user.type(screen.getByLabelText('搜索短链'), 'missing');
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/links?limit=20&sort=id&status=banned&q=missing',
+        expect.anything(),
+      );
+    });
+    expect(await screen.findByText('未找到匹配的短链')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '清空筛选' }));
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenLastCalledWith(
+        '/api/v1/links?limit=20&sort=id',
+        expect.anything(),
+      );
+    });
+    expect(await screen.findByText('/r/Actv1234')).toBeInTheDocument();
+  });
 });

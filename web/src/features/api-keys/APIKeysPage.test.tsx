@@ -43,6 +43,7 @@ describe('APIKeysPage', () => {
         return jsonResponse(
           {
             id: 11,
+            name: 'prod-ci',
             scopes: ['links:read', 'links:write', 'stats:read'],
             status: 'active',
             created_by: 7,
@@ -58,10 +59,12 @@ describe('APIKeysPage', () => {
             ? [
                 {
                   id: 11,
+                  name: 'prod-ci',
                   scopes: ['links:read', 'links:write', 'stats:read'],
                   status: 'active',
                   created_by: 7,
                   created_at: '2026-11-23T08:00:00Z',
+                  last_used_at: '2026-11-24T09:00:00Z',
                 },
               ]
             : [],
@@ -74,12 +77,19 @@ describe('APIKeysPage', () => {
 
     await screen.findByText('还没有组织 API Key');
     await user.click(screen.getByRole('button', { name: /签发第一把 API Key/ }));
-    await user.click(await screen.findByRole('button', { name: '确认签发' }));
+    await user.type(await screen.findByLabelText('名称 / 备注（可选）'), 'prod-ci');
+    await user.click(screen.getByRole('button', { name: '确认签发' }));
 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledWith(
         '/api/v1/api-keys',
-        expect.objectContaining({ method: 'POST' }),
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'prod-ci',
+            scopes: ['links:read', 'links:write', 'stats:read'],
+          }),
+        }),
       );
     });
 
@@ -87,7 +97,36 @@ describe('APIKeysPage', () => {
     expect(screen.getByTestId('issued-api-key-curl')).toHaveTextContent(
       `Authorization: Bearer ${plaintext}`,
     );
-    expect(await screen.findByText('#11')).toBeInTheDocument();
+    expect(await screen.findByText('prod-ci')).toBeInTheDocument();
+    expect(screen.getByText('#11')).toBeInTheDocument();
+    expect(screen.getByText(/最近使用/)).toBeInTheDocument();
     expect(await screen.findByText('由 Alice 签发')).toBeInTheDocument();
+  });
+
+  it('shows unused state when last_used_at is absent', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/members') {
+        return jsonResponse({ items: [] });
+      }
+      if (url === '/api/v1/api-keys') {
+        return jsonResponse({
+          items: [
+            {
+              id: 21,
+              scopes: ['links:read'],
+              status: 'active',
+              created_at: '2026-11-23T08:00:00Z',
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    renderWithOrg(<APIKeysPage />, { orgId: 5, role: 'admin' });
+
+    expect(await screen.findByText('#21')).toBeInTheDocument();
+    expect(screen.getByText('尚未使用')).toBeInTheDocument();
   });
 });

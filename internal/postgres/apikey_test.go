@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,16 @@ func TestIssueAPIKeyRejectsBadParams(t *testing.T) {
 			name:    "member scope not allowed on api key",
 			params:  IssueAPIKeyParams{Name: "acme", Scopes: []identity.Perm{identity.PermLinksRead, identity.PermMembersWrite}},
 			wantErr: identity.ErrInvalidAPIKeyScope,
+		},
+		{
+			name:    "key name too long",
+			params:  IssueAPIKeyParams{Name: "acme", KeyName: strings.Repeat("k", identity.MaxAPIKeyNameBytes+1), Scopes: identity.AllAPIKeyScopes()},
+			wantErr: identity.ErrInvalidAPIKeyName,
+		},
+		{
+			name:    "key name control char",
+			params:  IssueAPIKeyParams{Name: "acme", KeyName: "ci\nbot", Scopes: identity.AllAPIKeyScopes()},
+			wantErr: identity.ErrInvalidAPIKeyName,
 		},
 	}
 	for _, tt := range tests {
@@ -211,5 +222,120 @@ func TestIssueListRevokeAPIKey(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), issued.Plaintext) {
 		t.Fatal("error contains plaintext")
+	}
+}
+
+func TestAPIKeyNameAndLastUsedAtThrottle(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := testAuditCtx(context.Background())
+
+	// 1. 非法 KeyName 不得建出租户。
+	if _, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{
+		Name:    "should-not-exist",
+		KeyName: "bad\nname",
+		Scopes:  identity.AllAPIKeyScopes(),
+	}); !errors.Is(err, identity.ErrInvalidAPIKeyName) {
+		t.Fatalf("bad KeyName error = %v, want ErrInvalidAPIKeyName", err)
+	}
+	var tenantCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM tenants WHERE name = 'should-not-exist'`).Scan(&tenantCount); err != nil {
+		t.Fatalf("count tenants: %v", err)
+	}
+	if tenantCount != 0 {
+		t.Fatalf("tenantCount = %d, want 0 after invalid KeyName", tenantCount)
+	}
+
+	// 2. 合法 KeyName 写入 api_keys 与 audit_logs.metadata.name，且初始 last_used_at 为空。
+	issued, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{
+		TenantID: tenantID,
+		KeyName:  "  ci-deploy-bot  ",
+		Scopes:   identity.AllAPIKeyScopes(),
+	})
+	if err != nil {
+		t.Fatalf("IssueAPIKey: %v", err)
+	}
+	if issued.Key.Name != "ci-deploy-bot" {
+		t.Fatalf("issued.Key.Name = %q, want ci-deploy-bot", issued.Key.Name)
+	}
+	if issued.Key.LastUsedAt != nil {
+		t.Fatalf("initial LastUsedAt = %v, want nil", issued.Key.LastUsedAt)
+	}
+
+	var auditMetaName string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT metadata->>'name' FROM audit_logs WHERE tenant_id = $1 AND action = 'apikey.issue' AND target_id = $2`,
+		tenantID, strconv.FormatInt(issued.Key.ID, 10),
+	).Scan(&auditMetaName); err != nil {
+		t.Fatalf("select audit metadata: %v", err)
+	}
+	if auditMetaName != "ci-deploy-bot" {
+		t.Errorf("audit metadata.name = %q, want ci-deploy-bot", auditMetaName)
+	}
+
+	// 3. 首次 Authenticate 写入 last_used_at；紧接着第二次受 5 分钟节流不推进。
+	if _, err := store.Authenticate(ctx, issued.Plaintext); err != nil {
+		t.Fatalf("first Authenticate: %v", err)
+	}
+	keys, err := store.ListAPIKeys(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("ListAPIKeys after first auth: %v", err)
+	}
+	if len(keys) != 1 || keys[0].Name != "ci-deploy-bot" || keys[0].LastUsedAt == nil {
+		t.Fatalf("keys after first auth = %+v, want name and non-nil LastUsedAt", keys)
+	}
+	firstUsedAt := *keys[0].LastUsedAt
+
+	if _, err := store.Authenticate(ctx, issued.Plaintext); err != nil {
+		t.Fatalf("second Authenticate: %v", err)
+	}
+	keys, err = store.ListAPIKeys(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("ListAPIKeys after second auth: %v", err)
+	}
+	if keys[0].LastUsedAt == nil || !keys[0].LastUsedAt.Equal(firstUsedAt) {
+		t.Fatalf("second auth advanced LastUsedAt: %v -> %v, want throttled", firstUsedAt, keys[0].LastUsedAt)
+	}
+
+	// 4. 超过 5 分钟节流窗口后再次 Authenticate 会推进 last_used_at。
+	var backdated time.Time
+	if err := store.db.QueryRowContext(ctx,
+		`UPDATE api_keys SET last_used_at = now() - interval '6 minutes' WHERE id = $1 RETURNING last_used_at`, issued.Key.ID,
+	).Scan(&backdated); err != nil {
+		t.Fatalf("backdate last_used_at: %v", err)
+	}
+	if _, err := store.Authenticate(ctx, issued.Plaintext); err != nil {
+		t.Fatalf("third Authenticate: %v", err)
+	}
+	keys, err = store.ListAPIKeys(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("ListAPIKeys after third auth: %v", err)
+	}
+	if keys[0].LastUsedAt == nil || !keys[0].LastUsedAt.After(backdated) || keys[0].LastUsedAt.Before(firstUsedAt) {
+		t.Fatalf("third auth did not refresh LastUsedAt: got=%v, backdated=%v, first=%v", keys[0].LastUsedAt, backdated, firstUsedAt)
+	}
+	refreshedAt := *keys[0].LastUsedAt
+
+	// 5. 失败鉴权（错误 token、过期、吊销）不得更新 last_used_at。
+	if _, err := store.Authenticate(ctx, "slk_"+strings.Repeat("00", 32)); !errors.Is(err, identity.ErrUnauthenticated) {
+		t.Fatalf("wrong token err = %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE api_keys SET last_used_at = now() - interval '10 minutes', expires_at = now() - interval '1 second' WHERE id = $1`,
+		issued.Key.ID); err != nil {
+		t.Fatalf("expire key: %v", err)
+	}
+	var beforeFail time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id = $1`, issued.Key.ID).Scan(&beforeFail); err != nil {
+		t.Fatalf("read beforeFail: %v", err)
+	}
+	if _, err := store.Authenticate(ctx, issued.Plaintext); !errors.Is(err, identity.ErrUnauthenticated) {
+		t.Fatalf("expired token err = %v", err)
+	}
+	var afterFail time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id = $1`, issued.Key.ID).Scan(&afterFail); err != nil {
+		t.Fatalf("read afterFail: %v", err)
+	}
+	if !afterFail.Equal(beforeFail) || !refreshedAt.After(beforeFail) {
+		t.Fatalf("failed auth modified last_used_at: before=%v after=%v", beforeFail, afterFail)
 	}
 }

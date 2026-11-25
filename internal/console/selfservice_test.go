@@ -277,11 +277,26 @@ func TestInvitationsAndAPIKeysPermissions(t *testing.T) {
 	}
 	keyStore := &fakeAPIKeyStore{
 		listFn: func(context.Context, int64) ([]identity.APIKeyInfo, error) {
-			return []identity.APIKeyInfo{{ID: 5, TenantID: 1, Scopes: identity.AllAPIKeyScopes(), CreatedAt: time.Now().UTC()}}, nil
+			lastUsed := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+			return []identity.APIKeyInfo{{
+				ID:         5,
+				TenantID:   1,
+				Name:       "ci-bot",
+				Scopes:     identity.AllAPIKeyScopes(),
+				CreatedAt:  time.Now().UTC(),
+				LastUsedAt: &lastUsed,
+			}}, nil
 		},
 		issueFn: func(_ context.Context, p identity.IssueOrgAPIKeyParams) (identity.IssuedOrgAPIKey, error) {
 			return identity.IssuedOrgAPIKey{
-				Key:       identity.APIKeyInfo{ID: 6, TenantID: p.TenantID, Scopes: p.Scopes, CreatedBy: &p.CreatedBy, CreatedAt: time.Now().UTC()},
+				Key: identity.APIKeyInfo{
+					ID:        6,
+					TenantID:  p.TenantID,
+					Name:      p.Name,
+					Scopes:    p.Scopes,
+					CreatedBy: &p.CreatedBy,
+					CreatedAt: time.Now().UTC(),
+				},
 				Plaintext: apiKeyTok,
 			}, nil
 		},
@@ -324,12 +339,22 @@ func TestInvitationsAndAPIKeysPermissions(t *testing.T) {
 		t.Errorf("admin revoke invitation = %d, want 204", rec.Code)
 	}
 
-	issueRec := doUser(hAdmin, http.MethodPost, "/api/v1/api-keys", `{"scopes":["links:read"]}`)
-	if issueRec.Code != http.StatusCreated || !strings.Contains(issueRec.Body.String(), `"api_key":"`+apiKeyTok+`"`) {
+	issueRec := doUser(hAdmin, http.MethodPost, "/api/v1/api-keys", `{"name":"  deploy-ci  ","scopes":["links:read"]}`)
+	if issueRec.Code != http.StatusCreated ||
+		!strings.Contains(issueRec.Body.String(), `"api_key":"`+apiKeyTok+`"`) ||
+		!strings.Contains(issueRec.Body.String(), `"name":"deploy-ci"`) {
 		t.Errorf("admin issue api key = %d body=%s", issueRec.Code, issueRec.Body.String())
 	}
 	if issueRec.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("issue api key Cache-Control = %q, want no-store", issueRec.Header().Get("Cache-Control"))
+	}
+	if rec := doUser(hAdmin, http.MethodPost, "/api/v1/api-keys", `{"name":"bad\nname","scopes":["links:read"]}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("invalid api key name = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	if listRec := doUser(hAdmin, http.MethodGet, "/api/v1/api-keys", ""); listRec.Code != http.StatusOK ||
+		!strings.Contains(listRec.Body.String(), `"name":"ci-bot"`) ||
+		!strings.Contains(listRec.Body.String(), `"last_used_at":"2026-11-24T10:00:00Z"`) {
+		t.Errorf("list api keys = %d body=%s", listRec.Code, listRec.Body.String())
 	}
 	if rec := doUser(hAdmin, http.MethodDelete, "/api/v1/api-keys/6", ""); rec.Code != http.StatusNoContent {
 		t.Errorf("admin revoke api key = %d, want 204", rec.Code)

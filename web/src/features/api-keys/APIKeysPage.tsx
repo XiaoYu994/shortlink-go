@@ -123,7 +123,9 @@ export function APIKeysPage() {
               </span>
               <div>
                 <CardTitle className="text-amber-950">
-                  API Key #{visibleSecret.id} 已签发（明文仅展示这一次）
+                  {visibleSecret.name
+                    ? `API Key「${visibleSecret.name}」（#${visibleSecret.id}）已签发（明文仅展示这一次）`
+                    : `API Key #${visibleSecret.id} 已签发（明文仅展示这一次）`}
                 </CardTitle>
                 <CardDescription className="text-amber-900/75">
                   请立即保存到密钥管理服务；关闭后服务端无法再次找回明文。
@@ -215,9 +217,16 @@ export function APIKeysPage() {
                   </span>
                   <div className="min-w-0 space-y-1.5">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm font-semibold text-zinc-950">
-                        #{key.id}
-                      </span>
+                      {key.name ? (
+                        <>
+                          <span className="text-sm font-semibold text-zinc-950">{key.name}</span>
+                          <span className="font-mono text-xs text-zinc-400">#{key.id}</span>
+                        </>
+                      ) : (
+                        <span className="font-mono text-sm font-semibold text-zinc-950">
+                          #{key.id}
+                        </span>
+                      )}
                       <Badge
                         variant={statusMeta.variant}
                         className="gap-1.5 px-2 py-0.5 text-[11px]"
@@ -248,6 +257,17 @@ export function APIKeysPage() {
                       >
                         创建于 {formatRelativeTime(key.created_at)}
                       </span>
+                      <span className="text-zinc-300">·</span>
+                      {key.last_used_at ? (
+                        <span
+                          title={formatDateTime(key.last_used_at)}
+                          className="text-xs text-zinc-500"
+                        >
+                          最近使用 {formatRelativeTime(key.last_used_at)}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-zinc-400">尚未使用</span>
+                      )}
                       {key.expires_at && (
                         <>
                           <span className="text-zinc-300">·</span>
@@ -297,7 +317,11 @@ export function APIKeysPage() {
         onOpenChange={(open) => {
           if (!open) setRevokingKey(null);
         }}
-        title={`吊销 API Key #${revokingKey?.id ?? ''}？`}
+        title={
+          revokingKey?.name
+            ? `吊销 API Key「${revokingKey.name}」（#${revokingKey.id}）？`
+            : `吊销 API Key #${revokingKey?.id ?? ''}？`
+        }
         description="吊销后使用该密钥的自动化任务或脚本将立即失效且无法恢复。"
         confirmLabel="确认吊销"
         pending={revokeKey.isPending}

@@ -15,15 +15,15 @@ import (
 )
 
 const (
-	insertAPIKeySQL = `INSERT INTO api_keys (tenant_id, key_hash, expires_at, scopes, created_by)
-VALUES ($1, $2, $3, $4::text[], $5)
+	insertAPIKeySQL = `INSERT INTO api_keys (tenant_id, key_hash, name, expires_at, scopes, created_by)
+VALUES ($1, $2, $3, $4, $5::text[], $6)
 RETURNING id, created_at, expires_at`
 
 	selectTenantForIssueSQL = `SELECT id, external_id FROM tenants WHERE id = $1`
 
 	insertTenantForIssueSQL = `INSERT INTO tenants (name, external_id) VALUES ($1, $2) RETURNING id`
 
-	listAPIKeysSQL = `SELECT id, tenant_id, scopes, created_by, created_at, expires_at, revoked_at
+	listAPIKeysSQL = `SELECT id, tenant_id, name, scopes, created_by, created_at, last_used_at, expires_at, revoked_at
 FROM api_keys
 WHERE tenant_id = $1
 ORDER BY id`
@@ -82,12 +82,23 @@ audited AS (
 )
 SELECT t.already_revoked FROM target t`
 
-	authenticateAPIKeySQL = `SELECT k.id, k.scopes, t.id, t.external_id, t.rate_limit_per_second
+	authenticateAPIKeySQL = `SELECT k.id,
+       k.scopes,
+       t.id,
+       t.external_id,
+       t.rate_limit_per_second,
+       (k.last_used_at IS NULL OR k.last_used_at < now() - interval '5 minutes') AS needs_touch
 FROM api_keys k
 JOIN tenants t ON t.id = k.tenant_id
 WHERE k.key_hash = $1
   AND k.revoked_at IS NULL
   AND (k.expires_at IS NULL OR k.expires_at > now())`
+
+	// 5 分钟节流窗口 + 无索引更新，保留 PostgreSQL HOT Update；WHERE 再次校验避免并发竞态重复写入。
+	touchAPIKeyLastUsedSQL = `UPDATE api_keys
+SET last_used_at = now()
+WHERE id = $1
+  AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')`
 )
 
 var (
@@ -110,13 +121,15 @@ APIKey 是可以给运维看的密钥状态。
 没有明文，也没有哈希：哈希不能当凭证用，但也不必出现在列表里。
 */
 type APIKey struct {
-	ID        int64
-	TenantID  int64
-	Scopes    []identity.Perm
-	CreatedBy *int64
-	CreatedAt time.Time
-	ExpiresAt *time.Time
-	RevokedAt *time.Time
+	ID         int64
+	TenantID   int64
+	Name       string
+	Scopes     []identity.Perm
+	CreatedBy  *int64
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	ExpiresAt  *time.Time
+	RevokedAt  *time.Time
 }
 
 // IssuedAPIKey 是签发结果。Plaintext 只在这一次交给调用方。
@@ -129,6 +142,7 @@ type IssuedAPIKey struct {
 /*
 IssueAPIKeyParams 指定把密钥发给谁以及授予哪些权限。
 TenantID 和 Name 只能填一个：前者给已有租户加一把密钥，后者新建租户再签发。
+KeyName 是 API Key 自身的可选名称/备注，与新建租户的 Name 无关。
 ExternalID 只在新建时写入；空字符串存成 NULL，避免占住唯一约束。
 CreatedBy 为空表示由运维 CLI 签发；非空表示由组织管理员通过 HTTP 接口签发。
 ExpiresAt 为 nil 表示不过期。
@@ -139,6 +153,7 @@ Scopes 必填，nil 和空切片都拒绝：零值不能表示全权限。
 type IssueAPIKeyParams struct {
 	TenantID   int64
 	Name       string
+	KeyName    string
 	ExternalID string
 	CreatedBy  *int64
 	ExpiresAt  *time.Time
@@ -152,6 +167,10 @@ IssueAPIKey 新建或找到租户，生成一把密钥，把哈希、权限范�
 func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPIKey, error) {
 	p.Name = strings.TrimSpace(p.Name)
 	p.ExternalID = strings.TrimSpace(p.ExternalID)
+	keyName, err := identity.NormalizeAPIKeyName(p.KeyName)
+	if err != nil {
+		return IssuedAPIKey{}, err
+	}
 	if err := validateIssue(p); err != nil {
 		return IssuedAPIKey{}, err
 	}
@@ -207,9 +226,9 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 		v := *p.CreatedBy
 		keyCreatedBy = &v
 	}
-	key := APIKey{TenantID: tn.ID, Scopes: scopes, CreatedBy: keyCreatedBy, ExpiresAt: expires}
+	key := APIKey{TenantID: tn.ID, Name: keyName, Scopes: scopes, CreatedBy: keyCreatedBy, ExpiresAt: expires}
 	var scannedExpires sql.NullTime
-	err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, expires, permsToStrings(scopes), createdBy).Scan(
+	err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, keyName, expires, permsToStrings(scopes), createdBy).Scan(
 		&key.ID, &key.CreatedAt, &scannedExpires,
 	)
 	if err != nil {
@@ -220,8 +239,11 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 		key.ExpiresAt = nullTimeUTC(scannedExpires)
 	}
 
-	// 只记录非敏感元数据（scopes 与可选过期时间），绝不写入明文或哈希。
+	// 只记录非敏感元数据（可选名称、scopes 与可选过期时间），绝不写入明文或哈希。
 	keyMeta := map[string]any{"scopes": permsToStrings(scopes)}
+	if keyName != "" {
+		keyMeta["name"] = keyName
+	}
 	if key.ExpiresAt != nil {
 		keyMeta["expires_at"] = key.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
@@ -357,13 +379,14 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID int64) ([]APIKey, erro
 
 func scanAPIKey(scanner rowScanner) (APIKey, error) {
 	var (
-		key       APIKey
-		rawScopes []string
-		createdBy sql.NullInt64
-		expiresAt sql.NullTime
-		revokedAt sql.NullTime
+		key        APIKey
+		rawScopes  []string
+		createdBy  sql.NullInt64
+		lastUsedAt sql.NullTime
+		expiresAt  sql.NullTime
+		revokedAt  sql.NullTime
 	)
-	if err := scanner.Scan(&key.ID, &key.TenantID, &rawScopes, &createdBy, &key.CreatedAt, &expiresAt, &revokedAt); err != nil {
+	if err := scanner.Scan(&key.ID, &key.TenantID, &key.Name, &rawScopes, &createdBy, &key.CreatedAt, &lastUsedAt, &expiresAt, &revokedAt); err != nil {
 		return APIKey{}, err
 	}
 	scopes, err := parseAPIKeyScopes(rawScopes)
@@ -376,6 +399,7 @@ func scanAPIKey(scanner rowScanner) (APIKey, error) {
 		key.CreatedBy = &v
 	}
 	key.CreatedAt = key.CreatedAt.UTC()
+	key.LastUsedAt = nullTimeUTC(lastUsedAt)
 	key.ExpiresAt = nullTimeUTC(expiresAt)
 	key.RevokedAt = nullTimeUTC(revokedAt)
 	return key, nil
@@ -470,6 +494,7 @@ func (s *Store) IssueOrgAPIKey(ctx context.Context, p identity.IssueOrgAPIKeyPar
 	createdBy := p.CreatedBy
 	issued, err := s.IssueAPIKey(ctx, IssueAPIKeyParams{
 		TenantID:  p.TenantID,
+		KeyName:   p.Name,
 		CreatedBy: &createdBy,
 		ExpiresAt: p.ExpiresAt,
 		Scopes:    p.Scopes,
@@ -493,13 +518,15 @@ func (s *Store) RevokeOrgAPIKey(ctx context.Context, tenantID, keyID int64) erro
 
 func toAPIKeyInfo(k APIKey) identity.APIKeyInfo {
 	return identity.APIKeyInfo{
-		ID:        k.ID,
-		TenantID:  k.TenantID,
-		Scopes:    k.Scopes,
-		CreatedBy: k.CreatedBy,
-		CreatedAt: k.CreatedAt,
-		ExpiresAt: k.ExpiresAt,
-		RevokedAt: k.RevokedAt,
+		ID:         k.ID,
+		TenantID:   k.TenantID,
+		Name:       k.Name,
+		Scopes:     k.Scopes,
+		CreatedBy:  k.CreatedBy,
+		CreatedAt:  k.CreatedAt,
+		LastUsedAt: k.LastUsedAt,
+		ExpiresAt:  k.ExpiresAt,
+		RevokedAt:  k.RevokedAt,
 	}
 }
 
@@ -522,15 +549,20 @@ func (s *Store) Authenticate(ctx context.Context, token string) (identity.Princi
 		rawScopes  []string
 		tn         tenant.Tenant
 		externalID sql.NullString
+		needsTouch bool
 	)
 	err := s.db.QueryRowContext(ctx, authenticateAPIKeySQL, identity.HashToken(token)).Scan(
-		&keyID, &rawScopes, &tn.ID, &externalID, &tn.RateLimit,
+		&keyID, &rawScopes, &tn.ID, &externalID, &tn.RateLimit, &needsTouch,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Principal{}, identity.ErrUnauthenticated
 	}
 	if err != nil {
 		return identity.Principal{}, fmt.Errorf("authenticate api key: %w", err)
+	}
+	// last_used_at 属于观测遥测字段，5 分钟节流窗口到期时 best-effort 刷新；写失败不阻断已鉴权请求。
+	if needsTouch {
+		_, _ = s.db.ExecContext(ctx, touchAPIKeyLastUsedSQL, keyID)
 	}
 	if externalID.Valid {
 		tn.ExternalID = externalID.String

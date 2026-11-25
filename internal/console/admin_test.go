@@ -102,12 +102,13 @@ func TestListLinks(t *testing.T) {
 	}}
 	handler := newAdminTestServer(admin).Routes()
 
-	rec := doAdminRequest(t, handler, http.MethodGet, "/api/v1/links?limit=2&sort=clicks&cursor=8:3", "")
+	rec := doAdminRequest(t, handler, http.MethodGet, "/api/v1/links?limit=2&sort=clicks&cursor=8:3&status=banned&q=%20example.com%20", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
 	}
-	if gotOpts.TenantID != 1 || gotOpts.Limit != 3 || gotOpts.Sort != link.SortClicks {
-		t.Errorf("opts = %+v, want tenant 1 limit 3 sort clicks", gotOpts)
+	if gotOpts.TenantID != 1 || gotOpts.Limit != 3 || gotOpts.Sort != link.SortClicks ||
+		gotOpts.Status != link.StatusBanned || gotOpts.Query != "example.com" {
+		t.Errorf("opts = %+v, want tenant 1 limit 3 sort clicks status banned q example.com", gotOpts)
 	}
 	if gotOpts.Cursor == nil || gotOpts.Cursor.ID != 3 || gotOpts.Cursor.Clicks != 8 {
 		t.Errorf("cursor = %+v, want clicks 8 id 3", gotOpts.Cursor)
@@ -155,6 +156,10 @@ func TestListLinksBadQuery(t *testing.T) {
 		{"cursor negative", "?sort=clicks&cursor=-1:5"},
 		{"cursor zero id", "?sort=clicks&cursor=1:0"},
 		{"cursor text", "?sort=id&cursor=abc"},
+		{"invalid status", "?status=deleted"},
+		{"status uppercase", "?status=ACTIVE"},
+		{"q too long", "?q=" + strings.Repeat("a", link.MaxSearchQueryBytes+1)},
+		{"q control char", "?q=abc%0Adef"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

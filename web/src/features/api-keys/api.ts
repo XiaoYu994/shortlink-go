@@ -7,10 +7,12 @@ export type APIKeyScope = 'links:read' | 'links:write' | 'stats:read';
 
 export interface APIKeyInfo {
   id: number;
+  name?: string;
   scopes: APIKeyScope[];
   status: APIKeyStatus;
   created_by?: number;
   created_at: string;
+  last_used_at?: string;
   expires_at?: string;
   revoked_at?: string;
 }
@@ -50,7 +52,7 @@ export function useAPIKeys(orgId: number, enabled: boolean) {
 export function useIssueAPIKey(orgId: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { scopes: APIKeyScope[]; expires_at?: string }) =>
+    mutationFn: (payload: { name?: string; scopes: APIKeyScope[]; expires_at?: string }) =>
       apiRequest<IssuedAPIKey>(ENDPOINTS.apiKeys.listCreate, {
         method: 'POST',
         orgId,

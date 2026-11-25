@@ -5,6 +5,7 @@ import { DEFAULT_LINKS_PAGE_SIZE } from '@/lib/constants';
 import { ENDPOINTS } from '@/lib/endpoints';
 
 export type LinkStatus = 'active' | 'disabled' | 'expired' | 'banned';
+export type LinkStatusFilter = '' | LinkStatus;
 export type LinkSort = 'id' | 'clicks' | 'clicks_today';
 
 export interface AdminLink {
@@ -41,7 +42,8 @@ export interface LinkStats {
 
 export const linkKeys = {
   all: (orgId: number) => ['orgs', orgId, 'links'] as const,
-  list: (orgId: number, sort: LinkSort) => ['orgs', orgId, 'links', 'list', sort] as const,
+  list: (orgId: number, sort: LinkSort, status: LinkStatusFilter, q: string) =>
+    ['orgs', orgId, 'links', 'list', sort, status, q] as const,
   detail: (orgId: number, code: string) => ['orgs', orgId, 'links', 'detail', code] as const,
   stats: (orgId: number, code: string, days: number) =>
     ['orgs', orgId, 'links', 'stats', code, days] as const,
@@ -49,12 +51,20 @@ export const linkKeys = {
 
 export function fetchLinks(
   orgId: number,
-  params: { limit?: number; sort?: LinkSort; cursor?: string },
+  params: {
+    limit?: number;
+    sort?: LinkSort;
+    status?: LinkStatusFilter;
+    q?: string;
+    cursor?: string;
+  },
   signal?: AbortSignal,
 ): Promise<ListLinksResponse> {
   const q = new URLSearchParams();
   if (params.limit) q.set('limit', String(params.limit));
   if (params.sort) q.set('sort', params.sort);
+  if (params.status) q.set('status', params.status);
+  if (params.q) q.set('q', params.q);
   if (params.cursor) q.set('cursor', params.cursor);
   const suffix = q.toString() ? `?${q.toString()}` : '';
   return apiRequest<ListLinksResponse>(`${ENDPOINTS.links.listCreate}${suffix}`, { orgId, signal });
@@ -88,14 +98,29 @@ export function fetchLinkStats(
 
 /*
   useInfiniteQuery 是 TanStack Query 对游标分页（cursor pagination）的原生抽象：
-  每一页返回 next_cursor 作为下一页的 pageParam，切换 orgId 或 sort 时自动重置分页并取消旧请求。
+  每一页返回 next_cursor 作为下一页的 pageParam，切换 orgId、sort、status 或 q 时自动重置分页并取消旧请求。
 */
-export function useInfiniteLinks(orgId: number, sort: LinkSort) {
+export function useInfiniteLinks(
+  orgId: number,
+  sort: LinkSort,
+  status: LinkStatusFilter,
+  q: string,
+) {
   return useInfiniteQuery({
-    queryKey: linkKeys.list(orgId, sort),
+    queryKey: linkKeys.list(orgId, sort, status, q),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam, signal }) =>
-      fetchLinks(orgId, { limit: DEFAULT_LINKS_PAGE_SIZE, sort, cursor: pageParam }, signal),
+      fetchLinks(
+        orgId,
+        {
+          limit: DEFAULT_LINKS_PAGE_SIZE,
+          sort,
+          status: status || undefined,
+          q: q || undefined,
+          cursor: pageParam,
+        },
+        signal,
+      ),
     getNextPageParam: (lastPage) => lastPage.next_cursor,
   });
 }

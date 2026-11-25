@@ -10,6 +10,8 @@ import (
 const (
 	// MaxOrgNameBytes 限制组织名称长度，避免超长输入写入 tenants.name。
 	MaxOrgNameBytes = 100
+	// MaxAPIKeyNameBytes 限制 API Key 名称/备注的字节长度。
+	MaxAPIKeyNameBytes = 100
 	// DefaultMaxOwnedOrgs 是单用户通过自助接口作为 owner 创建组织的数量上限（ADR 0021）。
 	DefaultMaxOwnedOrgs = 10
 )
@@ -68,13 +70,15 @@ type CreatedOrg struct {
 
 // APIKeyInfo 是组织内 API Key 的只读元数据（不含明文与哈希）。
 type APIKeyInfo struct {
-	ID        int64
-	TenantID  int64
-	Scopes    []Perm
-	CreatedBy *int64
-	CreatedAt time.Time
-	ExpiresAt *time.Time
-	RevokedAt *time.Time
+	ID         int64
+	TenantID   int64
+	Name       string
+	Scopes     []Perm
+	CreatedBy  *int64
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	ExpiresAt  *time.Time
+	RevokedAt  *time.Time
 }
 
 // Status 派生 API Key 当前状态：revoked、expired、active。
@@ -93,6 +97,7 @@ func (k APIKeyInfo) Status(now time.Time) string {
 type IssueOrgAPIKeyParams struct {
 	TenantID  int64
 	CreatedBy int64
+	Name      string
 	Scopes    []Perm
 	ExpiresAt *time.Time
 }
@@ -101,6 +106,18 @@ type IssueOrgAPIKeyParams struct {
 type IssuedOrgAPIKey struct {
 	Key       APIKeyInfo
 	Plaintext string
+}
+
+// NormalizeAPIKeyName 去除首尾空白并校验 API Key 名称长度及非法控制字符；允许空字符串。
+func NormalizeAPIKeyName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if len(name) > MaxAPIKeyNameBytes {
+		return "", fmt.Errorf("%w: length must be at most %d bytes", ErrInvalidAPIKeyName, MaxAPIKeyNameBytes)
+	}
+	if strings.ContainsFunc(name, unicode.IsControl) {
+		return "", fmt.Errorf("%w: must not contain control characters", ErrInvalidAPIKeyName)
+	}
+	return name, nil
 }
 
 // NormalizeOrgName 去除首尾空白并校验组织名称长度及非法控制字符。

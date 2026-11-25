@@ -12,8 +12,11 @@ import {
 } from '@/components/ui/dialog';
 import { Input, Label } from '@/components/ui/input';
 import { getErrorMessage } from '@/lib/api-client';
+import { MAX_API_KEY_NAME_BYTES } from '@/lib/constants';
 import { localDatetimeToISO } from '@/lib/format';
 import { ALL_API_KEY_SCOPES, type APIKeyScope, type IssuedAPIKey, useIssueAPIKey } from './api';
+
+const utf8Encoder = new TextEncoder();
 
 interface IssueAPIKeyDialogProps {
   orgId: number;
@@ -23,6 +26,7 @@ interface IssueAPIKeyDialogProps {
 }
 
 export function IssueAPIKeyDialog({ orgId, open, onOpenChange, onIssued }: IssueAPIKeyDialogProps) {
+  const [name, setName] = useState('');
   const [scopes, setScopes] = useState<APIKeyScope[]>(['links:read', 'links:write', 'stats:read']);
   const [expiresAt, setExpiresAt] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
@@ -30,6 +34,7 @@ export function IssueAPIKeyDialog({ orgId, open, onOpenChange, onIssued }: Issue
 
   function handleOpenChange(nextOpen: boolean) {
     if (!nextOpen) {
+      setName('');
       setScopes(['links:read', 'links:write', 'stats:read']);
       setExpiresAt('');
       setFormError(null);
@@ -45,6 +50,11 @@ export function IssueAPIKeyDialog({ orgId, open, onOpenChange, onIssued }: Issue
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    const trimmedName = name.trim();
+    if (utf8Encoder.encode(trimmedName).length > MAX_API_KEY_NAME_BYTES) {
+      setFormError(`名称不能超过 ${MAX_API_KEY_NAME_BYTES} 字节`);
+      return;
+    }
     if (scopes.length === 0) {
       setFormError('请至少选择一个权限 scope');
       return;
@@ -53,10 +63,13 @@ export function IssueAPIKeyDialog({ orgId, open, onOpenChange, onIssued }: Issue
     try {
       const iso = localDatetimeToISO(expiresAt);
       const issued = await issueKey.mutateAsync({
+        ...(trimmedName ? { name: trimmedName } : {}),
         scopes,
         ...(iso ? { expires_at: iso } : {}),
       });
-      toast.success(`已签发 API Key #${issued.id}`);
+      toast.success(
+        issued.name ? `已签发 API Key「${issued.name}」` : `已签发 API Key #${issued.id}`,
+      );
       handleOpenChange(false);
       onIssued(issued);
     } catch (err) {
@@ -74,6 +87,16 @@ export function IssueAPIKeyDialog({ orgId, open, onOpenChange, onIssued }: Issue
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={handleSubmit}>
+          <div className="space-y-2">
+            <Label htmlFor="apikey-name">名称 / 备注（可选）</Label>
+            <Input
+              id="apikey-name"
+              placeholder="例如：生产 CI 发布、数据分析脚本"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+
           <div className="space-y-2">
             <Label>权限范围（Scopes）</Label>
             <div className="space-y-2 rounded-lg border border-border bg-slate-50/70 p-3">

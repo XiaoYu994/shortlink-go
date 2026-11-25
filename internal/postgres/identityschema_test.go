@@ -357,6 +357,18 @@ func TestMigration010IndexesAndConstraints(t *testing.T) {
 			query:   `INSERT INTO jobs (kind, lock_version) VALUES ('link.risk_scan', -1)`,
 			wantErr: "ck_jobs_lock_version_nonnegative",
 		},
+		{
+			name:    "api key name untrimmed",
+			query:   `INSERT INTO api_keys (tenant_id, key_hash, name, scopes) VALUES ($1, $2, ' untrimmed ', ARRAY['links:read']::text[])`,
+			args:    []any{tenantID, bytes.Repeat([]byte{0x11}, 32)},
+			wantErr: "ck_api_keys_name_length",
+		},
+		{
+			name:    "api key name too long",
+			query:   `INSERT INTO api_keys (tenant_id, key_hash, name, scopes) VALUES ($1, $2, $3, ARRAY['links:read']::text[])`,
+			args:    []any{tenantID, bytes.Repeat([]byte{0x12}, 32), strings.Repeat("a", 101)},
+			wantErr: "ck_api_keys_name_length",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

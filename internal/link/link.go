@@ -25,7 +25,10 @@ import (
 MaxURLLength 限制原始 URL 的字节数，避免把超大输入存进数据库。
 导出是因为 HTTP 层要按它计算请求体上限：JSON 转义最坏情况下，URL 的每个字节会占 6 字节。
 */
-const MaxURLLength = 2048
+const (
+	MaxURLLength        = 2048
+	MaxSearchQueryBytes = 200
+)
 
 /*
 ErrNotFound 表示按短码查不到链接；HTTP 层用 errors.Is 映射成 404。
@@ -123,6 +126,16 @@ const (
 	StatusBanned   Status = "banned"
 )
 
+// Valid 报告 s 是不是允许的链接派生状态。
+func (s Status) Valid() bool {
+	switch s {
+	case StatusActive, StatusExpired, StatusDisabled, StatusBanned:
+		return true
+	default:
+		return false
+	}
+}
+
 /*
 ValidationError 表示调用方传入的链接数据不合法。
 HTTP 层用 errors.As 取出它，映射成 400。
@@ -200,6 +213,20 @@ type ListOptions struct {
 	Limit    int
 	Sort     Sort
 	Cursor   *ListCursor
+	Status   Status
+	Query    string
+}
+
+// NormalizeSearchQuery 去除首尾空白并校验搜索关键词长度与控制字符；允许空串。
+func NormalizeSearchQuery(raw string) (string, error) {
+	q := strings.TrimSpace(raw)
+	if len(q) > MaxSearchQueryBytes {
+		return "", &ValidationError{Field: "q", Reason: fmt.Sprintf("longer than %d bytes", MaxSearchQueryBytes)}
+	}
+	if strings.ContainsFunc(q, unicode.IsControl) {
+		return "", &ValidationError{Field: "q", Reason: "must not contain control characters"}
+	}
+	return q, nil
 }
 
 /*

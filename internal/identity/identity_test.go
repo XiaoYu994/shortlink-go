@@ -233,3 +233,38 @@ func TestNormalizeEmail(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeAPIKeyName(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty allowed", in: "", want: ""},
+		{name: "whitespace trims to empty", in: "   \t ", want: ""},
+		{name: "trim surrounding whitespace", in: "  ci-deploy-bot  ", want: "ci-deploy-bot"},
+		{name: "max length allowed", in: strings.Repeat("a", MaxAPIKeyNameBytes), want: strings.Repeat("a", MaxAPIKeyNameBytes)},
+		{name: "too long rejected", in: strings.Repeat("a", MaxAPIKeyNameBytes+1), wantErr: true},
+		{name: "newline rejected", in: "ci\nbot", wantErr: true},
+		{name: "tab inside rejected", in: "ci\tbot", wantErr: true},
+		{name: "nul byte rejected", in: "ci\x00bot", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeAPIKeyName(tt.in)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidAPIKeyName) {
+					t.Fatalf("NormalizeAPIKeyName(%q) err = %v, want ErrInvalidAPIKeyName", tt.in, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeAPIKeyName(%q) err = %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("NormalizeAPIKeyName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

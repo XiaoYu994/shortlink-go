@@ -293,3 +293,54 @@ func BenchmarkValidateURL(b *testing.B) {
 		}
 	}
 }
+
+func TestStatusValid(t *testing.T) {
+	for _, s := range []Status{StatusActive, StatusExpired, StatusDisabled, StatusBanned} {
+		if !s.Valid() {
+			t.Errorf("Status(%q).Valid() = false, want true", s)
+		}
+	}
+	for _, s := range []Status{"", "unknown", "ACTIVE", "deleted"} {
+		if s.Valid() {
+			t.Errorf("Status(%q).Valid() = true, want false", s)
+		}
+	}
+}
+
+func TestNormalizeSearchQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{name: "spaces only", raw: "   \t ", want: ""},
+		{name: "trimmed", raw: "  example.com/path  ", want: "example.com/path"},
+		{name: "max length", raw: strings.Repeat("a", MaxSearchQueryBytes), want: strings.Repeat("a", MaxSearchQueryBytes)},
+		{name: "too long", raw: strings.Repeat("a", MaxSearchQueryBytes+1), wantErr: "longer than"},
+		{name: "control newline", raw: "abc\ndef", wantErr: "control characters"},
+		{name: "control tab", raw: "abc\tdef", wantErr: "control characters"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeSearchQuery(tt.raw)
+			if tt.wantErr != "" {
+				verr, ok := errors.AsType[*ValidationError](err)
+				if !ok {
+					t.Fatalf("NormalizeSearchQuery(%q) err = %v, want *ValidationError", tt.raw, err)
+				}
+				if verr.Field != "q" || !strings.Contains(verr.Reason, tt.wantErr) {
+					t.Fatalf("ValidationError = %+v, want field q containing %q", verr, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeSearchQuery(%q) err = %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Errorf("NormalizeSearchQuery(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}

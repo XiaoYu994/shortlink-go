@@ -629,10 +629,11 @@ status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code
 	-X POST -H 'Content-Type: application/json' \
 	-H "X-Org-ID: $self_org_id" \
 	-b "$oidc_cookies" \
-	-d '{"scopes":["links:read","links:write"]}' \
+	-d '{"name":"smoke-ci-key","scopes":["links:read","links:write"]}' \
 	"$CONSOLE_BASE/api/v1/api-keys")
 assert_eq "$status" 201 'POST /api/v1/api-keys 签发组织 API Key 状态码'
 assert_eq "$(header Cache-Control)" 'no-store' 'POST /api/v1/api-keys Cache-Control'
+grep -Fq '"name":"smoke-ci-key"' "$TMP/body" || fail "签发响应缺少 name=smoke-ci-key: $(cat "$TMP/body")"
 self_key_id=$(sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' "$TMP/body")
 self_api_key=$(sed -n 's/.*"api_key":"\(slk_[0-9a-f]\{64\}\)".*/\1/p' "$TMP/body")
 [ -n "$self_key_id" ] && [ -n "$self_api_key" ] || fail "无法解析自助 API Key: $(cat "$TMP/body")"
@@ -642,9 +643,16 @@ status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code
 	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/api-keys")
 assert_eq "$status" 200 'GET /api/v1/api-keys 状态码'
 grep -Fq "\"id\":$self_key_id" "$TMP/body" || fail "API Key 列表缺少新签发的 key: $(cat "$TMP/body")"
+grep -Fq '"name":"smoke-ci-key"' "$TMP/body" || fail "API Key 列表缺少 name=smoke-ci-key: $(cat "$TMP/body")"
 
 status=$(request_as "$self_api_key" "$CONSOLE_BASE" POST /api/v1/links '{"url":"https://example.com/self-service-key"}')
 assert_eq "$status" 201 '自助签发的 API Key 创建短链状态码'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $self_org_id" \
+	-b "$oidc_cookies" "$CONSOLE_BASE/api/v1/api-keys")
+assert_eq "$status" 200 '使用后 GET /api/v1/api-keys 状态码'
+grep -Fq '"last_used_at":"' "$TMP/body" || fail "使用后 API Key 列表缺少 last_used_at: $(cat "$TMP/body")"
 
 status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 	-X DELETE -H "X-Org-ID: $self_org_id" \
@@ -780,6 +788,18 @@ grep -q '"ban_reason":"phishing"' "$TMP/body" || fail "风控自动封禁缺少 
 
 status=$(request "$REDIRECTOR_BASE" GET "/r/$risk_code")
 assert_eq "$status" 404 '异步风控封禁后跳转应返回 404'
+
+status=$(request "$CONSOLE_BASE" GET '/api/v1/links?status=banned')
+assert_eq "$status" 200 'GET /api/v1/links?status=banned 状态码'
+grep -Fq "\"code\":\"$risk_code\"" "$TMP/body" || fail "status=banned 列表缺少风控封禁短码 $risk_code: $(cat "$TMP/body")"
+if grep -Fq '"status":"active"' "$TMP/body"; then
+	fail "status=banned 列表返回了 active 短链: $(cat "$TMP/body")"
+fi
+status=$(request "$CONSOLE_BASE" GET '/api/v1/links?q=phish.html')
+assert_eq "$status" 200 'GET /api/v1/links?q=phish.html 状态码'
+grep -Fq "\"code\":\"$risk_code\"" "$TMP/body" || fail "q=phish.html 列表缺少目标短码 $risk_code: $(cat "$TMP/body")"
+status=$(request "$CONSOLE_BASE" GET '/api/v1/links?status=invalid')
+assert_eq "$status" 400 '非法 status 筛选应返回 400'
 
 status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 	-H "X-Org-ID: $smoke_tenant_id" \

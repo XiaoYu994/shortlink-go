@@ -136,7 +136,7 @@ GET 模式同时匹配 HEAD。HEAD 记不记点击见 [ADR 0007](adr/0007-async-
 ```txt
 GET /api/v1/links
   -> authenticate -> rateLimit -> requirePerm -> principalFrom(context)
-  -> 解析 limit、sort、cursor（非法值 400）
+  -> 解析 limit、sort、status、q、cursor（非法值 400）
   -> admin.List（cache 透传 -> storemetrics -> postgres，多要一条判断下一页）
   -> 200 {"items":[...],"next_cursor":"..."}
 

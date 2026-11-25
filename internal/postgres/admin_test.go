@@ -3,7 +3,9 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -391,5 +393,262 @@ func TestAdminDeleteRemovesStats(t *testing.T) {
 	}
 	if err := store.Delete(ctx, tenantID, l.Code); !errors.Is(err, link.ErrNotFound) {
 		t.Errorf("second delete error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAdminListStatusAndSearchFilters(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := testAuditCtx(context.Background())
+	otherTenant := insertTenant(t, store, "other")
+
+	future := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Microsecond)
+	disabled := true
+
+	active := createLink(t, store, tenantID, "https://example.com/Alpha-Path")
+	expired := createLink(t, store, tenantID, "https://example.com/100%25discount_offer")
+	disabledAndExpired := createLink(t, store, tenantID, "https://example.com/disabled-expired")
+	bannedAll := createLink(t, store, tenantID, "https://evil.example/C:\\temp\\phish")
+	activeSearch2 := createLink(t, store, tenantID, "https://example.com/alpha-second")
+	activeSearch3ZeroToday := createLink(t, store, tenantID, "https://example.com/alpha-zero-today")
+	otherLink := createLink(t, store, otherTenant, "https://example.com/alpha-other")
+
+	// activeSearch2 有过期时间但在将来，仍然属于 active；activeSearch3ZeroToday 今日 0 点击；otherLink 属于其他租户。
+	if _, err := store.Update(ctx, tenantID, activeSearch2.Code, link.Update{ExpiresAt: &future}); err != nil {
+		t.Fatalf("set future expiry: %v", err)
+	}
+	_ = otherLink
+
+	// expired：仅过期。
+	if _, err := store.db.ExecContext(ctx, `UPDATE links SET expires_at = now() - interval '10 minutes' WHERE id = $1`, expired.ID); err != nil {
+		t.Fatalf("backdate expired: %v", err)
+	}
+
+	// disabledAndExpired：同时停用与过期，按优先级只应归为 disabled，不出现在 expired 里。
+	if _, err := store.Update(ctx, tenantID, disabledAndExpired.Code, link.Update{Disabled: &disabled}); err != nil {
+		t.Fatalf("disable link: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE links SET expires_at = now() - interval '10 minutes' WHERE id = $1`, disabledAndExpired.ID); err != nil {
+		t.Fatalf("backdate disabledAndExpired: %v", err)
+	}
+
+	// bannedAll：同时封禁、停用与过期，按优先级只应归为 banned。
+	if _, err := store.Update(ctx, tenantID, bannedAll.Code, link.Update{Disabled: &disabled}); err != nil {
+		t.Fatalf("disable bannedAll: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE links SET expires_at = now() - interval '10 minutes' WHERE id = $1`, bannedAll.ID); err != nil {
+		t.Fatalf("backdate bannedAll: %v", err)
+	}
+	if _, err := store.Ban(ctx, bannedAll.Code, link.BanReasonPhishing, link.BanSourceRisk); err != nil {
+		t.Fatalf("ban link: %v", err)
+	}
+
+	setTodayClicks(t, store, tenantID, active.ID, 5)
+	setTodayClicks(t, store, tenantID, activeSearch2.ID, 2)
+	setClicks(t, store, active.ID, 20)
+	setClicks(t, store, activeSearch2.ID, 10)
+	setClicks(t, store, activeSearch3ZeroToday.ID, 30)
+
+	checkIDs := func(name string, got []link.AdminLink, wantIDs ...int64) {
+		t.Helper()
+		var gotIDs []int64
+		for _, item := range got {
+			gotIDs = append(gotIDs, item.ID)
+		}
+		if !slices.Equal(gotIDs, wantIDs) {
+			t.Errorf("%s = %v, want %v", name, gotIDs, wantIDs)
+		}
+	}
+
+	gotActive, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 20, Sort: link.SortID, Status: link.StatusActive})
+	if err != nil {
+		t.Fatalf("List active: %v", err)
+	}
+	checkIDs("status=active", gotActive, activeSearch3ZeroToday.ID, activeSearch2.ID, active.ID)
+
+	gotDisabled, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 20, Sort: link.SortID, Status: link.StatusDisabled})
+	if err != nil {
+		t.Fatalf("List disabled: %v", err)
+	}
+	checkIDs("status=disabled", gotDisabled, disabledAndExpired.ID)
+
+	gotExpired, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 20, Sort: link.SortID, Status: link.StatusExpired})
+	if err != nil {
+		t.Fatalf("List expired: %v", err)
+	}
+	checkIDs("status=expired", gotExpired, expired.ID)
+
+	gotBanned, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 20, Sort: link.SortID, Status: link.StatusBanned})
+	if err != nil {
+		t.Fatalf("List banned: %v", err)
+	}
+	checkIDs("status=banned", gotBanned, bannedAll.ID)
+
+	// SortClicks + 筛选 + 游标翻页。
+	byClicksPage1, err := store.List(ctx, link.ListOptions{
+		TenantID: tenantID, Limit: 2, Sort: link.SortClicks, Status: link.StatusActive, Query: "alpha",
+	})
+	if err != nil {
+		t.Fatalf("List clicks+filter page 1: %v", err)
+	}
+	checkIDs("sort=clicks+filter page1", byClicksPage1, activeSearch3ZeroToday.ID, active.ID)
+	byClicksPage2, err := store.List(ctx, link.ListOptions{
+		TenantID: tenantID, Limit: 5, Sort: link.SortClicks, Status: link.StatusActive, Query: "alpha",
+		Cursor: &link.ListCursor{ID: byClicksPage1[1].ID, Clicks: byClicksPage1[1].Clicks},
+	})
+	if err != nil {
+		t.Fatalf("List clicks+filter page 2: %v", err)
+	}
+	checkIDs("sort=clicks+filter page2", byClicksPage2, activeSearch2.ID)
+
+	// 大小写不敏感匹配 URL 与精确短码，且支持 sort=clicks_today 跨「有点击 -> 0 点击」段与游标翻页。
+	qAlphaPage1, err := store.List(ctx, link.ListOptions{
+		TenantID: tenantID, Limit: 1, Sort: link.SortClicksToday, Status: link.StatusActive, Query: "ALPHA",
+	})
+	if err != nil {
+		t.Fatalf("List q=ALPHA page 1: %v", err)
+	}
+	checkIDs("q=ALPHA today page1", qAlphaPage1, active.ID)
+	qAlphaPage2, err := store.List(ctx, link.ListOptions{
+		TenantID: tenantID, Limit: 2, Sort: link.SortClicksToday, Status: link.StatusActive, Query: "ALPHA",
+		Cursor: &link.ListCursor{ID: qAlphaPage1[0].ID, ClicksToday: qAlphaPage1[0].ClicksToday},
+	})
+	if err != nil {
+		t.Fatalf("List q=ALPHA page 2: %v", err)
+	}
+	checkIDs("q=ALPHA today page2", qAlphaPage2, activeSearch2.ID, activeSearch3ZeroToday.ID)
+	// 从今日 0 点击段游标继续翻页（ClicksToday == 0），应正确返回空。
+	qAlphaPage3, err := store.List(ctx, link.ListOptions{
+		TenantID: tenantID, Limit: 2, Sort: link.SortClicksToday, Status: link.StatusActive, Query: "ALPHA",
+		Cursor: &link.ListCursor{ID: qAlphaPage2[1].ID, ClicksToday: qAlphaPage2[1].ClicksToday},
+	})
+	if err != nil {
+		t.Fatalf("List q=ALPHA page 3: %v", err)
+	}
+	checkIDs("q=ALPHA today page3", qAlphaPage3)
+
+	// 按短码片段检索（大小写不敏感）。
+	byCode, err := store.List(ctx, link.ListOptions{
+		TenantID: tenantID, Limit: 10, Sort: link.SortID, Query: strings.ToLower(disabledAndExpired.Code),
+	})
+	if err != nil {
+		t.Fatalf("List by code: %v", err)
+	}
+	checkIDs("q=code", byCode, disabledAndExpired.ID)
+
+	// LIKE 通配符 %、_、\ 必须被转义，不能退化成通配匹配全部记录。
+	for _, tc := range []struct {
+		query  string
+		wantID int64
+	}{
+		{query: "100%25discount_offer", wantID: expired.ID},
+		{query: "%25discount_offer", wantID: expired.ID},
+		{query: `C:\temp\`, wantID: bannedAll.ID},
+	} {
+		got, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 10, Sort: link.SortID, Query: tc.query})
+		if err != nil {
+			t.Fatalf("List query %q: %v", tc.query, err)
+		}
+		checkIDs("escaped "+tc.query, got, tc.wantID)
+	}
+	none, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 10, Sort: link.SortID, Query: "___"})
+	if err != nil {
+		t.Fatalf("List query ___: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("unescaped underscore matched %d rows, want 0", len(none))
+	}
+}
+
+func TestAdminListFilterExplainPlans(t *testing.T) {
+	store, targetTenant := newTestStore(t)
+	ctx := testAuditCtx(context.Background())
+
+	// 构造 20 个租户 × 100 条链接（含 active/disabled/expired/banned）以确保规划器使用真实索引。
+	tenants := make([]int64, 0, 20)
+	tenants = append(tenants, targetTenant)
+	for i := 1; i < 20; i++ {
+		tenants = append(tenants, insertTenant(t, store, fmt.Sprintf("explain-org-%d", i)))
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin seed tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `
+INSERT INTO links (code, url, expires_at, tenant_id, disabled_at, banned_at, ban_reason, ban_source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`)
+	if err != nil {
+		t.Fatalf("prepare seed stmt: %v", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	now := time.Now().UTC()
+	past := now.Add(-time.Hour)
+	for tIdx, tid := range tenants {
+		for i := range 100 {
+			code := fmt.Sprintf("Ex%02d%04d", tIdx, i)
+			url := fmt.Sprintf("https://example.com/t/%d/item/%d", tIdx, i)
+			if i == 0 {
+				url = "https://example.com/needle-target"
+			}
+			var (
+				expiresAt  any
+				disabledAt any
+				bannedAt   any
+				banReason  any
+				banSource  any
+			)
+			switch {
+			case i < 5:
+				bannedAt = past
+				banReason = string(link.BanReasonPhishing)
+				banSource = string(link.BanSourceRisk)
+			case i < 15:
+				disabledAt = past
+			case i < 30:
+				expiresAt = past
+			}
+			if _, err := stmt.ExecContext(ctx, code, url, expiresAt, tid, disabledAt, bannedAt, banReason, banSource); err != nil {
+				t.Fatalf("insert synthetic link (%d,%d): %v", tIdx, i, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed tx: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `ANALYZE links`); err != nil {
+		t.Fatalf("analyze links: %v", err)
+	}
+
+	cases := []struct {
+		name         string
+		status       link.Status
+		query        string
+		wantIndexSub string
+	}{
+		{name: "status=banned", status: link.StatusBanned, wantIndexSub: "idx_links_tenant_banned"},
+		{name: "status=disabled", status: link.StatusDisabled, wantIndexSub: "idx_links_tenant_disabled"},
+		{name: "status=expired", status: link.StatusExpired, wantIndexSub: "idx_links_tenant_expiring"},
+		{name: "status=active", status: link.StatusActive, wantIndexSub: "idx_links_tenant_id"},
+		{name: "search q", query: "needle-target", wantIndexSub: "idx_links_tenant_"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlText, args, err := buildListLinksQuery(link.SortID, nil, targetTenant, 21, tc.status, tc.query)
+			if err != nil {
+				t.Fatalf("buildListLinksQuery: %v", err)
+			}
+			plan := explainQuery(t, ctx, store, "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)\n"+sqlText, args...)
+			t.Logf("%s plan:\n%s", tc.name, plan)
+			if strings.Contains(plan, "Seq Scan on links") {
+				t.Errorf("%s degraded to Seq Scan on links:\n%s", tc.name, plan)
+			}
+			if !strings.Contains(plan, tc.wantIndexSub) {
+				t.Errorf("%s expected index %s in plan:\n%s", tc.name, tc.wantIndexSub, plan)
+			}
+		})
 	}
 }

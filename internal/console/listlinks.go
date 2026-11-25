@@ -24,9 +24,9 @@ type listLinksResponse struct {
 }
 
 /*
-handleList 返回当前租户的链接，包含已过期、已停用和已封禁的链接，固定降序。
+handleList 返回当前租户的链接，未传 status 时包含已过期、已停用和已封禁的链接，固定降序。
 
-limit 默认 20、最大 100；非法 limit、sort 或游标返回 400。
+limit 默认 20、最大 100；非法 limit、sort、status、q 或游标返回 400。
 不返回总数：COUNT(*) 每次都要扫租户的行，当前没有需求。
 */
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +66,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, resp)
 }
 
-// parseListOptions 解析 limit、sort 和 cursor；Limit 已经加一，用来判断有没有下一页。
+// parseListOptions 解析 limit、sort、status、q 和 cursor；Limit 已经加一，用来判断有没有下一页。
 func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, error) {
 	query := r.URL.Query()
 
@@ -89,6 +89,20 @@ func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, error)
 		}
 	}
 
+	var status link.Status
+	if raw := query.Get("status"); raw != "" {
+		s := link.Status(raw)
+		if !s.Valid() {
+			return link.ListOptions{}, badRequestError("invalid status")
+		}
+		status = s
+	}
+
+	q, err := link.NormalizeSearchQuery(query.Get("q"))
+	if err != nil {
+		return link.ListOptions{}, badRequestError("invalid q")
+	}
+
 	cursor, err := decodeListCursor(query.Get("cursor"), sort)
 	if err != nil {
 		return link.ListOptions{}, err
@@ -99,6 +113,8 @@ func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, error)
 		Limit:    pageLimit + 1,
 		Sort:     sort,
 		Cursor:   cursor,
+		Status:   status,
+		Query:    q,
 	}, nil
 }
 
