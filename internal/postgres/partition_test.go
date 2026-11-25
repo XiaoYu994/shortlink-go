@@ -53,21 +53,35 @@ func TestEnsureAndDropMonthlyPartitions(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := testAuditCtx(context.Background())
 
-	// 1. EnsureMonthlyPartitions 对未来 5 个月建表，二次调用幂等返回 0。
+	// 1. 统计表与审计表分区分别预创建未来 5 个月，且二次调用幂等返回 0。
 	now := time.Now().UTC()
-	created, err := store.EnsureMonthlyPartitions(ctx, now, 5)
+	createdStats, err := store.EnsureStatsPartitions(ctx, now, 5)
 	if err != nil {
-		t.Fatalf("EnsureMonthlyPartitions(5): %v", err)
+		t.Fatalf("EnsureStatsPartitions(5): %v", err)
 	}
-	if created == 0 {
-		t.Fatalf("EnsureMonthlyPartitions(5) created = 0, want > 0 for future months +3..+5")
+	if createdStats == 0 {
+		t.Fatalf("EnsureStatsPartitions(5) created = 0, want > 0 for future months +3..+5")
 	}
-	createdAgain, err := store.EnsureMonthlyPartitions(ctx, now, 5)
+	createdStatsAgain, err := store.EnsureStatsPartitions(ctx, now, 5)
 	if err != nil {
-		t.Fatalf("EnsureMonthlyPartitions(5) repeat: %v", err)
+		t.Fatalf("EnsureStatsPartitions(5) repeat: %v", err)
 	}
-	if createdAgain != 0 {
-		t.Fatalf("EnsureMonthlyPartitions repeat created = %d, want 0", createdAgain)
+	if createdStatsAgain != 0 {
+		t.Fatalf("EnsureStatsPartitions repeat created = %d, want 0", createdStatsAgain)
+	}
+	createdAudit, err := store.EnsureAuditPartitions(ctx, now, 5)
+	if err != nil {
+		t.Fatalf("EnsureAuditPartitions(5): %v", err)
+	}
+	if createdAudit == 0 {
+		t.Fatalf("EnsureAuditPartitions(5) created = 0, want > 0 for future months +3..+5")
+	}
+	createdAuditAgain, err := store.EnsureAuditPartitions(ctx, now, 5)
+	if err != nil {
+		t.Fatalf("EnsureAuditPartitions(5) repeat: %v", err)
+	}
+	if createdAuditAgain != 0 {
+		t.Fatalf("EnsureAuditPartitions repeat created = %d, want 0", createdAuditAgain)
 	}
 
 	// 验证超过 2 个月以上的远期清理与保护：

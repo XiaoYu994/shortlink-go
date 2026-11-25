@@ -132,11 +132,18 @@ func TestHandlerBehaviorMatrix(t *testing.T) {
 	secretPlain, _, _ := GenerateSecret()
 	ct, _ := secretCipher.Encrypt(9, secretPlain)
 
-	t.Run("defers without consuming attempt when cipher is nil", func(t *testing.T) {
-		h := NewHandler(HandlerOptions{Store: &fakeDeliveryStore{}})
+	t.Run("returns permanent error without querying store when cipher is nil", func(t *testing.T) {
+		store := &fakeDeliveryStore{}
+		h := NewHandler(HandlerOptions{Store: store})
 		err := h(context.Background(), job.Job{ID: 1, Attempts: 1, MaxAttempts: 6, Payload: []byte(`{}`)})
-		if delay, ok := job.DeferDelay(err); !ok || delay <= 0 {
-			t.Fatalf("err = %v, want job.Defer", err)
+		if !job.IsPermanent(err) {
+			t.Fatalf("err = %v, want job.Permanent", err)
+		}
+		if _, deferred := job.DeferDelay(err); deferred {
+			t.Fatalf("err = %v must not be job.Defer", err)
+		}
+		if len(store.recorded) != 0 {
+			t.Fatalf("recorded deliveries = %d, want 0", len(store.recorded))
 		}
 	})
 

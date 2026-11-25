@@ -42,7 +42,6 @@ var (
 	auditPartitionSpecs = []partitionedTableSpec{
 		newPartitionSpec("audit_logs", partitionKeyTimestamptz),
 	}
-	allPartitionSpecs = append(append([]partitionedTableSpec(nil), statsPartitionSpecs...), auditPartitionSpecs...)
 )
 
 func newPartitionSpec(name string, keyKind partitionKeyKind) partitionedTableSpec {
@@ -64,17 +63,29 @@ func utcDayStart(t time.Time) time.Time {
 }
 
 /*
-EnsureMonthlyPartitions 为四张按月范围分区表预创建从当月起到未来 monthsAhead 个月的月分区。
+EnsureStatsPartitions 为三张点击统计按月范围分区表预创建从当月起到未来 monthsAhead 个月的月分区。
 每条 DDL 在独立事务内设置 SET LOCAL lock_timeout = '3s' 并使用 CREATE TABLE IF NOT EXISTS，
-避免长期等锁拖垮在线流量，且支持多副本并发幂等重跑（ADR 0026）。
+避免长期等锁拖垮在线流量，且支持多副本并发幂等重跑（ADR 0026、ADR 0029）。
 */
-func (s *Store) EnsureMonthlyPartitions(ctx context.Context, now time.Time, monthsAhead int) (int, error) {
+func (s *Store) EnsureStatsPartitions(ctx context.Context, now time.Time, monthsAhead int) (int, error) {
+	return s.ensurePartitionsForSpecs(ctx, statsPartitionSpecs, now, monthsAhead)
+}
+
+/*
+EnsureAuditPartitions 为审计日志分区表 audit_logs 预创建从当月起到未来 monthsAhead 个月的月分区。
+与统计分区拆开，使关闭 FEATURE_ANALYTICS 时审计分区仍持续自动维护（ADR 0029）。
+*/
+func (s *Store) EnsureAuditPartitions(ctx context.Context, now time.Time, monthsAhead int) (int, error) {
+	return s.ensurePartitionsForSpecs(ctx, auditPartitionSpecs, now, monthsAhead)
+}
+
+func (s *Store) ensurePartitionsForSpecs(ctx context.Context, specs []partitionedTableSpec, now time.Time, monthsAhead int) (int, error) {
 	if monthsAhead < 0 {
 		return 0, fmt.Errorf("ensure monthly partitions: negative monthsAhead %d", monthsAhead)
 	}
 	base := utcMonthStart(now)
 	var created int
-	for _, spec := range allPartitionSpecs {
+	for _, spec := range specs {
 		for offset := 0; offset <= monthsAhead; offset++ {
 			monthStart := base.AddDate(0, offset, 0)
 			didCreate, err := s.ensureSingleMonthPartition(ctx, spec, monthStart)

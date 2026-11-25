@@ -335,13 +335,13 @@ func TestRLSAuditLogsDynamicPartitions(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if _, err := store.EnsureMonthlyPartitions(ctx, now, 2); err != nil {
-		t.Fatalf("EnsureMonthlyPartitions: %v", err)
+	if _, err := store.EnsureAuditPartitions(ctx, now, 2); err != nil {
+		t.Fatalf("EnsureAuditPartitions: %v", err)
 	}
 
 	timestamps := []time.Time{
 		now,                                  // 当月分区
-		utcMonthStart(now).AddDate(0, 2, 10), // EnsureMonthlyPartitions 动态新建的未来月分区
+		utcMonthStart(now).AddDate(0, 2, 10), // EnsureAuditPartitions 动态新建的未来月分区
 		time.Date(2099, 1, 15, 0, 0, 0, 0, time.UTC), // audit_logs_default 兜底分区
 	}
 	for i, ts := range timestamps {

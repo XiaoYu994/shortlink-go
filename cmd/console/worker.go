@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -95,15 +94,6 @@ func runWorker(cliOpts workerCLIOptions) error {
 	defer func() { _ = db.Close() }()
 	logger.Info("connected to postgres")
 
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	rdb, err := cache.Open(ctx, cfg.RedisURL)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("connect redis: %w", err)
-	}
-	defer func() { _ = rdb.Close() }()
-	logger.Info("connected to redis")
-
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -111,125 +101,156 @@ func runWorker(cliOpts workerCLIOptions) error {
 		collectors.NewDBStatsCollector(db, "shortlink"),
 	)
 
-	pgStore := postgres.NewStore(db)
+	storeFeatures := cfg.StoreFeatures()
+	enabledFeatures, disabledFeatures := storeFeatures.enabledDisabled()
+	logger.Info("worker features configured", "enabled_features", enabledFeatures, "disabled_features", disabledFeatures)
+
+	pgStore := newConfiguredPostgresStore(db, storeFeatures)
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), partitionStartupTimeout)
-	_, startupPartErr := pgStore.EnsureMonthlyPartitions(startupCtx, time.Now().UTC(), partitionMonthsAhead)
-	cancelStartup()
-	if startupPartErr != nil {
-		return startupPartErr
+	nowUTC := time.Now().UTC()
+	_, startupAuditErr := pgStore.EnsureAuditPartitions(startupCtx, nowUTC, partitionMonthsAhead)
+	var startupStatsErr error
+	if startupAuditErr == nil && cfg.Features.Analytics {
+		_, startupStatsErr = pgStore.EnsureStatsPartitions(startupCtx, nowUTC, partitionMonthsAhead)
 	}
-	linkStore := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
-		FetchTimeout: cfg.CacheFetchTimeout,
-		Logger:       logger,
-	})
+	cancelStartup()
+	if err := errors.Join(startupAuditErr, startupStatsErr); err != nil {
+		return err
+	}
 
-	httpClient := risk.NewSafeHTTPClient(safehttp.ClientOptions{
-		Timeout:          cfg.RiskFetchTimeout,
-		AllowedPorts:     cfg.RiskAllowedPorts,
-		AllowedHostPorts: cliOpts.allowTestHosts,
-	})
-	scanner := risk.NewRuleScanner(risk.RuleScannerOptions{
-		HTTPClient:      httpClient,
-		BlockedHosts:    cfg.RiskBlockedHosts,
-		BlockedKeywords: cfg.RiskBlockedKeywords,
-	})
-	verdictCache := risk.NewVerdictCache(rdb, registry, risk.VerdictCacheOptions{Logger: logger})
-	hostLimiter := safehttp.NewHostLimiter(cfg.RiskHostRateLimit)
-	riskHandler := risk.NewHandler(risk.HandlerOptions{
-		Scanner: scanner,
-		Banner:  linkStore,
-		Cache:   verdictCache,
-		Limiter: hostLimiter,
-		Logger:  logger,
-	})
+	metricsStore := storemetrics.New(pgStore, registry)
+	var (
+		banner       risk.LinkBanner = metricsStore
+		reconciler   cacheReconciler
+		verdictCache *risk.VerdictCache
+	)
+	if cfg.RedisURL != "" {
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		rdb, err := cache.Open(ctx, cfg.RedisURL)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("connect redis: %w", err)
+		}
+		defer func() { _ = rdb.Close() }()
+		logger.Info("connected to redis")
 
-	var webhookCipher *webhook.SecretCipher
+		cachedStore := cache.New(metricsStore, rdb, registry, cache.Options{
+			FetchTimeout: cfg.CacheFetchTimeout,
+			Logger:       logger,
+		})
+		banner = cachedStore
+		reconciler = cachedStore
+		if cfg.Features.RiskScan {
+			verdictCache = risk.NewVerdictCache(rdb, registry, risk.VerdictCacheOptions{Logger: logger})
+		}
+	} else {
+		logger.Info("redis cache disabled: REDIS_URL is not set")
+	}
+
+	var riskHandler job.Handler
+	if cfg.Features.RiskScan {
+		httpClient := risk.NewSafeHTTPClient(safehttp.ClientOptions{
+			Timeout:          cfg.RiskFetchTimeout,
+			AllowedPorts:     cfg.RiskAllowedPorts,
+			AllowedHostPorts: cliOpts.allowTestHosts,
+		})
+		scanner := risk.NewRuleScanner(risk.RuleScannerOptions{
+			HTTPClient:      httpClient,
+			BlockedHosts:    cfg.RiskBlockedHosts,
+			BlockedKeywords: cfg.RiskBlockedKeywords,
+		})
+		hostLimiter := safehttp.NewHostLimiter(cfg.RiskHostRateLimit)
+		riskHandler = risk.NewHandler(risk.HandlerOptions{
+			Scanner: scanner,
+			Banner:  banner,
+			Cache:   verdictCache,
+			Limiter: hostLimiter,
+			Logger:  logger,
+		})
+	} else {
+		logger.Info("risk scan worker disabled: FEATURE_RISK_SCAN=false")
+	}
+
+	var webhookHandler job.Handler
 	if cfg.WebhookSecretKey != "" {
 		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
 		if err != nil {
 			return fmt.Errorf("parse WEBHOOK_SECRET_KEY: %w", err)
 		}
-		webhookCipher, err = webhook.NewSecretCipher(key)
+		webhookCipher, err := webhook.NewSecretCipher(key)
 		if err != nil {
 			return fmt.Errorf("init webhook cipher: %w", err)
 		}
+		webhookClient := safehttp.NewClient(safehttp.ClientOptions{
+			Timeout:          cfg.WebhookTimeout,
+			DisableRedirects: true,
+			AllowedPorts:     cfg.WebhookAllowedPorts,
+			AllowedHostPorts: cliOpts.allowTestHosts,
+		})
+		webhookThreshold := cfg.WebhookMaxConsecutiveFailures
+		if webhookThreshold == 0 {
+			webhookThreshold = -1 // 显式配置 0 关闭自动熔断（区分未配置零值默认 10）。
+		}
+		webhookHandler = webhook.NewHandler(webhook.HandlerOptions{
+			Store:                  pgStore,
+			HTTPClient:             webhookClient,
+			Limiter:                safehttp.NewHostLimiter(cfg.WebhookHostRateLimit),
+			Cipher:                 webhookCipher,
+			RetryBaseDelay:         cfg.WebhookRetryBaseDelay,
+			RetryMaxDelay:          cfg.WebhookRetryMaxDelay,
+			MaxConsecutiveFailures: webhookThreshold,
+			Registry:               registry,
+			Logger:                 logger,
+		})
 	} else {
 		logger.Info("webhooks disabled: WEBHOOK_SECRET_KEY is not set")
 	}
 
-	webhookClient := safehttp.NewClient(safehttp.ClientOptions{
-		Timeout:          cfg.WebhookTimeout,
-		DisableRedirects: true,
-		AllowedPorts:     cfg.WebhookAllowedPorts,
-		AllowedHostPorts: cliOpts.allowTestHosts,
-	})
-	webhookThreshold := cfg.WebhookMaxConsecutiveFailures
-	if webhookThreshold == 0 {
-		webhookThreshold = -1 // 显式配置 0 关闭自动熔断（区分未配置零值默认 10）。
-	}
-	webhookHandler := webhook.NewHandler(webhook.HandlerOptions{
-		Store:                  pgStore,
-		HTTPClient:             webhookClient,
-		Limiter:                safehttp.NewHostLimiter(cfg.WebhookHostRateLimit),
-		Cipher:                 webhookCipher,
-		RetryBaseDelay:         cfg.WebhookRetryBaseDelay,
-		RetryMaxDelay:          cfg.WebhookRetryMaxDelay,
-		MaxConsecutiveFailures: webhookThreshold,
-		Registry:               registry,
-		Logger:                 logger,
-	})
-
-	var emailSender mailer.Sender
+	var invitationEmailHandler job.Handler
 	if cfg.SMTP.Enabled() {
 		smtpSender, err := mailer.NewSMTPSender(cfg.SMTP)
 		if err != nil {
 			return fmt.Errorf("init smtp sender: %w", err)
 		}
-		emailSender = smtpSender
+		invitationEmailHandler = newInvitationEmailHandler(pgStore, smtpSender, cfg.ConsolePublicURL, logger)
 		logger.Info("invitation email sender enabled", "host", cfg.SMTP.Host, "port", cfg.SMTP.Port, "tls_mode", cfg.SMTP.TLSMode)
 	} else {
 		logger.Info("invitation email sender disabled: SMTP_HOST is not set")
 	}
-	invitationEmailHandler := newInvitationEmailHandler(pgStore, emailSender, cfg.ConsolePublicURL, logger)
 
-	runner := job.New(pgStore, map[string]job.Handler{
-		job.KindLinkRiskScan:    riskHandler,
-		job.KindWebhookDeliver:  webhookHandler,
-		job.KindInvitationEmail: invitationEmailHandler,
-		job.KindCacheReconcile: func(ctx context.Context, j job.Job) error {
-			var p struct {
-				Code string `json:"code"`
-			}
-			if err := json.Unmarshal(j.Payload, &p); err != nil {
-				return job.Permanent(fmt.Errorf("decode cache.reconcile payload: %w", err))
-			}
-			if p.Code == "" {
-				return job.Permanent(errors.New("cache.reconcile payload missing code"))
-			}
-			return linkStore.Reconcile(ctx, p.Code)
+	handlers, periodicTasks, err := assembleWorkerModules(
+		logger,
+		coreWorkerModule{
+			store:               pgStore,
+			cleanupInterval:     cfg.CleanupInterval,
+			sessionRetention:    cfg.SessionRetention,
+			doneJobRetention:    cfg.DoneJobRetention,
+			deadJobRetention:    cfg.DeadJobRetention,
+			invitationRetention: cfg.InvitationRetention,
+			auditRetentionDays:  cfg.AuditRetentionDays,
 		},
-		job.KindLinkPurgeStats: func(ctx context.Context, j job.Job) error {
-			var p struct {
-				LinkID int64 `json:"link_id"`
-			}
-			if err := json.Unmarshal(j.Payload, &p); err != nil {
-				return job.Permanent(fmt.Errorf("decode link.purge_stats payload: %w", err))
-			}
-			if p.LinkID <= 0 {
-				return job.Permanent(errors.New("link.purge_stats payload missing link_id"))
-			}
-			for range maxPurgeStatsBatchesPerRun {
-				n, err := pgStore.PurgeLinkStatsBatch(ctx, p.LinkID, purgeStatsBatchLimit)
-				if err != nil {
-					return err
-				}
-				if n < purgeStatsBatchLimit {
-					return nil
-				}
-			}
-			return job.Defer(purgeStatsDeferDelay, "more link stats remain to purge")
+		riskWorkerModule{enabled: cfg.Features.RiskScan, handler: riskHandler},
+		webhookWorkerModule{
+			enabled:         cfg.WebhookSecretKey != "",
+			handler:         webhookHandler,
+			cleaner:         pgStore,
+			cleanupInterval: cfg.CleanupInterval,
+			retention:       cfg.WebhookDeliveryRetention,
 		},
-	}, logger, registry, job.Options{
+		emailWorkerModule{enabled: cfg.SMTP.Enabled(), handler: invitationEmailHandler},
+		cacheWorkerModule{reconciler: reconciler},
+		analyticsWorkerModule{
+			enabled:         cfg.Features.Analytics,
+			store:           pgStore,
+			cleanupInterval: cfg.CleanupInterval,
+			retentionDays:   cfg.StatsRetentionDays,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("assemble worker modules: %w", err)
+	}
+
+	runner := job.New(pgStore, handlers, logger, registry, job.Options{
 		Concurrency:     cfg.Concurrency,
 		MaxPerTenant:    cfg.MaxPerTenant,
 		PollInterval:    cfg.PollInterval,
@@ -237,91 +258,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 		JobTimeout:      cfg.JobTimeout,
 		ReapInterval:    cfg.ReapInterval,
 		ShutdownTimeout: cfg.ShutdownTimeout,
-		PeriodicTasks: []job.PeriodicTask{
-			{
-				Name:     "sessions.cleanup_expired",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupExpiredSessionsByExpiry(ctx, cfg.SessionRetention, limit)
-					})
-				},
-			},
-			{
-				Name:     "sessions.cleanup_revoked",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupRevokedSessions(ctx, cfg.SessionRetention, limit)
-					})
-				},
-			},
-			{
-				Name:     "jobs.cleanup_done",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupDoneJobs(ctx, cfg.DoneJobRetention, limit)
-					})
-				},
-			},
-			{
-				Name:     "jobs.cleanup_dead",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupDeadJobs(ctx, cfg.DeadJobRetention, limit)
-					})
-				},
-			},
-			{
-				Name:     "invitations.cleanup",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					n1, err := drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupExpiredInvitationsByExpiry(ctx, cfg.InvitationRetention, limit)
-					})
-					if err != nil {
-						return n1, err
-					}
-					n2, err := drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupRevokedInvitations(ctx, cfg.InvitationRetention, limit)
-					})
-					if err != nil {
-						return n1 + n2, err
-					}
-					n3, err := drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupSupersededInvitations(ctx, cfg.InvitationRetention, limit)
-					})
-					return n1 + n2 + n3, err
-				},
-			},
-			{
-				Name:     "partitions.maintain",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					now := time.Now().UTC()
-					if _, err := pgStore.EnsureMonthlyPartitions(ctx, now, partitionMonthsAhead); err != nil {
-						return 0, err
-					}
-					d1, err := pgStore.DropExpiredStatsPartitions(ctx, now, cfg.StatsRetentionDays)
-					if err != nil {
-						return d1, err
-					}
-					d2, err := pgStore.DropExpiredAuditPartitions(ctx, now, cfg.AuditRetentionDays)
-					return d1 + d2, err
-				},
-			},
-			{
-				Name:     "webhooks.cleanup_deliveries",
-				Interval: cfg.CleanupInterval,
-				Run: func(ctx context.Context) (int64, error) {
-					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-						return pgStore.CleanupWebhookDeliveries(ctx, cfg.WebhookDeliveryRetention, limit)
-					})
-				},
-			},
-		},
+		PeriodicTasks:   periodicTasks,
 	})
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

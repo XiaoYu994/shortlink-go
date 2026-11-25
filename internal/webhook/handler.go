@@ -25,8 +25,6 @@ const (
 	deliveriesMetricName   = "shortlink_webhook_deliveries_total"
 	deliveryDurationName   = "shortlink_webhook_delivery_duration_seconds"
 	autoDisabledMetricName = "shortlink_webhook_auto_disabled_total"
-
-	missingKeyDeferDelay = 30 * time.Second
 )
 
 var webhookDurationBuckets = prometheus.ExponentialBuckets(0.005, 2, 12)
@@ -83,8 +81,8 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 }
 
 /*
-NewHandler 返回消费 webhook.deliver 任务的 job.Handler（ADR 0027）：
-1. 未配置 WEBHOOK_SECRET_KEY（Cipher == nil）时返回 job.Defer，不消耗重试次数；
+NewHandler 返回消费 webhook.deliver 任务的 job.Handler（ADR 0027、ADR 0029）：
+1. 关闭 Webhook 特性时由 worker 模块层挂载 disabledSkipHandler；若 Cipher 为 nil 进入本处理器属于装配错误，直接返回 job.Permanent；
 2. 回表查询订阅当前 URL/启用状态/加密密钥（已删或已停用的非 ping 任务返回 job.Skip）；
 3. 按目标 host 限速（超限时 job.Defer），构造统一 JSON 信封并带新鲜 HMAC 签名 POST 投递（禁重定向）；
 4. 2xx 记成功；3xx / 非 408·429 4xx / SSRF 拦截标记 job.Permanent；网络/408/429/5xx 走独立退避重试；
@@ -125,7 +123,7 @@ func NewHandler(opts HandlerOptions) job.Handler {
 
 	return func(ctx context.Context, j job.Job) error {
 		if opts.Cipher == nil {
-			return job.Defer(missingKeyDeferDelay, "webhook secret key not configured")
+			return job.Permanent(errors.New("webhook cipher is not configured"))
 		}
 
 		var p DeliverPayload
