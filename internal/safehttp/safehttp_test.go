@@ -200,11 +200,21 @@ func TestHostLimiter(t *testing.T) {
 	if _, ok := lim.Allow("hooks.example.com"); !ok {
 		t.Fatal("first request should be allowed")
 	}
-	delay, ok := lim.Allow("hooks.example.com")
+	delay, ok := lim.Allow("  HOOKS.EXAMPLE.COM  ")
 	if ok || delay <= 0 {
-		t.Fatalf("second immediate request = (%v, %v), want (positive delay, false)", delay, ok)
+		t.Fatalf("normalized duplicate host = (%v, %v), want (positive delay, false)", delay, ok)
 	}
 	if _, ok := lim.Allow("other.com"); !ok {
 		t.Fatal("different host should not be affected")
+	}
+	if _, ok := lim.Allow("   "); !ok {
+		t.Fatal("empty host should be allowed without error")
+	}
+
+	disabled := NewHostLimiter(0)
+	for range 5 {
+		if _, ok := disabled.Allow("hooks.example.com"); !ok {
+			t.Fatal("disabled limiter should always allow")
+		}
 	}
 }

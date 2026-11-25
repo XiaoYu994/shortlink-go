@@ -98,6 +98,13 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 		'^shortlink/internal/(postgres|pgredirect|cache|job|risk|link|identity|safehttp|webhook|mailer)(/|$$)'; \
 	check_absent ./internal/safehttp \
 		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit|webhook|mailer)(/|$$)'; \
+	check_absent ./internal/ratelimit \
+		'^shortlink/internal/' \
+		'^github\.com/jackc/pgx' \
+		'^github\.com/redis/go-redis' \
+		'^github\.com/prometheus/' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
 	check_absent ./internal/mailer \
 		'^shortlink/internal/' \
 		'^github\.com/jackc/pgx' \

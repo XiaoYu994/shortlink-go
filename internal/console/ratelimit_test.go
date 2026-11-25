@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -167,26 +166,7 @@ func TestRateLimitChangeTakesEffect(t *testing.T) {
 	})
 }
 
-/*
-TestRateLimiterConcurrentLimitChange 让同一个租户的并发请求交替带两种速率，
-每次都会换桶。换桶在锁里写 entry.limiter，取令牌必须用锁里拿到的那个桶，
-否则 -race 会报出锁外读和锁内写的竞争。这里不断言放行结果，只靠 -race 发现问题。
-*/
-func TestRateLimiterConcurrentLimitChange(t *testing.T) {
-	l := newTenantRateLimiter()
-	var wg sync.WaitGroup
-	for i := range 8 {
-		wg.Go(func() {
-			tn := tenant.Tenant{ID: 1, RateLimit: 10 + i%2}
-			for range 200 {
-				l.allow(tn)
-			}
-		})
-	}
-	wg.Wait()
-}
-
-// TestRateLimitDisabled 验证 rate_limit_per_second 为 0 时不限流，也不占限流 map。
+// TestRateLimitDisabled 验证 rate_limit_per_second 为 0 时不限流，也不占限流桶。
 func TestRateLimitDisabled(t *testing.T) {
 	srv := newLimitTestServer(tenantKey{testAPIKey: {ID: 1}})
 	handler := srv.Routes()
@@ -196,54 +176,9 @@ func TestRateLimitDisabled(t *testing.T) {
 			t.Fatalf("request %d = %d, want %d", i, rec.Code, http.StatusCreated)
 		}
 	}
-	if got := len(srv.limiter.buckets); got != 0 {
+	if got := srv.limiter.Len(); got != 0 {
 		t.Errorf("limiter buckets = %d, want 0 when the tenant is unlimited", got)
 	}
-}
-
-/*
-TestRateLimiterEvictsIdle 在 synctest 虚拟时钟下直接用生产默认值（limiterIdleTTL / limiterSweepPeriod）
-验证空闲租户清理和两次清理之间的节流间隔，无需给生产结构体留假时钟字段。
-*/
-func TestRateLimiterEvictsIdle(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newTenantRateLimiter()
-
-		l.allow(tenant.Tenant{ID: 1, RateLimit: 10})
-		l.allow(tenant.Tenant{ID: 2, RateLimit: 10})
-
-		// 刚满 limiterIdleTTL 不算超过（> limiterIdleTTL 才清）；同时顺带推进 lastSweep。
-		time.Sleep(limiterIdleTTL)
-		l.allow(tenant.Tenant{ID: 3, RateLimit: 10})
-		for _, id := range []int64{1, 2} {
-			if _, ok := l.buckets[id]; !ok {
-				t.Errorf("tenant %d evicted at exact idle TTL", id)
-			}
-		}
-
-		// 离上次清理差 1 秒才到 limiterSweepPeriod，这次请求跳过清理。
-		time.Sleep(limiterSweepPeriod - time.Second)
-		l.allow(tenant.Tenant{ID: 4, RateLimit: 10})
-		for _, id := range []int64{1, 2} {
-			if _, ok := l.buckets[id]; !ok {
-				t.Errorf("tenant %d evicted before sweep period elapsed", id)
-			}
-		}
-
-		// 再过 1 秒到达清理周期，已超过 idle TTL 的租户 1、2 被清除，近期活跃的 3、4、5 保留。
-		time.Sleep(time.Second)
-		l.allow(tenant.Tenant{ID: 5, RateLimit: 10})
-		for _, id := range []int64{1, 2} {
-			if _, ok := l.buckets[id]; ok {
-				t.Errorf("idle tenant %d was not evicted", id)
-			}
-		}
-		for _, id := range []int64{3, 4, 5} {
-			if _, ok := l.buckets[id]; !ok {
-				t.Errorf("active tenant %d is missing from the limiter", id)
-			}
-		}
-	})
 }
 
 type countingAuth struct {
@@ -312,7 +247,19 @@ func TestIPRateLimiterBoundedBuckets(t *testing.T) {
 	for i := range 12 {
 		l.allow(fmt.Sprintf("203.0.113.%d", i))
 	}
-	if got := len(l.buckets); got > 4 {
+	if got := l.limiter.Len(); got > 4 {
 		t.Fatalf("buckets len = %d, want <= 4", got)
 	}
+}
+
+func TestIPRateLimiterEmptyIPUsesUnknownBucket(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newIPRateLimiter(1, 1, 4)
+		if _, ok := l.allow(""); !ok {
+			t.Fatal("first empty-ip request should be allowed")
+		}
+		if _, ok := l.allow(""); ok {
+			t.Fatal("second immediate empty-ip request should share unknown bucket and be rejected")
+		}
+	})
 }

@@ -2,39 +2,28 @@ package safehttp
 
 import (
 	"strings"
-	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
-)
-
-const (
-	hostLimiterIdleTTL   = 10 * time.Minute
-	hostLimiterSweepStep = time.Minute
+	"shortlink/internal/ratelimit"
 )
 
 /*
-HostLimiter 按目标站点 host 做进程内令牌桶限速，防止后台任务集中冲击同一第三方站点（ADR 0020、ADR 0027）。
-空闲桶在请求路径惰性清理，不单开后台 goroutine。
+HostLimiter 按目标站点 host 做进程内有界令牌桶限速，防止后台任务集中冲击同一第三方站点（ADR 0020、ADR 0027）。
+底层复用 internal/ratelimit 的精确 LRU 有界桶表，惰性清理空闲桶并限制最大桶数，避免随机域名撑爆内存。
 */
 type HostLimiter struct {
-	limit     int
-	mu        sync.Mutex
-	buckets   map[string]*hostBucket
-	lastSweep time.Time
-}
-
-type hostBucket struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+	limit   int
+	limiter *ratelimit.Limiter[string]
 }
 
 // NewHostLimiter 构造按 host 限速器。perSecond <= 0 表示关闭限速。
 func NewHostLimiter(perSecond int) *HostLimiter {
+	if perSecond <= 0 {
+		return &HostLimiter{}
+	}
 	return &HostLimiter{
-		limit:     perSecond,
-		buckets:   make(map[string]*hostBucket),
-		lastSweep: time.Now(),
+		limit:   perSecond,
+		limiter: ratelimit.New[string](ratelimit.Options{MaxBuckets: ratelimit.DefaultMaxBuckets}),
 	}
 }
 
@@ -47,38 +36,5 @@ func (l *HostLimiter) Allow(host string) (retryAfter time.Duration, allowed bool
 	if key == "" {
 		return 0, true
 	}
-
-	now := time.Now()
-	l.mu.Lock()
-	b, ok := l.buckets[key]
-	if !ok {
-		b = &hostBucket{limiter: rate.NewLimiter(rate.Limit(l.limit), l.limit)}
-		l.buckets[key] = b
-	}
-	b.lastSeen = now
-	limiter := b.limiter
-	l.sweepLocked(now)
-	l.mu.Unlock()
-
-	res := limiter.Reserve()
-	if !res.OK() {
-		return time.Second, false
-	}
-	if delay := res.Delay(); delay > 0 {
-		res.Cancel()
-		return delay, false
-	}
-	return 0, true
-}
-
-func (l *HostLimiter) sweepLocked(now time.Time) {
-	if now.Sub(l.lastSweep) < hostLimiterSweepStep {
-		return
-	}
-	l.lastSweep = now
-	for host, b := range l.buckets {
-		if now.Sub(b.lastSeen) > hostLimiterIdleTTL {
-			delete(l.buckets, host)
-		}
-	}
+	return l.limiter.Allow(key, l.limit, l.limit)
 }

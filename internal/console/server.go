@@ -13,6 +13,7 @@ import (
 
 	"shortlink/internal/httpx"
 	"shortlink/internal/link"
+	"shortlink/internal/ratelimit"
 	"shortlink/internal/safehttp"
 	"shortlink/internal/webhook"
 )
@@ -104,7 +105,7 @@ type Server struct {
 	webhooks      *webhookHandler
 	web           http.Handler
 	publicBaseURL string
-	limiter       *tenantRateLimiter
+	limiter       *ratelimit.Limiter[int64]
 	ipLimiter     *ipRateLimiter
 	// rateLimited 与 ipRateLimited 只属于管理 API；在 newServer 里注册一次，不在 Routes 中重复注册。
 	rateLimited   prometheus.Counter
@@ -237,7 +238,7 @@ func newServer(d serverDeps) *Server {
 		webhooks:      webhooks,
 		web:           web,
 		publicBaseURL: d.publicBaseURL,
-		limiter:       newTenantRateLimiter(),
+		limiter:       ratelimit.New[int64](ratelimit.Options{}),
 		ipLimiter:     newIPRateLimiter(d.ipRateLimit, d.ipRateBurst, defaultMaxIPBuckets),
 		rateLimited:   newRateLimitedCounter(d.registry),
 		ipRateLimited: newIPRateLimitedCounter(d.registry),

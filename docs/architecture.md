@@ -42,7 +42,8 @@ shortlink/
 │   ├── tenant/          # 租户（组织）领域模型
 │   ├── idgen/           # 随机短码生成
 │   ├── job/             # 通用可靠后台任务引擎：Worker Pool、指数退避/自定义 RetryAfter、Lease Reaper、周期清理调度与指标（零 PG/Redis 依赖）
-│   ├── safehttp/        # 零业务/存储依赖出站安全 HTTP 底座：防 SSRF 拨号校验（含 NAT64/6to4/端口白名单）、禁重定向客户端与按 host 令牌桶（供 risk、webhook、console 共用）
+│   ├── ratelimit/       # 零业务依赖的泛型按 Key 进程内令牌桶限流器：精确 LRU 有界淘汰与分批惰性过期回收（供 console、safehttp 共用）
+│   ├── safehttp/        # 零业务/存储依赖出站安全 HTTP 底座：防 SSRF 拨号校验（含 NAT64/6to4/端口白名单）、禁重定向客户端与基于 ratelimit 的按 host 限速器（供 risk、webhook、console 共用）
 │   ├── risk/            # 异步 URL 风控：基于 safehttp 的客户端/按 host 限速、Redis fail-open 结果缓存、规则检测与 link.risk_scan 处理器
 │   ├── webhook/         # 租户 Webhook 订阅校验、AES-256-GCM（tenant_id AAD）密文加解密、HMAC-SHA256 签名校验与 webhook.deliver 处理器（含自动熔断与指标）
 │   ├── mailer/          # 仅依赖 Go 标准库的邮件发送器（SMTP StartTLS/SMTPS/Plain 与 CR/LF 注入防护）及邀请邮件正文构造（make arch-check 强制零内部依赖）
@@ -71,13 +72,14 @@ cmd/console    -> console, httpx, logx, audit, identity(/oauth), job, link, post
 cmd/migrate    -> golang-migrate
 config         -> logx, 标准库（零业务包依赖）
 redirector     -> httpx, link, click, idgen, Prometheus
-console        -> httpx, logx, audit, link, click, idgen, identity, tenant, safehttp, webhook, golang.org/x/time/rate, Prometheus
+console        -> httpx, logx, audit, link, click, idgen, identity, tenant, ratelimit, safehttp, webhook, Prometheus
 httpx          -> logx, 标准库、Prometheus
 identity       -> tenant, logx
 identity/oauth -> identity, logx, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
 audit          -> 标准库
 job            -> logx, 标准库、Prometheus
-safehttp       -> 标准库、golang.org/x/time/rate（严格零业务/存储/cache/config 依赖）
+ratelimit      -> 标准库、golang.org/x/time/rate（严格零 internal/* 与业务/HTTP/存储依赖，make arch-check 校验）
+safehttp       -> ratelimit, 标准库（严格零业务/存储/cache/config 依赖）
 risk           -> safehttp, cache, audit, job, link, go-redis, Prometheus
 webhook        -> safehttp, audit, job, 标准库、Prometheus
 mailer         -> 标准库（严格零 internal/* 与第三方依赖，make arch-check 校验）
