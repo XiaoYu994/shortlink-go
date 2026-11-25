@@ -54,22 +54,28 @@ func (s *Store) ListMembers(ctx context.Context, tenantID int64) ([]identity.Mem
 		return nil, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, listMembersSQL, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("list members: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
 	var members []identity.Member
-	for rows.Next() {
-		member, err := scanMember(rows)
+	err := s.withTenantReadTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, listMembersSQL, tenantID)
 		if err != nil {
-			return nil, fmt.Errorf("list members: %w", err)
+			return fmt.Errorf("list members: %w", err)
 		}
-		members = append(members, member)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list members: %w", err)
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			member, err := scanMember(rows)
+			if err != nil {
+				return fmt.Errorf("list members: %w", err)
+			}
+			members = append(members, member)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list members: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return members, nil
 }
@@ -157,52 +163,49 @@ func (s *Store) UpdateMemberRole(ctx context.Context, p identity.UpdateMemberRol
 		return identity.Member{}, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return identity.Member{}, fmt.Errorf("update member role: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	var out identity.Member
+	err := s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		scope, err := lockMemberScopeTx(ctx, tx, p.TenantID, p.ActorUserID, p.TargetUserID)
+		if err != nil {
+			return fmt.Errorf("update member role: %w", err)
+		}
+		if err := scope.CanUpdateRole(p.NewRole); err != nil {
+			return err
+		}
+		// 幂等空操作不写数据库、不产生审计日志噪音（ADR 0023）。
+		if scope.TargetRole == p.NewRole {
+			member, err := scanMember(tx.QueryRowContext(ctx, getMemberSQL, p.TenantID, p.TargetUserID))
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("update member role: user %d missing", p.TargetUserID)
+			}
+			if err != nil {
+				return fmt.Errorf("update member role: %w", err)
+			}
+			out = member
+			return nil
+		}
 
-	scope, err := lockMemberScopeTx(ctx, tx, p.TenantID, p.ActorUserID, p.TargetUserID)
-	if err != nil {
-		return identity.Member{}, fmt.Errorf("update member role: %w", err)
-	}
-	if err := scope.CanUpdateRole(p.NewRole); err != nil {
-		return identity.Member{}, err
-	}
-	// 幂等空操作不写数据库、不产生审计日志噪音（ADR 0023）。
-	if scope.TargetRole == p.NewRole {
-		member, err := scanMember(tx.QueryRowContext(ctx, getMemberSQL, p.TenantID, p.TargetUserID))
+		member, err := scanMember(tx.QueryRowContext(ctx, updateMemberRoleSQL, p.TenantID, p.TargetUserID, string(p.NewRole)))
 		if errors.Is(err, sql.ErrNoRows) {
-			return identity.Member{}, fmt.Errorf("update member role: user %d missing", p.TargetUserID)
+			return fmt.Errorf("update member role: user %d missing", p.TargetUserID)
 		}
 		if err != nil {
-			return identity.Member{}, fmt.Errorf("update member role: %w", err)
+			return fmt.Errorf("update member role: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
-			return identity.Member{}, fmt.Errorf("update member role: commit: %w", err)
+		if err := insertAuditLogTx(ctx, tx, p.TenantID, p.ActorUserID, audit.ActionMemberRoleUpdate, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
+			"email":         member.Email,
+			"previous_role": string(scope.TargetRole),
+			"new_role":      string(member.Role),
+		}); err != nil {
+			return fmt.Errorf("update member role: %w", err)
 		}
-		return member, nil
-	}
-
-	member, err := scanMember(tx.QueryRowContext(ctx, updateMemberRoleSQL, p.TenantID, p.TargetUserID, string(p.NewRole)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return identity.Member{}, fmt.Errorf("update member role: user %d missing", p.TargetUserID)
-	}
+		out = member
+		return nil
+	})
 	if err != nil {
-		return identity.Member{}, fmt.Errorf("update member role: %w", err)
+		return identity.Member{}, err
 	}
-	if err := insertAuditLogTx(ctx, tx, p.TenantID, p.ActorUserID, audit.ActionMemberRoleUpdate, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
-		"email":         member.Email,
-		"previous_role": string(scope.TargetRole),
-		"new_role":      string(member.Role),
-	}); err != nil {
-		return identity.Member{}, fmt.Errorf("update member role: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return identity.Member{}, fmt.Errorf("update member role: commit: %w", err)
-	}
-	return member, nil
+	return out, nil
 }
 
 /*
@@ -220,38 +223,31 @@ func (s *Store) RemoveMember(ctx context.Context, p identity.RemoveMemberParams)
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("remove member: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		scope, err := lockMemberScopeTx(ctx, tx, p.TenantID, p.ActorUserID, p.TargetUserID)
+		if err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
+		if err := scope.CanRemove(); err != nil {
+			return err
+		}
 
-	scope, err := lockMemberScopeTx(ctx, tx, p.TenantID, p.ActorUserID, p.TargetUserID)
-	if err != nil {
-		return fmt.Errorf("remove member: %w", err)
-	}
-	if err := scope.CanRemove(); err != nil {
-		return err
-	}
-
-	res, err := tx.ExecContext(ctx, removeMemberSQL, p.TenantID, p.TargetUserID)
-	if err != nil {
-		return fmt.Errorf("remove member: %w", err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("remove member: rows affected: %w", err)
-	}
-	if affected != 1 {
-		return fmt.Errorf("remove member: expected 1 row deleted, got %d", affected)
-	}
-	if err := insertAuditLogTx(ctx, tx, p.TenantID, p.ActorUserID, audit.ActionMemberRemove, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
-		"previous_role": string(scope.TargetRole),
-	}); err != nil {
-		return fmt.Errorf("remove member: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("remove member: commit: %w", err)
-	}
-	return nil
+		res, err := tx.ExecContext(ctx, removeMemberSQL, p.TenantID, p.TargetUserID)
+		if err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("remove member: rows affected: %w", err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("remove member: expected 1 row deleted, got %d", affected)
+		}
+		if err := insertAuditLogTx(ctx, tx, p.TenantID, p.ActorUserID, audit.ActionMemberRemove, audit.TargetMember, strconv.FormatInt(p.TargetUserID, 10), map[string]any{
+			"previous_role": string(scope.TargetRole),
+		}); err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
+		return nil
+	})
 }

@@ -27,44 +27,40 @@ Stats 读取一条链接的日统计。
 链接按 code + tenant_id 查，过期链接可以看，已删除或其他租户的链接返回 ErrNotFound。
 */
 func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelRepeatableRead,
-		ReadOnly:  true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("link stats: %w", err)
+	if tenantID <= 0 {
+		return nil, link.ErrNotFound
 	}
-	defer func() { _ = tx.Rollback() }()
-
 	stats := &link.Stats{
 		Code: code,
 		From: link.DayStart(from),
 		To:   link.DayStart(to),
 	}
-	var linkID int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT id, clicks FROM links WHERE code = $1 AND tenant_id = $2`,
-		code, tenantID).Scan(&linkID, &stats.TotalClicks)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, link.ErrNotFound
-	}
+	err := s.withTenantTx(ctx, tenantID, &sql.TxOptions{
+		Isolation: sql.LevelRepeatableRead,
+		ReadOnly:  true,
+	}, func(tx *sql.Tx) error {
+		var linkID int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT id, clicks FROM links WHERE code = $1 AND tenant_id = $2`,
+			code, tenantID).Scan(&linkID, &stats.TotalClicks)
+		if errors.Is(err, sql.ErrNoRows) {
+			return link.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("link stats: %w", err)
+		}
+
+		fromDay, toDay := link.DayKey(stats.From), link.DayKey(stats.To)
+		if err := readDailyClicks(ctx, tx, linkID, fromDay, toDay, stats); err != nil {
+			return err
+		}
+		if err := readDimensionClicks(ctx, tx, linkID, fromDay, toDay, stats); err != nil {
+			return err
+		}
+		return readDailyVisitors(ctx, tx, linkID, fromDay, toDay, stats)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("link stats: %w", err)
-	}
-
-	fromDay, toDay := link.DayKey(stats.From), link.DayKey(stats.To)
-	if err := readDailyClicks(ctx, tx, linkID, fromDay, toDay, stats); err != nil {
 		return nil, err
-	}
-	if err := readDimensionClicks(ctx, tx, linkID, fromDay, toDay, stats); err != nil {
-		return nil, err
-	}
-	if err := readDailyVisitors(ctx, tx, linkID, fromDay, toDay, stats); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("link stats: %w", err)
 	}
 	return stats, nil
 }

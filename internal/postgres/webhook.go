@@ -134,25 +134,28 @@ func (s *Store) ListWebhooks(ctx context.Context, tenantID int64) ([]webhook.Sub
 	if tenantID <= 0 {
 		return nil, webhook.ErrTenantNotFound
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.QueryContext(ctx, listWebhooksSQL, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("list webhooks: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
 	var out []webhook.Subscription
-	for rows.Next() {
-		sub, err := scanWebhookSubscription(rows)
+	err := s.withTenantReadTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, listWebhooksSQL, tenantID)
 		if err != nil {
-			return nil, fmt.Errorf("list webhooks: %w", err)
+			return fmt.Errorf("list webhooks: %w", err)
 		}
-		out = append(out, sub)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list webhooks: %w", err)
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			sub, err := scanWebhookSubscription(rows)
+			if err != nil {
+				return fmt.Errorf("list webhooks: %w", err)
+			}
+			out = append(out, sub)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list webhooks: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -185,51 +188,50 @@ func (s *Store) CreateWebhook(ctx context.Context, p webhook.CreateParams) (webh
 		return webhook.Subscription{}, fmt.Errorf("create webhook: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	var sub webhook.Subscription
+	err := s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		var lockedTenantID int64
+		err := tx.QueryRowContext(ctx, lockTenantForWebhookCreateSQL, p.TenantID).Scan(&lockedTenantID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return webhook.ErrTenantNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("create webhook: lock tenant: %w", err)
+		}
+
+		var count int
+		if err := tx.QueryRowContext(ctx, countWebhooksByTenantSQL, p.TenantID).Scan(&count); err != nil {
+			return fmt.Errorf("create webhook: count webhooks: %w", err)
+		}
+		if count >= webhook.MaxPerTenant {
+			return webhook.ErrLimitExceeded
+		}
+
+		var createdBy sql.NullInt64
+		if p.CreatedBy != nil {
+			createdBy = sql.NullInt64{Int64: *p.CreatedBy, Valid: true}
+		}
+		eventStrings := eventsToStrings(p.Events)
+		created, err := scanWebhookSubscription(tx.QueryRowContext(ctx, insertWebhookSQL,
+			p.TenantID, p.URL, p.Description, eventStrings, p.SecretCiphertext, p.SecretPrefix, createdBy,
+		))
+		if err != nil {
+			return fmt.Errorf("create webhook: insert: %w", err)
+		}
+		sub = created
+
+		if err := insertAuditLogTx(ctx, tx, sub.TenantID, explicitUserID, audit.ActionWebhookCreate, audit.TargetWebhook, strconv.FormatInt(sub.ID, 10), map[string]any{
+			"url":           sub.URL,
+			"events":        eventStrings,
+			"secret_prefix": sub.SecretPrefix,
+			"description":   sub.Description,
+		}); err != nil {
+			return fmt.Errorf("create webhook: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("create webhook: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var lockedTenantID int64
-	err = tx.QueryRowContext(ctx, lockTenantForWebhookCreateSQL, p.TenantID).Scan(&lockedTenantID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return webhook.Subscription{}, webhook.ErrTenantNotFound
-	}
-	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("create webhook: lock tenant: %w", err)
-	}
-
-	var count int
-	if err := tx.QueryRowContext(ctx, countWebhooksByTenantSQL, p.TenantID).Scan(&count); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("create webhook: count webhooks: %w", err)
-	}
-	if count >= webhook.MaxPerTenant {
-		return webhook.Subscription{}, webhook.ErrLimitExceeded
-	}
-
-	var createdBy sql.NullInt64
-	if p.CreatedBy != nil {
-		createdBy = sql.NullInt64{Int64: *p.CreatedBy, Valid: true}
-	}
-	eventStrings := eventsToStrings(p.Events)
-	sub, err := scanWebhookSubscription(tx.QueryRowContext(ctx, insertWebhookSQL,
-		p.TenantID, p.URL, p.Description, eventStrings, p.SecretCiphertext, p.SecretPrefix, createdBy,
-	))
-	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("create webhook: insert: %w", err)
-	}
-
-	if err := insertAuditLogTx(ctx, tx, sub.TenantID, explicitUserID, audit.ActionWebhookCreate, audit.TargetWebhook, strconv.FormatInt(sub.ID, 10), map[string]any{
-		"url":           sub.URL,
-		"events":        eventStrings,
-		"secret_prefix": sub.SecretPrefix,
-		"description":   sub.Description,
-	}); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("create webhook: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("create webhook: commit: %w", err)
+		return webhook.Subscription{}, err
 	}
 	return sub, nil
 }
@@ -249,77 +251,76 @@ func (s *Store) UpdateWebhook(ctx context.Context, p webhook.UpdateParams) (webh
 		return webhook.Subscription{}, fmt.Errorf("update webhook: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("update webhook: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	cur, err := scanWebhookSubscription(tx.QueryRowContext(ctx, lockWebhookSQL, p.WebhookID, p.TenantID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return webhook.Subscription{}, webhook.ErrNotFound
-	}
-	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("update webhook: lock: %w", err)
-	}
-
-	nextURL := cur.URL
-	nextDesc := cur.Description
-	nextEvents := eventsToStrings(cur.Events)
-	nextEnabled := cur.Enabled
-	nextFailures := cur.ConsecutiveFailures
-	nextReason := cur.DisabledReason
-	var nextDisabledAt sql.NullTime
-	if cur.DisabledAt != nil {
-		nextDisabledAt = sql.NullTime{Time: cur.DisabledAt.UTC(), Valid: true}
-	}
-
-	changedFields := make([]string, 0, 4)
-	auditMeta := map[string]any{}
-	if p.URL != nil {
-		nextURL = *p.URL
-		changedFields = append(changedFields, "url")
-		auditMeta["url"] = nextURL
-	}
-	if p.Description != nil {
-		nextDesc = *p.Description
-		changedFields = append(changedFields, "description")
-		auditMeta["description"] = nextDesc
-	}
-	if p.Events != nil {
-		nextEvents = eventsToStrings(p.Events)
-		changedFields = append(changedFields, "events")
-		auditMeta["events"] = nextEvents
-	}
-	if p.Enabled != nil {
-		changedFields = append(changedFields, "enabled")
-		auditMeta["enabled"] = *p.Enabled
-		if *p.Enabled {
-			nextEnabled = true
-			nextFailures = 0
-			nextReason = webhook.DisabledReasonNone
-			nextDisabledAt = sql.NullTime{}
-		} else if cur.Enabled {
-			// 仅在由启用切为停用时写成 manual；原本已熔断停用时保留 consecutive_failures 与原时间。
-			nextEnabled = false
-			nextReason = webhook.DisabledReasonManual
-			nextDisabledAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+	var updated webhook.Subscription
+	err := s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		cur, err := scanWebhookSubscription(tx.QueryRowContext(ctx, lockWebhookSQL, p.WebhookID, p.TenantID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return webhook.ErrNotFound
 		}
-	}
-	auditMeta["fields"] = changedFields
+		if err != nil {
+			return fmt.Errorf("update webhook: lock: %w", err)
+		}
 
-	updated, err := scanWebhookSubscription(tx.QueryRowContext(ctx, updateWebhookSQL,
-		p.WebhookID, p.TenantID, nextURL, nextDesc, nextEvents,
-		nextEnabled, nextFailures, string(nextReason), nextDisabledAt,
-	))
+		nextURL := cur.URL
+		nextDesc := cur.Description
+		nextEvents := eventsToStrings(cur.Events)
+		nextEnabled := cur.Enabled
+		nextFailures := cur.ConsecutiveFailures
+		nextReason := cur.DisabledReason
+		var nextDisabledAt sql.NullTime
+		if cur.DisabledAt != nil {
+			nextDisabledAt = sql.NullTime{Time: cur.DisabledAt.UTC(), Valid: true}
+		}
+
+		changedFields := make([]string, 0, 4)
+		auditMeta := map[string]any{}
+		if p.URL != nil {
+			nextURL = *p.URL
+			changedFields = append(changedFields, "url")
+			auditMeta["url"] = nextURL
+		}
+		if p.Description != nil {
+			nextDesc = *p.Description
+			changedFields = append(changedFields, "description")
+			auditMeta["description"] = nextDesc
+		}
+		if p.Events != nil {
+			nextEvents = eventsToStrings(p.Events)
+			changedFields = append(changedFields, "events")
+			auditMeta["events"] = nextEvents
+		}
+		if p.Enabled != nil {
+			changedFields = append(changedFields, "enabled")
+			auditMeta["enabled"] = *p.Enabled
+			if *p.Enabled {
+				nextEnabled = true
+				nextFailures = 0
+				nextReason = webhook.DisabledReasonNone
+				nextDisabledAt = sql.NullTime{}
+			} else if cur.Enabled {
+				// 仅在由启用切为停用时写成 manual；原本已熔断停用时保留 consecutive_failures 与原时间。
+				nextEnabled = false
+				nextReason = webhook.DisabledReasonManual
+				nextDisabledAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+			}
+		}
+		auditMeta["fields"] = changedFields
+
+		res, err := scanWebhookSubscription(tx.QueryRowContext(ctx, updateWebhookSQL,
+			p.WebhookID, p.TenantID, nextURL, nextDesc, nextEvents,
+			nextEnabled, nextFailures, string(nextReason), nextDisabledAt,
+		))
+		if err != nil {
+			return fmt.Errorf("update webhook: %w", err)
+		}
+		updated = res
+		if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionWebhookUpdate, audit.TargetWebhook, strconv.FormatInt(p.WebhookID, 10), auditMeta); err != nil {
+			return fmt.Errorf("update webhook: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("update webhook: %w", err)
-	}
-	if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionWebhookUpdate, audit.TargetWebhook, strconv.FormatInt(p.WebhookID, 10), auditMeta); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("update webhook: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("update webhook: commit: %w", err)
+		return webhook.Subscription{}, err
 	}
 	return updated, nil
 }
@@ -336,31 +337,24 @@ func (s *Store) DeleteWebhook(ctx context.Context, tenantID, webhookID int64) er
 		return fmt.Errorf("delete webhook: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("delete webhook: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	cur, err := scanWebhookSubscription(tx.QueryRowContext(ctx, lockWebhookSQL, webhookID, tenantID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return webhook.ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("delete webhook: lock: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, deleteWebhookSQL, webhookID, tenantID); err != nil {
-		return fmt.Errorf("delete webhook: %w", err)
-	}
-	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionWebhookDelete, audit.TargetWebhook, strconv.FormatInt(webhookID, 10), map[string]any{
-		"url": cur.URL,
-	}); err != nil {
-		return fmt.Errorf("delete webhook: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("delete webhook: commit: %w", err)
-	}
-	return nil
+	return s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		cur, err := scanWebhookSubscription(tx.QueryRowContext(ctx, lockWebhookSQL, webhookID, tenantID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return webhook.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("delete webhook: lock: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, deleteWebhookSQL, webhookID, tenantID); err != nil {
+			return fmt.Errorf("delete webhook: %w", err)
+		}
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionWebhookDelete, audit.TargetWebhook, strconv.FormatInt(webhookID, 10), map[string]any{
+			"url": cur.URL,
+		}); err != nil {
+			return fmt.Errorf("delete webhook: %w", err)
+		}
+		return nil
+	})
 }
 
 // RotateWebhookSecret 替换加密签名密钥与前缀，并写入审计日志。
@@ -375,26 +369,25 @@ func (s *Store) RotateWebhookSecret(ctx context.Context, tenantID, webhookID int
 		return webhook.Subscription{}, fmt.Errorf("rotate webhook secret: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	var updated webhook.Subscription
+	err := s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		res, err := scanWebhookSubscription(tx.QueryRowContext(ctx, rotateWebhookSecretSQL, webhookID, tenantID, ciphertext, prefix))
+		if errors.Is(err, sql.ErrNoRows) {
+			return webhook.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("rotate webhook secret: %w", err)
+		}
+		updated = res
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionWebhookRotateSecret, audit.TargetWebhook, strconv.FormatInt(webhookID, 10), map[string]any{
+			"secret_prefix": updated.SecretPrefix,
+		}); err != nil {
+			return fmt.Errorf("rotate webhook secret: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("rotate webhook secret: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	updated, err := scanWebhookSubscription(tx.QueryRowContext(ctx, rotateWebhookSecretSQL, webhookID, tenantID, ciphertext, prefix))
-	if errors.Is(err, sql.ErrNoRows) {
-		return webhook.Subscription{}, webhook.ErrNotFound
-	}
-	if err != nil {
-		return webhook.Subscription{}, fmt.Errorf("rotate webhook secret: %w", err)
-	}
-	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionWebhookRotateSecret, audit.TargetWebhook, strconv.FormatInt(webhookID, 10), map[string]any{
-		"secret_prefix": updated.SecretPrefix,
-	}); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("rotate webhook secret: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return webhook.Subscription{}, fmt.Errorf("rotate webhook secret: commit: %w", err)
+		return webhook.Subscription{}, err
 	}
 	return updated, nil
 }
@@ -411,40 +404,39 @@ func (s *Store) EnqueueWebhookTest(ctx context.Context, tenantID, webhookID int6
 		return webhook.TestEnqueueResult{}, fmt.Errorf("enqueue webhook test: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	var out webhook.TestEnqueueResult
+	err := s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, webhookExistsForTenantSQL, webhookID, tenantID).Scan(&exists); err != nil {
+			return fmt.Errorf("enqueue webhook test: check webhook: %w", err)
+		}
+		if !exists {
+			return webhook.ErrNotFound
+		}
+
+		var jobID int64
+		if err := tx.QueryRowContext(ctx, insertWebhookTestJobSQL,
+			job.KindWebhookDeliver, tenantID, webhookID, string(webhook.EventPing),
+		).Scan(&jobID); err != nil {
+			return fmt.Errorf("enqueue webhook test: insert job: %w", err)
+		}
+		deliveryID := webhook.FormatDeliveryID(jobID)
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionWebhookTest, audit.TargetWebhook, strconv.FormatInt(webhookID, 10), map[string]any{
+			"job_id":      jobID,
+			"delivery_id": deliveryID,
+		}); err != nil {
+			return fmt.Errorf("enqueue webhook test: %w", err)
+		}
+		out = webhook.TestEnqueueResult{
+			JobID:      jobID,
+			DeliveryID: deliveryID,
+		}
+		return nil
+	})
 	if err != nil {
-		return webhook.TestEnqueueResult{}, fmt.Errorf("enqueue webhook test: %w", err)
+		return webhook.TestEnqueueResult{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	var exists bool
-	if err := tx.QueryRowContext(ctx, webhookExistsForTenantSQL, webhookID, tenantID).Scan(&exists); err != nil {
-		return webhook.TestEnqueueResult{}, fmt.Errorf("enqueue webhook test: check webhook: %w", err)
-	}
-	if !exists {
-		return webhook.TestEnqueueResult{}, webhook.ErrNotFound
-	}
-
-	var jobID int64
-	if err := tx.QueryRowContext(ctx, insertWebhookTestJobSQL,
-		job.KindWebhookDeliver, tenantID, webhookID, string(webhook.EventPing),
-	).Scan(&jobID); err != nil {
-		return webhook.TestEnqueueResult{}, fmt.Errorf("enqueue webhook test: insert job: %w", err)
-	}
-	deliveryID := webhook.FormatDeliveryID(jobID)
-	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionWebhookTest, audit.TargetWebhook, strconv.FormatInt(webhookID, 10), map[string]any{
-		"job_id":      jobID,
-		"delivery_id": deliveryID,
-	}); err != nil {
-		return webhook.TestEnqueueResult{}, fmt.Errorf("enqueue webhook test: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return webhook.TestEnqueueResult{}, fmt.Errorf("enqueue webhook test: commit: %w", err)
-	}
-	return webhook.TestEnqueueResult{
-		JobID:      jobID,
-		DeliveryID: deliveryID,
-	}, nil
+	return out, nil
 }
 
 // ListWebhookDeliveries 按 id 倒序游标分页返回单条订阅的投递尝试记录。
@@ -458,42 +450,45 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, opts webhook.Delivery
 	if opts.Cursor != nil && opts.Cursor.ID <= 0 {
 		return nil, errors.New("list webhook deliveries: cursor id must be positive")
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	var exists bool
-	if err := s.db.QueryRowContext(ctx, webhookExistsForTenantSQL, opts.WebhookID, opts.TenantID).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("list webhook deliveries: check webhook: %w", err)
-	}
-	if !exists {
-		return nil, webhook.ErrNotFound
-	}
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if opts.Cursor == nil {
-		rows, err = s.db.QueryContext(ctx, listWebhookDeliveriesFirstSQL, opts.TenantID, opts.WebhookID, opts.Limit)
-	} else {
-		rows, err = s.db.QueryContext(ctx, listWebhookDeliveriesAfterSQL, opts.TenantID, opts.WebhookID, opts.Cursor.ID, opts.Limit)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("list webhook deliveries: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
 
 	out := make([]webhook.Delivery, 0, opts.Limit)
-	for rows.Next() {
-		d, err := scanWebhookDelivery(rows)
-		if err != nil {
-			return nil, fmt.Errorf("list webhook deliveries: %w", err)
+	err := s.withTenantReadTx(ctx, opts.TenantID, func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, webhookExistsForTenantSQL, opts.WebhookID, opts.TenantID).Scan(&exists); err != nil {
+			return fmt.Errorf("list webhook deliveries: check webhook: %w", err)
 		}
-		out = append(out, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list webhook deliveries: %w", err)
+		if !exists {
+			return webhook.ErrNotFound
+		}
+
+		var (
+			rows *sql.Rows
+			err  error
+		)
+		if opts.Cursor == nil {
+			rows, err = tx.QueryContext(ctx, listWebhookDeliveriesFirstSQL, opts.TenantID, opts.WebhookID, opts.Limit)
+		} else {
+			rows, err = tx.QueryContext(ctx, listWebhookDeliveriesAfterSQL, opts.TenantID, opts.WebhookID, opts.Cursor.ID, opts.Limit)
+		}
+		if err != nil {
+			return fmt.Errorf("list webhook deliveries: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			d, err := scanWebhookDelivery(rows)
+			if err != nil {
+				return fmt.Errorf("list webhook deliveries: %w", err)
+			}
+			out = append(out, d)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list webhook deliveries: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -530,69 +525,65 @@ func (s *Store) RecordWebhookDelivery(ctx context.Context, p webhook.RecordDeliv
 		}
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("record webhook delivery: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var httpStatus sql.NullInt64
-	if p.HTTPStatus != nil {
-		httpStatus = sql.NullInt64{Int64: int64(*p.HTTPStatus), Valid: true}
-	}
-	if _, err := tx.ExecContext(ctx, insertWebhookDeliverySQL,
-		p.TenantID, p.WebhookID, p.JobID, p.DeliveryID, string(p.Event),
-		p.Attempt, string(p.Status), httpStatus, p.DurationMs, p.ErrorMessage, p.ResponseSnippet,
-	); err != nil {
-		return false, fmt.Errorf("record webhook delivery: insert log: %w", err)
-	}
-
 	autoDisabled := false
-	switch {
-	case p.IsPing:
-		// webhook.ping 不修改熔断计数器，也不触发自动停用。
-	case p.Status == webhook.StatusSuccess:
-		if _, err := tx.ExecContext(ctx, resetWebhookFailuresSQL, p.WebhookID, p.TenantID); err != nil {
-			return false, fmt.Errorf("record webhook delivery: reset failures: %w", err)
+	err := s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		var httpStatus sql.NullInt64
+		if p.HTTPStatus != nil {
+			httpStatus = sql.NullInt64{Int64: int64(*p.HTTPStatus), Valid: true}
 		}
-	case p.TerminalFailure:
-		var (
-			wasEnabled   bool
-			prevFailures int
-		)
-		err := tx.QueryRowContext(ctx, lockWebhookForDeliveryRecordSQL, p.WebhookID, p.TenantID).Scan(&wasEnabled, &prevFailures)
-		if err == nil && wasEnabled {
-			nextFailures := prevFailures + 1
-			nextEnabled := true
-			var nextReason webhook.DisabledReason
-			var nextDisabledAt sql.NullTime
-			if p.MaxConsecutiveFailures > 0 && nextFailures >= p.MaxConsecutiveFailures {
-				autoDisabled = true
-				nextEnabled = false
-				nextReason = webhook.DisabledReasonConsecutiveFailures
-				nextDisabledAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
-			}
-			if _, err := tx.ExecContext(ctx, incrementWebhookFailureSQL,
-				p.WebhookID, p.TenantID, nextFailures, nextEnabled, string(nextReason), nextDisabledAt,
-			); err != nil {
-				return false, fmt.Errorf("record webhook delivery: update failure count: %w", err)
-			}
-			if autoDisabled {
-				if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionWebhookAutoDisable, audit.TargetWebhook, strconv.FormatInt(p.WebhookID, 10), map[string]any{
-					"consecutive_failures": nextFailures,
-					"disabled_reason":      string(webhook.DisabledReasonConsecutiveFailures),
-					"delivery_id":          p.DeliveryID,
-				}); err != nil {
-					return false, fmt.Errorf("record webhook delivery: audit auto disable: %w", err)
-				}
-			}
-		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("record webhook delivery: lock webhook: %w", err)
+		if _, err := tx.ExecContext(ctx, insertWebhookDeliverySQL,
+			p.TenantID, p.WebhookID, p.JobID, p.DeliveryID, string(p.Event),
+			p.Attempt, string(p.Status), httpStatus, p.DurationMs, p.ErrorMessage, p.ResponseSnippet,
+		); err != nil {
+			return fmt.Errorf("record webhook delivery: insert log: %w", err)
 		}
-	}
 
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("record webhook delivery: commit: %w", err)
+		switch {
+		case p.IsPing:
+			// webhook.ping 不修改熔断计数器，也不触发自动停用。
+		case p.Status == webhook.StatusSuccess:
+			if _, err := tx.ExecContext(ctx, resetWebhookFailuresSQL, p.WebhookID, p.TenantID); err != nil {
+				return fmt.Errorf("record webhook delivery: reset failures: %w", err)
+			}
+		case p.TerminalFailure:
+			var (
+				wasEnabled   bool
+				prevFailures int
+			)
+			err := tx.QueryRowContext(ctx, lockWebhookForDeliveryRecordSQL, p.WebhookID, p.TenantID).Scan(&wasEnabled, &prevFailures)
+			if err == nil && wasEnabled {
+				nextFailures := prevFailures + 1
+				nextEnabled := true
+				var nextReason webhook.DisabledReason
+				var nextDisabledAt sql.NullTime
+				if p.MaxConsecutiveFailures > 0 && nextFailures >= p.MaxConsecutiveFailures {
+					autoDisabled = true
+					nextEnabled = false
+					nextReason = webhook.DisabledReasonConsecutiveFailures
+					nextDisabledAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+				}
+				if _, err := tx.ExecContext(ctx, incrementWebhookFailureSQL,
+					p.WebhookID, p.TenantID, nextFailures, nextEnabled, string(nextReason), nextDisabledAt,
+				); err != nil {
+					return fmt.Errorf("record webhook delivery: update failure count: %w", err)
+				}
+				if autoDisabled {
+					if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionWebhookAutoDisable, audit.TargetWebhook, strconv.FormatInt(p.WebhookID, 10), map[string]any{
+						"consecutive_failures": nextFailures,
+						"disabled_reason":      string(webhook.DisabledReasonConsecutiveFailures),
+						"delivery_id":          p.DeliveryID,
+					}); err != nil {
+						return fmt.Errorf("record webhook delivery: audit auto disable: %w", err)
+					}
+				}
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("record webhook delivery: lock webhook: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return autoDisabled, nil
 }

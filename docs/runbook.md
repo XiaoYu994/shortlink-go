@@ -977,6 +977,18 @@ set -a; . ./.env; set +a
 psql "$DATABASE_URL" -c 'SELECT id, code, url, created_at FROM links ORDER BY id DESC LIMIT 5'
 ```
 
+排查多租户隔离时，可在事务内模拟控制面 RLS 视角（`shortlink_tenant` 为 `NOLOGIN NOBYPASSRLS`，仅受 7 张租户表的 `tenant_isolation` 策略约束，且不会泄露到连接池其他事务）：
+
+```sql
+BEGIN;
+SET LOCAL ROLE shortlink_tenant;
+SELECT set_config('app.tenant_id', '1', true);
+SELECT id, code, tenant_id FROM links ORDER BY id DESC LIMIT 5;
+ROLLBACK;
+```
+
+> 生产环境建议：若独立收敛静态连接权限，`DATABASE_URL` / `WORKER_DATABASE_URL` / `REDIRECTOR_DATABASE_URL` 应使用非 `SUPERUSER`、非表属主且具备 `BYPASSRLS` + `GRANT shortlink_tenant` 的最小 DML 应用账号（仅 `MIGRATE_DATABASE_URL` 持有迁移与表属主 DDL 权限）；白名单跨租户路径正常工作，同时所有控制面 `withTenantTx` 事务通过 `SET LOCAL ROLE shortlink_tenant` 自动剥夺 `BYPASSRLS` 并强制执行 RLS。若托管库直接以单个非超管表属主运行，迁移 `016` 仅开启 `ENABLE ROW LEVEL SECURITY`（不启用 `FORCE`）同样能保证白名单跨租户路径可用且 `withTenantTx` 受 RLS 约束，见 [ADR 0028](adr/0028-postgres-rls-tenant-isolation.md)。
+
 ## 测试
 
 ```bash

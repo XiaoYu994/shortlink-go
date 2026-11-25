@@ -495,13 +495,24 @@ GetForTenant 按短码和租户查一条链接，包含已过期链接。
 不存在和其他租户的链接都返回 link.ErrNotFound，不透露链接是否存在。
 */
 func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error) {
-	row := s.db.QueryRowContext(ctx, getForTenantSQL, code, tenantID)
-	got, err := scanAdminLink(row)
-	if errors.Is(err, sql.ErrNoRows) {
+	if tenantID <= 0 {
 		return nil, link.ErrNotFound
 	}
+	var got *link.AdminLink
+	err := s.withTenantReadTx(ctx, tenantID, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, getForTenantSQL, code, tenantID)
+		scanned, scanErr := scanAdminLink(row)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return link.ErrNotFound
+		}
+		if scanErr != nil {
+			return fmt.Errorf("get link for tenant: %w", scanErr)
+		}
+		got = scanned
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get link for tenant: %w", err)
+		return nil, err
 	}
 	return got, nil
 }
@@ -611,6 +622,9 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 	if opts.Status != "" && !opts.Status.Valid() {
 		return nil, fmt.Errorf("list links: invalid status %q", opts.Status)
 	}
+	if opts.TenantID <= 0 {
+		return []link.AdminLink{}, nil
+	}
 
 	if opts.Sort == link.SortClicksToday {
 		return s.listByClicksToday(ctx, opts)
@@ -620,13 +634,18 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list links: %w", err)
+	var out []link.AdminLink
+	if err := s.withTenantReadTx(ctx, opts.TenantID, func(tx *sql.Tx) error {
+		items, qErr := queryAdminLinks(ctx, tx, opts.Limit, query, args...)
+		if qErr != nil {
+			return qErr
+		}
+		out = items
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	return scanAdminLinks(rows, opts.Limit)
+	return out, nil
 }
 
 func (s *Store) listByClicksToday(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
@@ -637,41 +656,50 @@ func (s *Store) listByClicksToday(ctx context.Context, opts link.ListOptions) ([
 		if err != nil {
 			return nil, err
 		}
-		return queryAdminLinks(ctx, s.db, opts.Limit, query, args...)
+		var out []link.AdminLink
+		if err := s.withTenantReadTx(ctx, opts.TenantID, func(tx *sql.Tx) error {
+			items, qErr := queryAdminLinks(ctx, tx, opts.Limit, query, args...)
+			if qErr != nil {
+				return qErr
+			}
+			out = items
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
+	var result []link.AdminLink
+	err := s.withTenantTx(ctx, opts.TenantID, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  true,
+	}, func(tx *sql.Tx) error {
+		query, args, err := buildClickedTodayQuery(opts.Cursor, opts.TenantID, opts.Limit, opts.Status, opts.Query)
+		if err != nil {
+			return err
+		}
+		items, err := queryAdminLinks(ctx, tx, opts.Limit, query, args...)
+		if err != nil {
+			return err
+		}
+		result = items
+
+		if remaining := opts.Limit - len(result); remaining > 0 {
+			unclickedQuery, unclickedArgs, err := buildUnclickedTodayQuery(nil, opts.TenantID, remaining, opts.Status, opts.Query)
+			if err != nil {
+				return err
+			}
+			more, err := queryAdminLinks(ctx, tx, remaining, unclickedQuery, unclickedArgs...)
+			if err != nil {
+				return err
+			}
+			result = append(result, more...)
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list links: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	query, args, err := buildClickedTodayQuery(opts.Cursor, opts.TenantID, opts.Limit, opts.Status, opts.Query)
-	if err != nil {
 		return nil, err
-	}
-	result, err := queryAdminLinks(ctx, tx, opts.Limit, query, args...)
-	if err != nil {
-		return nil, err
-	}
-
-	if remaining := opts.Limit - len(result); remaining > 0 {
-		unclickedQuery, unclickedArgs, err := buildUnclickedTodayQuery(nil, opts.TenantID, remaining, opts.Status, opts.Query)
-		if err != nil {
-			return nil, err
-		}
-		more, err := queryAdminLinks(ctx, tx, remaining, unclickedQuery, unclickedArgs...)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, more...)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("list links: %w", err)
 	}
 	return result, nil
 }
@@ -757,28 +785,35 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 	if err != nil {
 		return nil, fmt.Errorf("update link: %w", err)
 	}
-
-	row := s.db.QueryRowContext(ctx, updateLinkSQL,
-		code, tenantID, hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue,
-		actorKind, actorID, reqID, string(metaJSON),
-		job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink),
-		job.KindCacheReconcile,
-		job.KindWebhookDeliver, string(webhook.EventLinkUpdated), webhook.DefaultMaxAttempts)
-	var (
-		got      link.AdminLink
-		isBanned bool
-	)
-	base, err := scanLink(row, &got.Clicks, &got.ClicksToday, &isBanned)
-	if errors.Is(err, sql.ErrNoRows) {
+	if tenantID <= 0 {
 		return nil, link.ErrNotFound
 	}
+
+	var got link.AdminLink
+	err = s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, updateLinkSQL,
+			code, tenantID, hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue,
+			actorKind, actorID, reqID, string(metaJSON),
+			job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink),
+			job.KindCacheReconcile,
+			job.KindWebhookDeliver, string(webhook.EventLinkUpdated), webhook.DefaultMaxAttempts)
+		var isBanned bool
+		base, scanErr := scanLink(row, &got.Clicks, &got.ClicksToday, &isBanned)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return link.ErrNotFound
+		}
+		if scanErr != nil {
+			return fmt.Errorf("update link: %w", scanErr)
+		}
+		if isBanned {
+			return link.ErrBanned
+		}
+		got.Link = *base
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("update link: %w", err)
+		return nil, err
 	}
-	if isBanned {
-		return nil, link.ErrBanned
-	}
-	got.Link = *base
 	return &got, nil
 }
 
@@ -792,51 +827,47 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	if _, _, _, err := requireAuditMeta(ctx); err != nil {
 		return fmt.Errorf("delete link: %w", err)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("delete link: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var (
-		id     int64
-		urlStr string
-		banned bool
-	)
-	err = tx.QueryRowContext(ctx,
-		`SELECT id, url, banned_at IS NOT NULL FROM links WHERE code = $1 AND tenant_id = $2 FOR UPDATE`,
-		code, tenantID).Scan(&id, &urlStr, &banned)
-	if errors.Is(err, sql.ErrNoRows) {
+	if tenantID <= 0 {
 		return link.ErrNotFound
 	}
-	if err != nil {
-		return fmt.Errorf("delete link: %w", err)
-	}
-	if banned {
-		return link.ErrBanned
-	}
+	return s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		var (
+			id     int64
+			urlStr string
+			banned bool
+		)
+		err := tx.QueryRowContext(ctx,
+			`SELECT id, url, banned_at IS NOT NULL FROM links WHERE code = $1 AND tenant_id = $2 FOR UPDATE`,
+			code, tenantID).Scan(&id, &urlStr, &banned)
+		if errors.Is(err, sql.ErrNoRows) {
+			return link.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("delete link: %w", err)
+		}
+		if banned {
+			return link.ErrBanned
+		}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE id = $1`, id); err != nil {
-		return fmt.Errorf("delete link: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, enqueueDeleteJobsSQL,
-		job.KindCacheReconcile, tenantID, code, job.KindLinkPurgeStats, id); err != nil {
-		return fmt.Errorf("delete link: enqueue jobs: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, enqueueDeleteWebhooksSQL,
-		job.KindWebhookDeliver, string(webhook.EventLinkDeleted), tenantID, id, code, urlStr, webhook.DefaultMaxAttempts); err != nil {
-		return fmt.Errorf("delete link: enqueue webhooks: %w", err)
-	}
-	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
-		"link_id": id,
-		"url":     urlStr,
-	}); err != nil {
-		return fmt.Errorf("delete link: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("delete link: %w", err)
-	}
-	return nil
+		if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE id = $1`, id); err != nil {
+			return fmt.Errorf("delete link: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, enqueueDeleteJobsSQL,
+			job.KindCacheReconcile, tenantID, code, job.KindLinkPurgeStats, id); err != nil {
+			return fmt.Errorf("delete link: enqueue jobs: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, enqueueDeleteWebhooksSQL,
+			job.KindWebhookDeliver, string(webhook.EventLinkDeleted), tenantID, id, code, urlStr, webhook.DefaultMaxAttempts); err != nil {
+			return fmt.Errorf("delete link: enqueue webhooks: %w", err)
+		}
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
+			"link_id": id,
+			"url":     urlStr,
+		}); err != nil {
+			return fmt.Errorf("delete link: %w", err)
+		}
+		return nil
+	})
 }
 
 // PurgeLinkStatsBatch 按完整主键元组分批清理已删除链接的三张日统计表残留行。

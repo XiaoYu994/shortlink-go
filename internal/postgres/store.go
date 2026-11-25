@@ -187,20 +187,37 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			return fmt.Errorf("generate code: %w", err)
 		}
 
-		err = s.db.QueryRowContext(ctx, insertLinkSQL,
-			code, l.URL, l.ExpiresAt, l.TenantID, actorKind, actorID, reqID,
-			job.KindLinkRiskScan, string(audit.ActionLinkCreate), string(audit.TargetLink),
-			job.KindWebhookDeliver, string(webhook.EventLinkCreated), webhook.DefaultMaxAttempts,
-		).Scan(&l.ID, &l.CreatedAt)
-		if err == nil {
+		var (
+			noRows    bool
+			exceeded  bool
+			exists    bool
+			createdID int64
+			createdAt = l.CreatedAt
+		)
+		err = s.withTenantTx(ctx, l.TenantID, nil, func(tx *sql.Tx) error {
+			scanErr := tx.QueryRowContext(ctx, insertLinkSQL,
+				code, l.URL, l.ExpiresAt, l.TenantID, actorKind, actorID, reqID,
+				job.KindLinkRiskScan, string(audit.ActionLinkCreate), string(audit.TargetLink),
+				job.KindWebhookDeliver, string(webhook.EventLinkCreated), webhook.DefaultMaxAttempts,
+			).Scan(&createdID, &createdAt)
+			if scanErr == nil {
+				return nil
+			}
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				noRows = true
+				var checkErr error
+				exceeded, exists, checkErr = checkCreateQuotaTx(ctx, tx, l.TenantID)
+				return checkErr
+			}
+			return scanErr
+		})
+		if err == nil && !noRows {
+			l.ID = createdID
+			l.CreatedAt = createdAt
 			l.Code = code
 			return nil
 		}
-		if errors.Is(err, sql.ErrNoRows) {
-			exceeded, exists, checkErr := s.checkCreateQuota(ctx, l.TenantID)
-			if checkErr != nil {
-				return checkErr
-			}
+		if err == nil && noRows {
 			if !exists {
 				return ErrTenantNotFound
 			}
@@ -222,10 +239,10 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 }
 
 /*
-checkCreateQuota 用和创建语句相同的「有效已用量」区分租户不存在与本月配额已满。
+checkCreateQuotaTx 用和创建语句相同的「有效已用量」区分租户不存在与本月配额已满。
 */
-func (s *Store) checkCreateQuota(ctx context.Context, tenantID int64) (exceeded, exists bool, err error) {
-	err = s.db.QueryRowContext(ctx, quotaExceededSQL, tenantID).Scan(&exceeded)
+func checkCreateQuotaTx(ctx context.Context, tx *sql.Tx, tenantID int64) (exceeded, exists bool, err error) {
+	err = tx.QueryRowContext(ctx, quotaExceededSQL, tenantID).Scan(&exceeded)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
 	}

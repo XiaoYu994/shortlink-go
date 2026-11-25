@@ -136,54 +136,54 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	var inv identity.Invitation
+	err = s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, tenantExistsSQL, p.TenantID).Scan(&exists); err != nil {
+			return fmt.Errorf("create invitation: check tenant: %w", err)
+		}
+		if !exists {
+			return ErrTenantNotFound
+		}
+		if _, err := tx.ExecContext(ctx, expireStaleInvitationsSQL, p.TenantID, email); err != nil {
+			return fmt.Errorf("create invitation: expire stale: %w", err)
+		}
 
-	var exists bool
-	if err := tx.QueryRowContext(ctx, tenantExistsSQL, p.TenantID).Scan(&exists); err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: check tenant: %w", err)
-	}
-	if !exists {
-		return identity.Invitation{}, ErrTenantNotFound
-	}
-	if _, err := tx.ExecContext(ctx, expireStaleInvitationsSQL, p.TenantID, email); err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: expire stale: %w", err)
-	}
+		created, err := insertInvitationTx(ctx, tx, p, email)
+		if err != nil {
+			return err
+		}
+		inv = created
 
-	inv, err := insertInvitationTx(ctx, tx, p, email)
+		auditMeta := map[string]any{
+			"email": inv.Email,
+			"role":  string(inv.Role),
+		}
+		if inv.ExpiresAt != nil {
+			auditMeta["expires_at"] = inv.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		if err := insertAuditLogTx(ctx, tx, inv.TenantID, explicitUserID, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
+			return fmt.Errorf("create invitation: %w", err)
+		}
+		emailPayload, err := json.Marshal(struct {
+			InvitationID int64 `json:"invitation_id"`
+		}{InvitationID: inv.ID})
+		if err != nil {
+			return fmt.Errorf("create invitation: marshal email payload: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, enqueueInvitationEmailSQL,
+			job.KindInvitationEmail,
+			inv.TenantID,
+			emailPayload,
+			"invitation:"+strconv.FormatInt(inv.ID, 10),
+			job.DefaultMaxAttempts,
+		); err != nil {
+			return fmt.Errorf("create invitation: enqueue email: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return identity.Invitation{}, err
-	}
-	auditMeta := map[string]any{
-		"email": inv.Email,
-		"role":  string(inv.Role),
-	}
-	if inv.ExpiresAt != nil {
-		auditMeta["expires_at"] = inv.ExpiresAt.UTC().Format(time.RFC3339Nano)
-	}
-	if err := insertAuditLogTx(ctx, tx, inv.TenantID, explicitUserID, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
-	}
-	emailPayload, err := json.Marshal(struct {
-		InvitationID int64 `json:"invitation_id"`
-	}{InvitationID: inv.ID})
-	if err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: marshal email payload: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, enqueueInvitationEmailSQL,
-		job.KindInvitationEmail,
-		inv.TenantID,
-		emailPayload,
-		"invitation:"+strconv.FormatInt(inv.ID, 10),
-		job.DefaultMaxAttempts,
-	); err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: enqueue email: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return identity.Invitation{}, fmt.Errorf("create invitation: commit: %w", err)
 	}
 	return inv, nil
 }
@@ -275,46 +275,52 @@ func (s *Store) ListInvitations(ctx context.Context, tenantID int64) ([]identity
 		return nil, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, listInvitationsSQL, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("list invitations: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
 	var out []identity.Invitation
-	for rows.Next() {
-		var (
-			inv        identity.Invitation
-			roleStr    string
-			invitedBy  sql.NullInt64
-			expiresAt  sql.NullTime
-			acceptedAt sql.NullTime
-			acceptedBy sql.NullInt64
-			revokedAt  sql.NullTime
-		)
-		if err := rows.Scan(
-			&inv.ID, &inv.TenantID, &inv.Email, &roleStr, &invitedBy,
-			&inv.CreatedAt, &expiresAt, &acceptedAt, &acceptedBy, &revokedAt,
-		); err != nil {
-			return nil, fmt.Errorf("list invitations: %w", err)
+	err := s.withTenantReadTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, listInvitationsSQL, tenantID)
+		if err != nil {
+			return fmt.Errorf("list invitations: %w", err)
 		}
-		inv.Role = identity.Role(roleStr)
-		inv.CreatedAt = inv.CreatedAt.UTC()
-		if invitedBy.Valid {
-			v := invitedBy.Int64
-			inv.InvitedBy = &v
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			var (
+				inv        identity.Invitation
+				roleStr    string
+				invitedBy  sql.NullInt64
+				expiresAt  sql.NullTime
+				acceptedAt sql.NullTime
+				acceptedBy sql.NullInt64
+				revokedAt  sql.NullTime
+			)
+			if err := rows.Scan(
+				&inv.ID, &inv.TenantID, &inv.Email, &roleStr, &invitedBy,
+				&inv.CreatedAt, &expiresAt, &acceptedAt, &acceptedBy, &revokedAt,
+			); err != nil {
+				return fmt.Errorf("list invitations: %w", err)
+			}
+			inv.Role = identity.Role(roleStr)
+			inv.CreatedAt = inv.CreatedAt.UTC()
+			if invitedBy.Valid {
+				v := invitedBy.Int64
+				inv.InvitedBy = &v
+			}
+			inv.ExpiresAt = nullTimeUTC(expiresAt)
+			inv.AcceptedAt = nullTimeUTC(acceptedAt)
+			if acceptedBy.Valid {
+				v := acceptedBy.Int64
+				inv.AcceptedBy = &v
+			}
+			inv.RevokedAt = nullTimeUTC(revokedAt)
+			out = append(out, inv)
 		}
-		inv.ExpiresAt = nullTimeUTC(expiresAt)
-		inv.AcceptedAt = nullTimeUTC(acceptedAt)
-		if acceptedBy.Valid {
-			v := acceptedBy.Int64
-			inv.AcceptedBy = &v
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list invitations: %w", err)
 		}
-		inv.RevokedAt = nullTimeUTC(revokedAt)
-		out = append(out, inv)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list invitations: %w", err)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -336,50 +342,43 @@ func (s *Store) RevokeInvitation(ctx context.Context, p identity.RevokeInvitatio
 		return fmt.Errorf("revoke invitation: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("revoke invitation: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+		var (
+			email        string
+			roleStr      string
+			acceptedAt   sql.NullTime
+			revokedAt    sql.NullTime
+			supersededAt sql.NullTime
+			expired      bool
+		)
+		err := tx.QueryRowContext(ctx, lockInvitationForRevokeSQL, p.InvitationID, p.TenantID).Scan(
+			&email, &roleStr, &acceptedAt, &revokedAt, &supersededAt, &expired,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			return identity.ErrInvitationNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("revoke invitation: %w", err)
+		}
+		targetRole := identity.Role(roleStr)
+		if !identity.CanAssignMemberRole(p.ActorRole, targetRole) {
+			return identity.ErrMemberForbidden
+		}
+		if acceptedAt.Valid || revokedAt.Valid || supersededAt.Valid || expired {
+			return identity.ErrInvitationNotPending
+		}
 
-	var (
-		email        string
-		roleStr      string
-		acceptedAt   sql.NullTime
-		revokedAt    sql.NullTime
-		supersededAt sql.NullTime
-		expired      bool
-	)
-	err = tx.QueryRowContext(ctx, lockInvitationForRevokeSQL, p.InvitationID, p.TenantID).Scan(
-		&email, &roleStr, &acceptedAt, &revokedAt, &supersededAt, &expired,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return identity.ErrInvitationNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("revoke invitation: %w", err)
-	}
-	targetRole := identity.Role(roleStr)
-	if !identity.CanAssignMemberRole(p.ActorRole, targetRole) {
-		return identity.ErrMemberForbidden
-	}
-	if acceptedAt.Valid || revokedAt.Valid || supersededAt.Valid || expired {
-		return identity.ErrInvitationNotPending
-	}
-
-	if _, err := tx.ExecContext(ctx, revokeInvitationSQL, p.InvitationID, p.TenantID); err != nil {
-		return fmt.Errorf("revoke invitation: %w", err)
-	}
-	if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionInvitationRevoke, audit.TargetInvitation, strconv.FormatInt(p.InvitationID, 10), map[string]any{
-		"email": email,
-		"role":  string(targetRole),
-	}); err != nil {
-		return fmt.Errorf("revoke invitation: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("revoke invitation: commit: %w", err)
-	}
-	return nil
+		if _, err := tx.ExecContext(ctx, revokeInvitationSQL, p.InvitationID, p.TenantID); err != nil {
+			return fmt.Errorf("revoke invitation: %w", err)
+		}
+		if err := insertAuditLogTx(ctx, tx, p.TenantID, 0, audit.ActionInvitationRevoke, audit.TargetInvitation, strconv.FormatInt(p.InvitationID, 10), map[string]any{
+			"email": email,
+			"role":  string(targetRole),
+		}); err != nil {
+			return fmt.Errorf("revoke invitation: %w", err)
+		}
+		return nil
+	})
 }
 
 // CleanupExpiredInvitationsByExpiry 分批删除超过保留期的已过期未兑现邀请。

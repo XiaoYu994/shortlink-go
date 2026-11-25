@@ -50,7 +50,7 @@ shortlink/
 │   ├── memorystore/     # 内存存储，仅测试和本地开发；只实现跳转和创建
 │   ├── pgdb/            # PostgreSQL 公共连接池参数、约束错误判断与测试库 advisory lock 底座（零业务依赖）
 │   ├── pgredirect/      # 跳转数据面专属 PostgreSQL 存储：只读 GetByCode 与 ClickRecorder 批量写出（零管理/身份/风控依赖）
-│   ├── postgres/        # PostgreSQL 控制面与存储门面：内嵌 pgredirect.Store，提供管理查询/CRUD、分区治理、会话、成员邀请、fail-closed 审计写入与 jobs Outbox 队列
+│   ├── postgres/        # PostgreSQL 控制面与存储门面：内嵌 pgredirect.Store，提供带 RLS 事务隔离（tenanttx）的管理查询/CRUD、分区治理、会话、成员邀请、fail-closed 审计写入与 jobs Outbox 队列
 │   ├── storemetrics/    # 存储指标装饰器（透传完整读写 Store 与只读 Reader）
 │   ├── cache/           # Redis 客户端、读写 Store 与只读 Reader、Reconcile 电平对账
 │   ├── click/           # 点击元数据分类和异步批量记录（ClickRecorder、含 recorder_stopped 故障指标）
@@ -174,7 +174,7 @@ GET /api/v1/links/{code}/stats
 - `internal/cache`：`GetByCode` 的 Redis 读缓存。值、TTL、singleflight、故障降级和指标见 [ADR 0006](adr/0006-redis-cache-design.md)，冷缓存回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写和回源的两种 `SET` 见 [ADR 0011](adr/0011-link-crud-api.md)，下架后的缓存和复查见 [ADR 0016](adr/0016-link-states-and-takedown.md)。
 - `internal/click`：点击分类和异步批量写出。投递和关停见 [ADR 0007](adr/0007-async-click-recording.md)，日聚合、维度和访客哈希见 [ADR 0012](adr/0012-click-analytics.md)。
 - 进程指标和连接池指标见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。
-- 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs`、`webhooks`、`webhook_deliveries`、按月范围分区表 `link_clicks_daily` / `link_dimension_daily` / `link_visitors_daily` / `audit_logs` 的列与分区定义以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)，审计日志与 fail-closed 元数据约束见 [ADR 0023](adr/0023-audit-logs.md)、[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)，时序按月分区与自动淘汰见 [ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)，Webhook 订阅投递与异步邀请邮件见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)。
+- 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs`、`webhooks`、`webhook_deliveries`、按月范围分区表 `link_clicks_daily` / `link_dimension_daily` / `link_visitors_daily` / `audit_logs` 的列与分区定义以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)，审计日志与 fail-closed 元数据约束见 [ADR 0023](adr/0023-audit-logs.md)、[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)，时序按月分区与自动淘汰见 [ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)，Webhook 订阅投递与异步邀请邮件见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)，PostgreSQL 行级安全（RLS）第二道租户隔离防线（`shortlink_tenant` 角色与 `SET LOCAL` 事务上下文）见 [ADR 0028](adr/0028-postgres-rls-tenant-isolation.md)。
 - 租户配额和限流见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0015](adr/0015-monthly-link-quota.md)。
 - 点击日聚合和统计查询见 [ADR 0012](adr/0012-click-analytics.md)。
 
@@ -220,4 +220,4 @@ redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007]
 
 ## 尚未实现
 
-- PostgreSQL 行级安全（RLS）与 OpenTelemetry 追踪，见 [roadmap](roadmap.md) 阶段 16（[ADR 0005](adr/0005-prometheus-before-tracing.md)）
+- OpenTelemetry 追踪（含日志 `trace_id` 串联，日志体系 Phase C），见 [roadmap](roadmap.md) 阶段 16（[ADR 0005](adr/0005-prometheus-before-tracing.md)）

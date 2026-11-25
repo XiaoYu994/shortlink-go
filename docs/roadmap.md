@@ -153,11 +153,9 @@
 - [x] 复用阶段 12 的 `jobs` 引擎接入 `webhook.deliver` 消费者，实现可靠投递与退避重试
 - [x] （产品体验留痕）成员邀请邮件异步通知（复用 `jobs` 引擎，替代当前手动复制登录入口）
 
-## 阶段 16：租户隔离兜底与可观测性（待立 ADR）
+## 阶段 16：租户隔离兜底与可观测性（[ADR 0028](adr/0028-postgres-rls-tenant-isolation.md) / [ADR 0005](adr/0005-prometheus-before-tracing.md)）
 
-开工前先立 ADR，定 RLS 连接上下文约定和追踪采样策略。
-
-- [ ] PostgreSQL 行级安全（RLS）作为租户隔离的第二道防线（`SET LOCAL` 绑定当前租户）
+- [x] PostgreSQL 行级安全（RLS）作为租户隔离的第二道防线（`SET LOCAL` 绑定当前租户，[ADR 0028](adr/0028-postgres-rls-tenant-isolation.md)）
 - [ ] OpenTelemetry 追踪：串联跳转、管理与 worker 请求里的缓存、singleflight 和数据库 span，日志带 `trace_id`
 - [ ] 日志体系加固：根 logger 统一上下文透传、`Canonical Log Lines` 宽访问日志、数据面采样、脱敏与动态调级（Phase A/B 已落地：接入 `tint`、统一 `internal/logx` 根日志/脱敏/`LevelVar`、`RequestEvent` 宽访问日志、状态分级与 `redirector` 采样；Phase C 待与 OpenTelemetry 合流），具体问题清单见 [日志体系架构审查](postmortems/2026-11-24-logging-system-audit.md)
 

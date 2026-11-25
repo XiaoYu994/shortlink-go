@@ -173,7 +173,18 @@ func (s *Store) ListAuditLogs(ctx context.Context, opts audit.ListOptions) ([]au
 		query = listAuditLogsAfterByActionSQL
 		args = []any{opts.TenantID, string(opts.Action), opts.Cursor.ID, opts.Limit}
 	}
-	return queryAuditLogs(ctx, s.db, opts.Limit, query, args...)
+	var events []audit.Event
+	if err := s.withTenantReadTx(ctx, opts.TenantID, func(tx *sql.Tx) error {
+		got, err := queryAuditLogs(ctx, tx, opts.Limit, query, args...)
+		if err != nil {
+			return err
+		}
+		events = got
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func queryAuditLogs(ctx context.Context, q queryContexter, capHint int, query string, args ...any) ([]audit.Event, error) {

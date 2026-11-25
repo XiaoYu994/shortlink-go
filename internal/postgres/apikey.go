@@ -189,72 +189,99 @@ func (s *Store) IssueAPIKey(ctx context.Context, p IssueAPIKeyParams) (IssuedAPI
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
 
+	issueInTx := func(tx *sql.Tx) (IssuedAPIKey, error) {
+		tn, err := tenantForIssue(ctx, tx, p)
+		if err != nil {
+			return IssuedAPIKey{}, err
+		}
+		if p.TenantID == 0 {
+			// 新建租户拿到 tn.ID 后立刻降权绑定 RLS 上下文，后续写审计日志与密钥均受策略保护。
+			if err := applyTenantRLSContext(ctx, tx, tn.ID); err != nil {
+				return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+			}
+			orgMeta := map[string]any{"name": p.Name}
+			if p.ExternalID != "" {
+				orgMeta["external_id"] = p.ExternalID
+			}
+			if err := insertAuditLogTx(ctx, tx, tn.ID, explicitUserID, audit.ActionOrgCreate, audit.TargetOrg, strconv.FormatInt(tn.ID, 10), orgMeta); err != nil {
+				return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+			}
+		}
+
+		plaintext, hash, err := identity.APIKeyToken.Generate()
+		if err != nil {
+			return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+		}
+
+		var expires *time.Time
+		if p.ExpiresAt != nil {
+			t := p.ExpiresAt.UTC()
+			expires = &t
+		}
+		var createdBy sql.NullInt64
+		var keyCreatedBy *int64
+		if p.CreatedBy != nil {
+			createdBy = sql.NullInt64{Int64: *p.CreatedBy, Valid: true}
+			v := *p.CreatedBy
+			keyCreatedBy = &v
+		}
+		key := APIKey{TenantID: tn.ID, Name: keyName, Scopes: scopes, CreatedBy: keyCreatedBy, ExpiresAt: expires}
+		var scannedExpires sql.NullTime
+		err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, keyName, expires, permsToStrings(scopes), createdBy).Scan(
+			&key.ID, &key.CreatedAt, &scannedExpires,
+		)
+		if err != nil {
+			return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+		}
+		key.CreatedAt = key.CreatedAt.UTC()
+		if scannedExpires.Valid {
+			key.ExpiresAt = nullTimeUTC(scannedExpires)
+		}
+
+		// 只记录非敏感元数据（可选名称、scopes 与可选过期时间），绝不写入明文或哈希。
+		keyMeta := map[string]any{"scopes": permsToStrings(scopes)}
+		if keyName != "" {
+			keyMeta["name"] = keyName
+		}
+		if key.ExpiresAt != nil {
+			keyMeta["expires_at"] = key.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		if err := insertAuditLogTx(ctx, tx, tn.ID, explicitUserID, audit.ActionAPIKeyIssue, audit.TargetAPIKey, strconv.FormatInt(key.ID, 10), keyMeta); err != nil {
+			return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
+		}
+		return IssuedAPIKey{Tenant: tn, Key: key, Plaintext: plaintext}, nil
+	}
+
+	var issued IssuedAPIKey
+	if p.TenantID > 0 {
+		err = s.withTenantTx(ctx, p.TenantID, nil, func(tx *sql.Tx) error {
+			res, txErr := issueInTx(tx)
+			if txErr != nil {
+				return txErr
+			}
+			issued = res
+			return nil
+		})
+		if err != nil {
+			return IssuedAPIKey{}, err
+		}
+		return issued, nil
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	tn, err := tenantForIssue(ctx, tx, p)
+	issued, err = issueInTx(tx)
 	if err != nil {
 		return IssuedAPIKey{}, err
 	}
-	if p.TenantID == 0 {
-		orgMeta := map[string]any{"name": p.Name}
-		if p.ExternalID != "" {
-			orgMeta["external_id"] = p.ExternalID
-		}
-		if err := insertAuditLogTx(ctx, tx, tn.ID, explicitUserID, audit.ActionOrgCreate, audit.TargetOrg, strconv.FormatInt(tn.ID, 10), orgMeta); err != nil {
-			return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
-		}
-	}
-
-	plaintext, hash, err := identity.APIKeyToken.Generate()
-	if err != nil {
-		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
-	}
-
-	var expires *time.Time
-	if p.ExpiresAt != nil {
-		t := p.ExpiresAt.UTC()
-		expires = &t
-	}
-	var createdBy sql.NullInt64
-	var keyCreatedBy *int64
-	if p.CreatedBy != nil {
-		createdBy = sql.NullInt64{Int64: *p.CreatedBy, Valid: true}
-		v := *p.CreatedBy
-		keyCreatedBy = &v
-	}
-	key := APIKey{TenantID: tn.ID, Name: keyName, Scopes: scopes, CreatedBy: keyCreatedBy, ExpiresAt: expires}
-	var scannedExpires sql.NullTime
-	err = tx.QueryRowContext(ctx, insertAPIKeySQL, tn.ID, hash, keyName, expires, permsToStrings(scopes), createdBy).Scan(
-		&key.ID, &key.CreatedAt, &scannedExpires,
-	)
-	if err != nil {
-		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
-	}
-	key.CreatedAt = key.CreatedAt.UTC()
-	if scannedExpires.Valid {
-		key.ExpiresAt = nullTimeUTC(scannedExpires)
-	}
-
-	// 只记录非敏感元数据（可选名称、scopes 与可选过期时间），绝不写入明文或哈希。
-	keyMeta := map[string]any{"scopes": permsToStrings(scopes)}
-	if keyName != "" {
-		keyMeta["name"] = keyName
-	}
-	if key.ExpiresAt != nil {
-		keyMeta["expires_at"] = key.ExpiresAt.UTC().Format(time.RFC3339Nano)
-	}
-	if err := insertAuditLogTx(ctx, tx, tn.ID, explicitUserID, audit.ActionAPIKeyIssue, audit.TargetAPIKey, strconv.FormatInt(key.ID, 10), keyMeta); err != nil {
-		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
 		return IssuedAPIKey{}, fmt.Errorf("issue api key: %w", err)
 	}
-	return IssuedAPIKey{Tenant: tn, Key: key, Plaintext: plaintext}, nil
+	return issued, nil
 }
 
 func permsToStrings(perms []identity.Perm) []string {
@@ -349,30 +376,36 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID int64) ([]APIKey, erro
 		return nil, err
 	}
 
-	var exists bool
-	if err := s.db.QueryRowContext(ctx, tenantExistsSQL, tenantID).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("list api keys: %w", err)
-	}
-	if !exists {
-		return nil, ErrTenantNotFound
-	}
-
-	rows, err := s.db.QueryContext(ctx, listAPIKeysSQL, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("list api keys: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
 	var keys []APIKey
-	for rows.Next() {
-		key, err := scanAPIKey(rows)
-		if err != nil {
-			return nil, fmt.Errorf("list api keys: %w", err)
+	err := s.withTenantReadTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, tenantExistsSQL, tenantID).Scan(&exists); err != nil {
+			return fmt.Errorf("list api keys: %w", err)
 		}
-		keys = append(keys, key)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list api keys: %w", err)
+		if !exists {
+			return ErrTenantNotFound
+		}
+
+		rows, err := tx.QueryContext(ctx, listAPIKeysSQL, tenantID)
+		if err != nil {
+			return fmt.Errorf("list api keys: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			key, err := scanAPIKey(rows)
+			if err != nil {
+				return fmt.Errorf("list api keys: %w", err)
+			}
+			keys = append(keys, key)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list api keys: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return keys, nil
 }
@@ -454,20 +487,22 @@ func (s *Store) RevokeAPIKeyForTenant(ctx context.Context, tenantID, keyID int64
 	if err != nil {
 		return fmt.Errorf("revoke api key: %w", err)
 	}
-	var alreadyRevoked bool
-	err = s.db.QueryRowContext(ctx, revokeAPIKeyForTenantSQL,
-		keyID, tenantID, actorKind, actorID, reqID,
-		string(audit.ActionAPIKeyRevoke), string(audit.TargetAPIKey)).Scan(&alreadyRevoked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrAPIKeyNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("revoke api key: %w", err)
-	}
-	if alreadyRevoked {
-		return ErrAPIKeyRevoked
-	}
-	return nil
+	return s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		var alreadyRevoked bool
+		err := tx.QueryRowContext(ctx, revokeAPIKeyForTenantSQL,
+			keyID, tenantID, actorKind, actorID, reqID,
+			string(audit.ActionAPIKeyRevoke), string(audit.TargetAPIKey)).Scan(&alreadyRevoked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAPIKeyNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("revoke api key: %w", err)
+		}
+		if alreadyRevoked {
+			return ErrAPIKeyRevoked
+		}
+		return nil
+	})
 }
 
 // ListOrgAPIKeys 给 HTTP 管理接口使用，返回 identity.APIKeyInfo 列表以保持 console 不依赖 postgres。
