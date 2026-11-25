@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -11,7 +10,6 @@ import (
 
 	"shortlink/internal/audit"
 	"shortlink/internal/identity"
-	"shortlink/internal/job"
 	"shortlink/internal/mailer"
 )
 
@@ -49,11 +47,6 @@ FOR UPDATE`
 	revokeInvitationSQL = `UPDATE invitations
 SET revoked_at = now()
 WHERE id = $1 AND tenant_id = $2`
-
-	enqueueInvitationEmailSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts)
-VALUES ($1, $2, $3::jsonb, $4, $5)
-ON CONFLICT (kind, dedup_key) WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running')
-DO NOTHING`
 
 	getInvitationEmailTargetSQL = `SELECT i.id, i.tenant_id, COALESCE(t.name, ''), i.email, i.role,
        COALESCE(u.name, ''), COALESCE(u.email, ''),
@@ -165,20 +158,8 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 		if err := insertAuditLogTx(ctx, tx, inv.TenantID, explicitUserID, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
 			return fmt.Errorf("create invitation: %w", err)
 		}
-		emailPayload, err := json.Marshal(struct {
-			InvitationID int64 `json:"invitation_id"`
-		}{InvitationID: inv.ID})
-		if err != nil {
-			return fmt.Errorf("create invitation: marshal email payload: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, enqueueInvitationEmailSQL,
-			job.KindInvitationEmail,
-			inv.TenantID,
-			emailPayload,
-			"invitation:"+strconv.FormatInt(inv.ID, 10),
-			job.DefaultMaxAttempts,
-		); err != nil {
-			return fmt.Errorf("create invitation: enqueue email: %w", err)
+		if err := s.dispatchTxHooks(ctx, tx, InvitationCreatedEvent{Invitation: inv}); err != nil {
+			return fmt.Errorf("create invitation: %w", err)
 		}
 		return nil
 	})

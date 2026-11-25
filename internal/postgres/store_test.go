@@ -21,11 +21,30 @@ func testAuditCtx(ctx context.Context) context.Context {
 	return audit.WithMeta(ctx, audit.SystemMeta("test"))
 }
 
+func allBuiltinTestTxHooks() []StoreOption {
+	return []StoreOption{
+		WithTxHooks(
+			RiskScanHook(),
+			WebhookFanoutHook(),
+			InvitationEmailHook(),
+			CacheReconcileHook(),
+			StatsPurgeHook(),
+		),
+	}
+}
+
 /*
 newTestStore 每次测试前清空测试库里的租户、密钥和链接，再插入一个租户。
+默认挂载全部内建事务钩子，确保全功能回归测试覆盖完整副作用；
+验证“关闭某插件不产生副作用”的测试走 newTestStoreWithOptions。
 没有设置 TEST_DATABASE_URL 时跳过；库名不以 _test 结尾时失败，避免误清开发库。
 */
 func newTestStore(t testing.TB) (*Store, int64) {
+	t.Helper()
+	return newTestStoreWithOptions(t, allBuiltinTestTxHooks()...)
+}
+
+func newTestStoreWithOptions(t testing.TB, opts ...StoreOption) (*Store, int64) {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -73,7 +92,7 @@ func newTestStore(t testing.TB) (*Store, int64) {
 	if err := db.QueryRowContext(ctx, `INSERT INTO tenants (name) VALUES ('test') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("insert tenant: %v", err)
 	}
-	return NewStore(db), tenantID
+	return NewStore(db, opts...), tenantID
 }
 
 func mustLink(t testing.TB, rawURL string, tenantID int64) *link.Link {

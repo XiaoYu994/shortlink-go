@@ -59,7 +59,7 @@ type BaseConfig struct {
 	Addr            string // 主 HTTP 监听地址（worker 为可选运维端口）
 	OpsAddr         string // 可选独立运维端口（/healthz、/readyz、/metrics），为空时不单独开启
 	DatabaseURL     string // PostgreSQL 连接串
-	RedisURL        string // Redis 连接串，支持密码、TLS（rediss://）和 DB 编号
+	RedisURL        string // 可选 Redis 连接串，支持密码、TLS（rediss://）和 DB 编号；为空时跳过缓存层直连数据库（ADR 0029）
 	Pool            pgdb.PoolConfig
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
@@ -98,10 +98,7 @@ func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
 	if cfg.DatabaseURL == "" {
 		return BaseConfig{}, errors.New("DATABASE_URL is required")
 	}
-	cfg.RedisURL = os.Getenv("REDIS_URL")
-	if cfg.RedisURL == "" {
-		return BaseConfig{}, errors.New("REDIS_URL is required")
-	}
+	cfg.RedisURL = strings.TrimSpace(os.Getenv("REDIS_URL"))
 	if level := os.Getenv("LOG_LEVEL"); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
 			return BaseConfig{}, fmt.Errorf("LOG_LEVEL: %w", err)

@@ -90,7 +90,11 @@ func TestLoadBaseConfig(t *testing.T) {
 			},
 		},
 		{name: "missing database url", env: map[string]string{"DATABASE_URL": ""}, wantErr: "DATABASE_URL is required"},
-		{name: "missing redis url", env: map[string]string{"REDIS_URL": ""}, wantErr: "REDIS_URL is required"},
+		{
+			name: "empty redis url disables cache",
+			env:  map[string]string{"REDIS_URL": ""},
+			want: func() BaseConfig { c := defaults; c.RedisURL = ""; return c }(),
+		},
 		{name: "invalid log format", env: map[string]string{"LOG_FORMAT": "yaml"}, wantErr: "LOG_FORMAT"},
 		{name: "invalid log level", env: map[string]string{"LOG_LEVEL": "verbose"}, wantErr: "LOG_LEVEL"},
 		{name: "invalid open conns", env: map[string]string{"DB_MAX_OPEN_CONNS": "abc"}, wantErr: "DB_MAX_OPEN_CONNS"},

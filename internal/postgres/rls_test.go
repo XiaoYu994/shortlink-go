@@ -484,7 +484,7 @@ ANALYZE webhook_deliveries;
 
 	targetTenant := tenantID + 6
 	err := store.withTenantReadTx(ctx, targetTenant, func(tx *sql.Tx) error {
-		linksQuery, linksArgs, err := buildListLinksQuery(link.SortID, nil, targetTenant, 20, "", "")
+		linksQuery, linksArgs, err := buildListLinksQuery(link.SortID, nil, targetTenant, 20, "", "", true)
 		if err != nil {
 			return err
 		}

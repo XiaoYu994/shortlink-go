@@ -16,11 +16,9 @@ import (
 
 	"shortlink/internal/audit"
 	"shortlink/internal/idgen"
-	"shortlink/internal/job"
 	"shortlink/internal/link"
 	"shortlink/internal/pgdb"
 	"shortlink/internal/pgredirect"
-	"shortlink/internal/webhook"
 )
 
 const (
@@ -74,20 +72,6 @@ var (
 	errCreateQuotaRaced    = errors.New("quota check raced")
 )
 
-type linkRiskScanPayload struct {
-	LinkID int64  `json:"link_id"`
-	Code   string `json:"code"`
-	URL    string `json:"url"`
-}
-
-type linkCreatedWebhookData struct {
-	LinkID    int64      `json:"link_id"`
-	Code      string     `json:"code"`
-	URL       string     `json:"url"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-}
-
 // PoolConfig 是数据库连接池参数，别名自 pgdb 保持向后兼容。
 type PoolConfig = pgdb.PoolConfig
 
@@ -113,21 +97,30 @@ type Store struct {
 	*pgredirect.Store
 	db *sql.DB
 	// generate 可以替换，测试里用来强制制造短码冲突。
-	generate func() (string, error)
+	generate         func() (string, error)
+	txHooks          []TxHook
+	analyticsEnabled bool
 }
 
-// NewStore 包装已打开的连接池。
-func NewStore(db *sql.DB) *Store {
-	return &Store{
-		Store:    pgredirect.NewStore(db),
-		db:       db,
-		generate: idgen.GenerateCode,
+// NewStore 包装已打开的连接池并按需挂载可选扩展钩子（ADR 0029）。
+func NewStore(db *sql.DB, opts ...StoreOption) *Store {
+	s := &Store{
+		Store:            pgredirect.NewStore(db),
+		db:               db,
+		generate:         idgen.GenerateCode,
+		analyticsEnabled: true,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 /*
-Create 生成随机短码，在同一个租户事务内依次完成占本月配额、插入链接、入队异步风控、
-扇出 Webhook 与写审计日志，成功后回填 ID、Code 和 UTC CreatedAt。
+Create 生成随机短码，在同一个租户事务内完成占本月配额、插入链接、写审计日志与执行已注册的事务内钩子，
+成功后回填 ID、Code 和 UTC CreatedAt。
 租户不存在返回 ErrTenantNotFound；本月配额不足返回 link.ErrQuotaExceeded，不写链接也不增加用量。
 删除链接不返还配额。短码冲突或跨月竞态时整事务回滚后重试，最多重试 maxCodeAttempts 次。
 */
@@ -161,26 +154,10 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 			if err != nil {
 				return err
 			}
-			if err := insertJobTx(ctx, tx, job.KindLinkRiskScan, l.TenantID, linkRiskScanPayload{
-				LinkID: id,
-				Code:   code,
-				URL:    l.URL,
-			}); err != nil {
-				return fmt.Errorf("insert link: %w", err)
-			}
 			var expiresAtUTC *time.Time
 			if l.ExpiresAt != nil {
 				t := l.ExpiresAt.UTC()
 				expiresAtUTC = &t
-			}
-			if err := enqueueWebhookEventTx(ctx, tx, l.TenantID, webhook.EventLinkCreated, at, linkCreatedWebhookData{
-				LinkID:    id,
-				Code:      code,
-				URL:       l.URL,
-				ExpiresAt: expiresAtUTC,
-				CreatedAt: at,
-			}); err != nil {
-				return fmt.Errorf("insert link: %w", err)
 			}
 			auditMeta := map[string]any{
 				"link_id": id,
@@ -190,6 +167,17 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 				auditMeta["expires_at"] = expiresAtUTC.Format(time.RFC3339Nano)
 			}
 			if err := insertAuditLogTx(ctx, tx, l.TenantID, 0, audit.ActionLinkCreate, audit.TargetLink, code, auditMeta); err != nil {
+				return fmt.Errorf("insert link: %w", err)
+			}
+			createdLink := link.Link{
+				ID:        id,
+				Code:      code,
+				URL:       l.URL,
+				ExpiresAt: expiresAtUTC,
+				CreatedAt: at,
+				TenantID:  l.TenantID,
+			}
+			if err := s.dispatchTxHooks(ctx, tx, LinkCreatedEvent{Link: createdLink}); err != nil {
 				return fmt.Errorf("insert link: %w", err)
 			}
 			createdID = id

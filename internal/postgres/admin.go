@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"shortlink/internal/audit"
-	"shortlink/internal/job"
 	"shortlink/internal/link"
-	"shortlink/internal/webhook"
 )
 
 /*
@@ -50,6 +48,10 @@ const (
 FROM links l` + todayJoin + `
 WHERE l.tenant_id = $1`
 
+	listLinksNoAnalyticsBaseSQL = `SELECT ` + zeroTodayLinkColumns + `
+FROM links l
+WHERE l.tenant_id = $1`
+
 	listClickedTodayBaseSQL = `SELECT ` + adminLinkColumns + `
 FROM link_clicks_daily d
 JOIN links l ON l.id = d.link_id
@@ -71,6 +73,10 @@ WHERE l.tenant_id = $1`
 
 	getForTenantSQL = `SELECT ` + adminLinkColumns + `
 FROM links l` + todayJoin + `
+WHERE l.code = $1 AND l.tenant_id = $2`
+
+	getForTenantNoAnalyticsSQL = `SELECT ` + zeroTodayLinkColumns + `
+FROM links l
 WHERE l.code = $1 AND l.tenant_id = $2`
 
 	/*
@@ -151,6 +157,9 @@ WHERE (link_id, day, visitor_hash) IN (
 )`
 )
 
+// ErrAnalyticsDisabled 表示当前 Store 关闭了点击统计（WithAnalytics(false)），拒绝依赖统计表的排序查询。
+var ErrAnalyticsDisabled = errors.New("analytics is disabled")
+
 // rowScanner 让 QueryRow 和 Rows 共用一段扫描逻辑。
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -164,9 +173,13 @@ func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (
 	if tenantID <= 0 {
 		return nil, link.ErrNotFound
 	}
+	query := getForTenantSQL
+	if !s.analyticsEnabled {
+		query = getForTenantNoAnalyticsSQL
+	}
 	var got *link.AdminLink
 	err := s.withTenantReadTx(ctx, tenantID, func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, getForTenantSQL, code, tenantID)
+		row := tx.QueryRowContext(ctx, query, code, tenantID)
 		scanned, scanErr := scanAdminLink(row)
 		if errors.Is(scanErr, sql.ErrNoRows) {
 			return link.ErrNotFound
@@ -208,14 +221,19 @@ func appendLinkFilters(b *strings.Builder, args *[]any, status link.Status, quer
 	return nil
 }
 
-func buildListLinksQuery(sort link.Sort, cursor *link.ListCursor, tenantID int64, limit int, status link.Status, query string) (string, []any, error) {
+func buildListLinksQuery(sort link.Sort, cursor *link.ListCursor, tenantID int64, limit int, status link.Status, query string, includeAnalytics bool) (string, []any, error) {
 	var b strings.Builder
 	var args []any
 	var orderBy string
 
+	baseSQL := listLinksBaseSQL
+	if !includeAnalytics {
+		baseSQL = listLinksNoAnalyticsBaseSQL
+	}
+
 	switch sort {
 	case link.SortID:
-		b.WriteString(listLinksBaseSQL)
+		b.WriteString(baseSQL)
 		args = []any{tenantID}
 		if cursor != nil {
 			args = append(args, cursor.ID)
@@ -223,7 +241,7 @@ func buildListLinksQuery(sort link.Sort, cursor *link.ListCursor, tenantID int64
 		}
 		orderBy = "\nORDER BY l.id DESC\nLIMIT $%d"
 	case link.SortClicks:
-		b.WriteString(listLinksBaseSQL)
+		b.WriteString(baseSQL)
 		args = []any{tenantID}
 		if cursor != nil {
 			args = append(args, cursor.Clicks, cursor.ID)
@@ -292,11 +310,14 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 		return []link.AdminLink{}, nil
 	}
 
+	if !s.analyticsEnabled && (opts.Sort == link.SortClicks || opts.Sort == link.SortClicksToday) {
+		return nil, fmt.Errorf("list links: %w", ErrAnalyticsDisabled)
+	}
 	if opts.Sort == link.SortClicksToday {
 		return s.listByClicksToday(ctx, opts)
 	}
 
-	query, args, err := buildListLinksQuery(opts.Sort, opts.Cursor, opts.TenantID, opts.Limit, opts.Status, opts.Query)
+	query, args, err := buildListLinksQuery(opts.Sort, opts.Cursor, opts.TenantID, opts.Limit, opts.Status, opts.Query, s.analyticsEnabled)
 	if err != nil {
 		return nil, err
 	}
@@ -398,51 +419,6 @@ func scanAdminLinks(rows *sql.Rows, capHint int) ([]link.AdminLink, error) {
 	return result, nil
 }
 
-type cacheReconcilePayload struct {
-	Code string `json:"code"`
-}
-
-type linkPurgeStatsPayload struct {
-	LinkID int64 `json:"link_id"`
-}
-
-type linkUpdatedWebhookData struct {
-	LinkID        int64      `json:"link_id"`
-	Code          string     `json:"code"`
-	URL           string     `json:"url"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	DisabledAt    *time.Time `json:"disabled_at,omitempty"`
-	ChangedFields []string   `json:"changed_fields"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-}
-
-type linkDeletedWebhookData struct {
-	LinkID    int64     `json:"link_id"`
-	Code      string    `json:"code"`
-	URL       string    `json:"url"`
-	DeletedAt time.Time `json:"deleted_at"`
-}
-
-type linkBannedWebhookData struct {
-	LinkID    int64          `json:"link_id"`
-	Code      string         `json:"code"`
-	URL       string         `json:"url"`
-	BannedAt  time.Time      `json:"banned_at"`
-	BanReason link.BanReason `json:"ban_reason"`
-	BanSource link.BanSource `json:"ban_source"`
-}
-
-type linkUnbannedWebhookData struct {
-	LinkID         int64          `json:"link_id"`
-	Code           string         `json:"code"`
-	URL            string         `json:"url"`
-	ExpiresAt      *time.Time     `json:"expires_at,omitempty"`
-	DisabledAt     *time.Time     `json:"disabled_at,omitempty"`
-	PreviousReason link.BanReason `json:"previous_reason,omitempty"`
-	PreviousSource link.BanSource `json:"previous_source,omitempty"`
-	UnbannedAt     time.Time      `json:"unbanned_at"`
-}
-
 /*
 Update 修改 URL、expires_at 和/或停用状态，返回修改后的链接。
 链接不存在、已删除或属于其他租户都返回 link.ErrNotFound；已封禁返回 link.ErrBanned，
@@ -521,35 +497,20 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 		}
 		updatedAt = updatedAt.UTC()
 
-		if err := tx.QueryRowContext(ctx, selectTodayLinkClicksSQL, id).Scan(&got.ClicksToday); err != nil {
-			return fmt.Errorf("update link: read today clicks: %w", err)
-		}
-		if hasURL {
-			if err := insertJobTx(ctx, tx, job.KindLinkRiskScan, tenantID, linkRiskScanPayload{
-				LinkID: base.ID,
-				Code:   base.Code,
-				URL:    base.URL,
-			}); err != nil {
-				return fmt.Errorf("update link: %w", err)
+		if s.analyticsEnabled {
+			if err := tx.QueryRowContext(ctx, selectTodayLinkClicksSQL, id).Scan(&got.ClicksToday); err != nil {
+				return fmt.Errorf("update link: read today clicks: %w", err)
 			}
 		}
-		if err := insertJobTx(ctx, tx, job.KindCacheReconcile, tenantID, cacheReconcilePayload{
-			Code: base.Code,
-		}); err != nil {
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkUpdate, audit.TargetLink, base.Code, auditMeta); err != nil {
 			return fmt.Errorf("update link: %w", err)
 		}
-		if err := enqueueWebhookEventTx(ctx, tx, tenantID, webhook.EventLinkUpdated, updatedAt, linkUpdatedWebhookData{
-			LinkID:        base.ID,
-			Code:          base.Code,
-			URL:           base.URL,
-			ExpiresAt:     base.ExpiresAt,
-			DisabledAt:    base.DisabledAt,
+		if err := s.dispatchTxHooks(ctx, tx, LinkUpdatedEvent{
+			Link:          *base,
+			URLChanged:    hasURL,
 			ChangedFields: metaFields,
 			UpdatedAt:     updatedAt,
 		}); err != nil {
-			return fmt.Errorf("update link: %w", err)
-		}
-		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkUpdate, audit.TargetLink, base.Code, auditMeta); err != nil {
 			return fmt.Errorf("update link: %w", err)
 		}
 		got.Link = *base
@@ -562,8 +523,9 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 }
 
 /*
-Delete 在事务内先锁并删除 links 主行、写审计日志，并同事务入队 cache.reconcile 与 link.purge_stats。
-三张日统计表的残留行由 worker 分批异步回收，避免热点短链删表拉长数据库行锁（ADR 0025）。
+Delete 在事务内先锁并删除 links 主行、写必选审计日志，再经 TxHook 分发 LinkDeletedEvent
+（按已启用特性同事务入队 cache.reconcile、link.purge_stats 或扇出 Webhook，ADR 0025、ADR 0029）。
+三张日统计表的残留行由 worker 分批异步回收，避免热点短链删表拉长数据库行锁。
 已封禁的链接返回 link.ErrBanned，不删任何东西：链接这一行就是封禁记录，
 删掉之后违规 URL、原因和归属租户都没有依据。其他租户的链接仍是 link.ErrNotFound。
 */
@@ -599,27 +561,18 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 		}
 		deletedAt = deletedAt.UTC()
 
-		if err := insertJobTx(ctx, tx, job.KindCacheReconcile, tenantID, cacheReconcilePayload{
-			Code: code,
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
+			"link_id": id,
+			"url":     urlStr,
 		}); err != nil {
 			return fmt.Errorf("delete link: %w", err)
 		}
-		if err := insertJobTx(ctx, tx, job.KindLinkPurgeStats, tenantID, linkPurgeStatsPayload{
-			LinkID: id,
-		}); err != nil {
-			return fmt.Errorf("delete link: %w", err)
-		}
-		if err := enqueueWebhookEventTx(ctx, tx, tenantID, webhook.EventLinkDeleted, deletedAt, linkDeletedWebhookData{
+		if err := s.dispatchTxHooks(ctx, tx, LinkDeletedEvent{
+			TenantID:  tenantID,
 			LinkID:    id,
 			Code:      code,
 			URL:       urlStr,
 			DeletedAt: deletedAt,
-		}); err != nil {
-			return fmt.Errorf("delete link: %w", err)
-		}
-		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
-			"link_id": id,
-			"url":     urlStr,
 		}); err != nil {
 			return fmt.Errorf("delete link: %w", err)
 		}
@@ -711,11 +664,6 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 		}
 	}
 
-	if err := insertJobTx(ctx, tx, job.KindCacheReconcile, got.TenantID, cacheReconcilePayload{
-		Code: got.Code,
-	}); err != nil {
-		return nil, fmt.Errorf("ban link: %w", err)
-	}
 	if newlyBanned {
 		if err := insertAuditLogTx(ctx, tx, got.TenantID, 0, audit.ActionLinkBan, audit.TargetLink, got.Code, map[string]any{
 			"link_id": got.ID,
@@ -725,16 +673,12 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 		}); err != nil {
 			return nil, fmt.Errorf("ban link: %w", err)
 		}
-		if err := enqueueWebhookEventTx(ctx, tx, got.TenantID, webhook.EventLinkBanned, got.Ban.At, linkBannedWebhookData{
-			LinkID:    got.ID,
-			Code:      got.Code,
-			URL:       got.URL,
-			BannedAt:  got.Ban.At,
-			BanReason: got.Ban.Reason,
-			BanSource: got.Ban.Source,
-		}); err != nil {
-			return nil, fmt.Errorf("ban link: %w", err)
-		}
+	}
+	if err := s.dispatchTxHooks(ctx, tx, LinkBannedEvent{
+		Link:        *got,
+		NewlyBanned: newlyBanned,
+	}); err != nil {
+		return nil, fmt.Errorf("ban link: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -785,11 +729,6 @@ func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
 		unbannedAt = unbannedAt.UTC()
 	}
 
-	if err := insertJobTx(ctx, tx, job.KindCacheReconcile, got.TenantID, cacheReconcilePayload{
-		Code: got.Code,
-	}); err != nil {
-		return nil, fmt.Errorf("unban link: %w", err)
-	}
 	if wasBanned {
 		auditMeta := map[string]any{
 			"link_id": got.ID,
@@ -804,18 +743,15 @@ func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
 		if err := insertAuditLogTx(ctx, tx, got.TenantID, 0, audit.ActionLinkUnban, audit.TargetLink, got.Code, auditMeta); err != nil {
 			return nil, fmt.Errorf("unban link: %w", err)
 		}
-		if err := enqueueWebhookEventTx(ctx, tx, got.TenantID, webhook.EventLinkUnbanned, unbannedAt, linkUnbannedWebhookData{
-			LinkID:         got.ID,
-			Code:           got.Code,
-			URL:            got.URL,
-			ExpiresAt:      got.ExpiresAt,
-			DisabledAt:     got.DisabledAt,
-			PreviousReason: prevReason,
-			PreviousSource: prevSource,
-			UnbannedAt:     unbannedAt,
-		}); err != nil {
-			return nil, fmt.Errorf("unban link: %w", err)
-		}
+	}
+	if err := s.dispatchTxHooks(ctx, tx, LinkUnbannedEvent{
+		Link:           *got,
+		WasBanned:      wasBanned,
+		PreviousReason: prevReason,
+		PreviousSource: prevSource,
+		UnbannedAt:     unbannedAt,
+	}); err != nil {
+		return nil, fmt.Errorf("unban link: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

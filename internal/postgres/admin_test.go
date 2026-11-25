@@ -637,7 +637,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sqlText, args, err := buildListLinksQuery(link.SortID, nil, targetTenant, 21, tc.status, tc.query)
+			sqlText, args, err := buildListLinksQuery(link.SortID, nil, targetTenant, 21, tc.status, tc.query, true)
 			if err != nil {
 				t.Fatalf("buildListLinksQuery: %v", err)
 			}
