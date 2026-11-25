@@ -64,7 +64,7 @@ web/src/
 │   ├── org-context.ts      # 当前组织上下文（类似 Go request context 中的 Principal）
 │   └── ConsoleLayout.tsx   # 侧边栏、组织切换下拉、月度配额条、移动端抽屉
 └── features/               # 按业务领域分包（对齐 Go internal/{identity,link,console}）
-    ├── auth/               # 登录页、/me 与 /auth/providers、角色权限辅助
+    ├── auth/               # 登录页、/me 与 /capabilities、角色权限辅助
     ├── orgs/               # 首次无组织引导页、新建组织弹窗
     ├── links/              # 短链列表（游标分页/状态筛选/服务端关键词搜索/直达查询）、创建成功态+二维码、统计页
     ├── members/            # 成员列表/改角色/移出、邀请列表/登录入口复制/撤销

@@ -11,7 +11,7 @@ REDIS_URL=redis://localhost:6379/0
 VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`，多跳代理场景需同时配置 `TRUSTED_PROXY_CIDRS` 右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
+`REDIS_URL` 可选，支持密码、TLS（`rediss://`）和 DB 编号；配置时启动会 Ping Redis，留空时跳过缓存层直连 PostgreSQL（适合极简单 PG 部署，见 [ADR 0029](adr/0029-modular-feature-plugins.md)）。`VISITOR_SALT` 是访客哈希的密钥，`FEATURE_ANALYTICS=true`（默认）时 redirector 启动必填，设 `FEATURE_ANALYTICS=false` 关闭点击统计时可留空；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`，多跳代理场景需同时配置 `TRUSTED_PROXY_CIDRS` 右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
 
 `.env` 已被 gitignore，不会提交。
 
@@ -86,7 +86,7 @@ make run-redirector   # 公开跳转，ADDR，默认 :8080
 make run-console      # 管理 API，CONSOLE_ADDR，默认 :8081
 ```
 
-看到 `connected to postgres`、`connected to redis` 和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。redirector 没有 `VISITOR_SALT` 会直接退出，这是为了避免 UV 被静默记成 0。密钥、租户和成员命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 需要 Redis。
+看到 `connected to postgres`、`connected to redis`（配置了 `REDIS_URL` 时；未配置则打印 `redis cache disabled`）和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。当 `FEATURE_ANALYTICS=true` 时 redirector 没有 `VISITOR_SALT` 会直接退出，避免 UV 被静默记成 0；若只需最简短链服务，可仅配 `DATABASE_URL` 并设 `REDIS_URL="" FEATURE_ANALYTICS=false FEATURE_RISK_SCAN=false` 启动无 Redis/无统计/无风控的极简模式（注意跨进程与运维 CLI 保持开关一致）。密钥、租户和成员命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 在未配置 `REDIS_URL` 时也只写 PostgreSQL。
 
 检查：
 
@@ -730,7 +730,7 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
    OIDC_ISSUER=http://127.0.0.1:5556/dex
    OIDC_CLIENT_ID=shortlink-console
    OIDC_CLIENT_SECRET=shortlink-console-secret
-   OIDC_REDIRECT_URL=http://127.0.0.1:8081/api/v1/auth/callback
+   OIDC_REDIRECT_URL=http://127.0.0.1:8081/api/v1/auth/oidc/callback
    ```
 
 3. 预先把至少一个租户和静态账号的邀请写入库（`--tenant` 填 `key issue` 输出的 `tenant_id`，空库首次签发为 `1`），然后启动 `make run-console`（另一终端可同时启动 `make run-redirector`）：
@@ -742,11 +742,11 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
    ```
 
 4. 完成 OIDC 登录（测试账号 `alice@example.com` / `bob@example.com`，密码均为 `password`）：
-   - 浏览器打开 `http://127.0.0.1:8081/api/v1/auth/login` 登录后，回调返回 `200`；`sl_session` 是 `HttpOnly` Cookie，可在浏览器 DevTools 的 Cookie 面板复制其值并在 `curl` 里传 `-H 'Cookie: sl_session=...'`。
+   - 浏览器打开 `http://127.0.0.1:8081/api/v1/auth/oidc/login` 登录后，回调返回 `200`；`sl_session` 是 `HttpOnly` Cookie，可在浏览器 DevTools 的 Cookie 面板复制其值并在 `curl` 里传 `-H 'Cookie: sl_session=...'`。
    - 或直接用 `curl` 走完 Dex 表单登录把会话存进 `cookies.txt`：
 
    ```bash
-   DEX_LOGIN_URL=$(curl -sS -L -c cookies.txt -b cookies.txt -o /dev/null -w '%{url_effective}' http://127.0.0.1:8081/api/v1/auth/login)
+   DEX_LOGIN_URL=$(curl -sS -L -c cookies.txt -b cookies.txt -o /dev/null -w '%{url_effective}' http://127.0.0.1:8081/api/v1/auth/oidc/login)
    curl -sS -L -c cookies.txt -b cookies.txt --data-urlencode 'login=alice@example.com' --data-urlencode 'password=password' "$DEX_LOGIN_URL"
    ```
 
@@ -822,7 +822,7 @@ PUBLIC_BASE_URL=http://127.0.0.1:8080 WEB_DIST_DIR=web/dist make run-console
 方式二：前端热更新开发
 
 ```bash
-# 1. 确保 deploy/dex.yaml 已包含 http://127.0.0.1:5173/api/v1/auth/callback，并把 .env 的 OIDC_REDIRECT_URL 指到 5173 端口
+# 1. 确保 deploy/dex.yaml 已包含 http://127.0.0.1:5173/api/v1/auth/oidc/callback，并把 .env 的 OIDC_REDIRECT_URL 指到 5173 端口
 # 2. 启动 redirector 与 console
 make run-redirector
 make run-console
@@ -841,10 +841,10 @@ make web-dev
 WORKER_ADDR=127.0.0.1:8082 make run-worker
 ```
 
-- 创建短链和修改 URL 时，PostgreSQL 在同一条多 CTE 语句内写入 `link.risk_scan` 任务；只改 `expires_at` 或 `disabled` 不入队。同时 `Update`、`Delete`、`Ban`、`BanIfURL` 与 `Unban` 会同事务入队无去重键的 `cache.reconcile` 电平对账任务（[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)），`Delete` 额外入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行。
-- `console worker` 通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`），抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据及 NAT64（`64:ff9b::/96`）/6to4（`2002::/16`）地址并支持出口端口白名单（`RISK_ALLOWED_PORTS`），命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
-- Redis 只存扫描结果短时缓存（fail-open，且不缓存 4xx 响应），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，由同事务入队的 `cache.reconcile` 自动退避对账自愈。
-- 同一个 worker 进程启动时调用 `EnsureMonthlyPartitions` 预建未来 2 个月分区，并在后台按 `WORKER_CLEANUP_INTERVAL`（默认 1 小时）分批清理过期 `sessions`、`done`/`dead` 任务（`dead` 默认 30 天）、过期/撤销/被取代 `invitations`（默认 30 天），同时运行 `partitions.maintain` 预建未来月表并整月 `DROP TABLE` 超过保留期的历史统计分区（`WORKER_STATS_RETENTION_DAYS=90`）与审计分区（`WORKER_AUDIT_RETENTION_DAYS=180`，永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
+- 写库路径通过 `postgres.TxHook`（[ADR 0029](adr/0029-modular-feature-plugins.md)）在核心租户事务内按已启用特性分发异步任务：`FEATURE_RISK_SCAN=true` 时创建短链与改 URL 入队 `link.risk_scan`；配置 `REDIS_URL` 时 `Update`/`Delete`/`Ban`/`BanIfURL`/`Unban` 入队 `cache.reconcile`（[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)）；`FEATURE_ANALYTICS=true` 时 `Delete` 入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行；配置 `WEBHOOK_SECRET_KEY` 时扇出 `webhook.deliver`；配置 `SMTP_HOST` 时邀请入队 `invitation.email`。
+- `console worker` 按 `WorkerModule` 装配各特性消费者与周期维护任务，通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`）；已关闭特性的历史残留任务由 `disabledSkipHandler` 自动按 `job.Skip` 归档，不污染 `dead` 队列。抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据及 NAT64（`64:ff9b::/96`）/6to4（`2002::/16`）地址并支持出口端口白名单（`RISK_ALLOWED_PORTS`），命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
+- Redis 可选：配置 `REDIS_URL` 时只存扫描结果短时缓存（fail-open，且不缓存 4xx 响应），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，由同事务入队的 `cache.reconcile` 自动退避对账自愈；未配置 `REDIS_URL` 时直接跳过缓存。
+- worker 启动时始终调用 `EnsureAuditPartitions` 预建 `audit_logs` 未来 2 个月分区，仅在 `FEATURE_ANALYTICS=true` 时调用 `EnsureStatsPartitions` 预建三张统计表未来分区；后台按 `WORKER_CLEANUP_INTERVAL`（默认 1 小时）分批清理过期 `sessions`、`done`/`dead` 任务（`dead` 默认 30 天）、过期/撤销/被取代 `invitations`（默认 30 天），运行 `audit_partitions.maintain`（`WORKER_AUDIT_RETENTION_DAYS=180`），并按开关运行 `stats_partitions.maintain`（`WORKER_STATS_RETENTION_DAYS=90`）与 `webhooks.cleanup_deliveries`（永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
 - 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站（编译期隔离在 `//go:build devtest`），不提供关闭 SSRF 检查的全局环境变量。
 
 ## 后台任务与异步风控基准测试（2026-11-23）
@@ -877,7 +877,7 @@ go test ./internal/postgres -run '^$' \
 
 ## 封禁和解封链接
 
-平台侧下架用运维命令，没有 HTTP 接口。命令需要 `DATABASE_URL` 和 `REDIS_URL`，先写数据库，再覆盖 Redis 缓存；`key`、`tenant` 命令不受影响，仍然只连 PostgreSQL。
+平台侧下架用运维命令，没有 HTTP 接口。命令需要 `DATABASE_URL`，`REDIS_URL` 可选（配置时先写数据库再覆盖 Redis 缓存，留空时直写数据库）；若线上启用了 Webhook，执行 CLI 时应同步注入 `WEBHOOK_SECRET_KEY` 以触发 `link.banned`/`link.unbanned` 事件扇出；`key`、`tenant`、`member` 命令只连 PostgreSQL。
 
 ```bash
 make console ARGS="link ban --code abc12345 --reason phishing"
@@ -1051,9 +1051,8 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | console 端口被占用 | 换 `CONSOLE_ADDR`，例如 `make run-console CONSOLE_ADDR=:18081`；改端口后重新 `make prometheus` |
 | 新短码立刻跳转 404 | 确认创建走 console、跳转走 redirector；console 创建后会写穿 Redis，绕过 console 直接写库不会清掉负缓存 |
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
-| `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；启动时 Ping 失败进程会退出 |
-| `REDIS_URL is required` | `.env` 里没有配置 Redis 连接 |
-| `VISITOR_SALT is required` | `.env` 里没有配置访客哈希的盐；从 `.env.example` 补一行开发占位值 |
+| `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；配置了 `REDIS_URL` 时启动 Ping 失败进程会退出，不需要缓存可留空 `REDIS_URL` |
+| `VISITOR_SALT is required` | `FEATURE_ANALYTICS=true` 时 redirector 需要访客哈希盐；从 `.env.example` 补一行开发占位值，或设 `FEATURE_ANALYTICS=false` 关闭点击统计 |
 | `OIDC 服务不可达` | 冒烟或启动开启 `OIDC_*` 的 console 前没起 Dex；使用项目自带 compose 时先跑 `make deps-up` |
 | `OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `OIDC_*`；要么四个全配（参考上面的 Dex 示例），要么全部留空 |
 | `GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `GITHUB_*`；要么三个全配，要么全部留空 |

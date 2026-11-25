@@ -11,9 +11,9 @@
 | console | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
 | console | `GET` | `/readyz` | 就绪检查，PostgreSQL 能 Ping 通才返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| console | `GET` | `/api/v1/auth/providers` | 查询当前已启用的登录方式与能力开关（`oidc`、`github`、`webhooks`、`public_base_url`），无需鉴权 |
-| console | `GET` | `/api/v1/auth/login` | 发起 OIDC 授权码登录（支持可选相对路径 `?return_to=/...`，仅配置完整 `OIDC_*` 时注册） |
-| console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（有 `return_to` 时 302 跳转，否则返回 200 JSON；仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/capabilities` | 查询当前已挂载的登录方式插件（`auth_methods`）、特性开关（`features`：`analytics`/`webhooks`/`risk_scan`/`email`）与公开跳转基地址（`public_base_url`），无需鉴权（[ADR 0029](adr/0029-modular-feature-plugins.md)） |
+| console | `GET` | `/api/v1/auth/oidc/login` | 发起 OIDC 授权码登录（支持可选相对路径 `?return_to=/...`，仅配置完整 `OIDC_*` 时注册） |
+| console | `GET` | `/api/v1/auth/oidc/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（有 `return_to` 时 302 跳转，否则返回 200 JSON；仅配置完整 `OIDC_*` 时注册） |
 | console | `GET` | `/api/v1/auth/github/login` | 发起 GitHub OAuth 2.0 登录（支持可选 `?return_to=/...`，仅配置完整 `GITHUB_*` 时注册） |
 | console | `GET` | `/api/v1/auth/github/callback` | GitHub 回调并建立服务端会话（仅配置完整 `GITHUB_*` 时注册） |
 | console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（配置 OIDC 或 GitHub 时注册） |
@@ -42,7 +42,7 @@
 | console | `GET` | `/api/v1/links/{code}` | 单条详情，包含已过期、已停用和已封禁的链接（需要 `links:read`） |
 | console | `PATCH` | `/api/v1/links/{code}` | 修改 `url`、`expires_at` 和/或 `disabled`（需要 `links:write`；同时有 `links:read` 才返回链接，否则 204） |
 | console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204（需要 `links:write`） |
-| console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客（需要 `stats:read`） |
+| console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客（需要 `stats:read`；`FEATURE_ANALYTICS=false` 时不注册返回 404） |
 
 本地开发时 redirector 默认监听 `:8080`，console 默认监听 `:8081`；生产可分别配置 `OPS_ADDR`、`CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 与业务端口彻底物理隔离（未设时共端口，由 `deploy/nginx.conf` / `deploy/nginx.stack.conf` 不转发运维路径）。管理面除按租户限流外，在 `authenticate` 之前还设有按客户端 IP 的鉴权前有界限流（超限返回 429）。
 
@@ -126,7 +126,7 @@ X-Request-ID: 6f1c0b5e9a2d47c8b3e1d4a607958f12
 }
 ```
 
-`expires_at`、`disabled_at`、`banned_at` 和 `ban_reason` 为空时省略。`clicks` 是终身累计，`clicks_today` 是 UTC 今天的点击数。
+`expires_at`、`disabled_at`、`banned_at` 和 `ban_reason` 为空时省略。启用统计（`FEATURE_ANALYTICS=true`）时 `clicks` 是终身累计、`clicks_today` 是 UTC 今天的点击数（包括 `0`）；关闭统计（`FEATURE_ANALYTICS=false`）时响应直接省略 `clicks` 与 `clicks_today` 字段，不输出假默认值 `0`（[ADR 0029](adr/0029-modular-feature-plugins.md)）。
 
 `status` 总是有，按优先级取第一个成立的值：
 
@@ -151,7 +151,7 @@ curl -s localhost:8081/api/v1/links?limit=20 \
 | 参数 | 说明 |
 | --- | --- |
 | `limit` | 每页条数，默认 20，最大 100；其他值返回 400 |
-| `sort` | `id`（默认）、`clicks`（历史累计）、`clicks_today`（今日） |
+| `sort` | `id`（默认）、`clicks`（历史累计）、`clicks_today`（今日）；当 `FEATURE_ANALYTICS=false` 时传入 `clicks` 或 `clicks_today` 返回 `400 Bad Request`（`analytics is disabled`） |
 | `status` | 可选状态过滤：`active`、`disabled`、`expired`、`banned`（按 `banned > disabled > expired > active` 互斥分类）；非法值返回 400 |
 | `q` | 可选关键词搜索：在当前租户内对短码 `code` 和目标 `url` 做大小写不敏感子串匹配（首尾空白忽略，最长 200 字节且不可含控制字符，超限返回 400） |
 | `cursor` | 上一页响应里的 `next_cursor`，原样传回；不透明 |
@@ -251,35 +251,52 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 - `unique_visitors` 是 `daily_visitors` 之和，按天去重后相加，不是跨天唯一人数。同一访客换 IP、换 User-Agent 或跨天都会算成多个。
 - 统计来自写入时的日聚合，只能看聚合结果，不能回查单次点击。来源、设备、客户端和访客从这一版上线后开始记录；迁移前的历史只有 `total_clicks`。
 
-## 登录方式查询与回调跳转
+## 能力发现与回调跳转
 
-`GET /api/v1/auth/providers` 始终注册、无需鉴权，返回 `{"oidc":true,"github":false,"webhooks":true,"public_base_url":"http://127.0.0.1:8080"}`（未配置 `PUBLIC_BASE_URL` 时省略 `public_base_url`），供前端控制台按服务端配置渲染登录按钮、Webhook 菜单及公开短链跳转地址。
+`GET /api/v1/capabilities` 始终注册、无需鉴权，响应带 `Cache-Control: no-store`，内容由服务端实际挂载的 `AuthMethod` 与 `Module` 自动推导（[ADR 0029](adr/0029-modular-feature-plugins.md)）：
 
-`/api/v1/auth/login` 与 `/api/v1/auth/github/login` 支持可选查询参数 `?return_to=/...`：
+```json
+{
+  "auth_methods": [
+    {"id": "oidc", "kind": "redirect", "login_url": "/api/v1/auth/oidc/login"}
+  ],
+  "features": {
+    "analytics": true,
+    "webhooks": true,
+    "risk_scan": true,
+    "email": false
+  },
+  "public_base_url": "http://127.0.0.1:8080"
+}
+```
+
+未配置 `PUBLIC_BASE_URL` 时省略 `public_base_url`；未配置登录插件时 `auth_methods` 为 `[]`。前端控制台据该端点动态渲染登录按钮、侧边栏菜单与统计控件。
+
+所有跳转型登录插件（`/api/v1/auth/{id}/login`，例如 `/api/v1/auth/oidc/login` 与 `/api/v1/auth/github/login`）支持可选查询参数 `?return_to=/...`：
 
 - 仅接受以单个 `/` 开头的相对路径，拒绝 `//`、`\`、控制字符、超过 256 字节以及 `/api`、`/api/*`、`/r`、`/r/*`，不合法返回 `400`。
 - 合法值随 `state`/`nonce` 一起写入 HMAC 签名的流程 Cookie。回调建完会话并写入 `sl_session` 后，若 `return_to` 非空则返回 `302 Found` 跳回该相对路径；省略时维持原样返回 `200 OK` JSON，兼容现有脚本和 `curl` 流程。
 
 ## OIDC 登录
 
-只有在 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_REDIRECT_URL` 四个环境变量全部配置时，console 才注册登录和回调路由；全部为空时这两个路径返回 404，不影响纯 API Key 部署；只配一部分时启动失败。两个端点都不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store`，并且只接受 `GET`（`HEAD` 返回 405，避免探针消费授权码）。
+只有在 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_REDIRECT_URL` 四个环境变量全部配置时，console 才注册 OIDC 登录和回调路由；全部为空时这两个路径返回 404，不影响纯 API Key 部署；只配一部分时启动失败。两个端点都不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store`，并且只接受 `GET`（`HEAD` 返回 405，避免探针消费授权码）。
 
 发起登录：
 
 ```bash
-curl -i -c cookies.txt localhost:8081/api/v1/auth/login
+curl -i -c cookies.txt localhost:8081/api/v1/auth/oidc/login
 ```
 
 返回 `302 Found`，`Location` 指向身份提供方的授权端点（带 `response_type=code`、`scope=openid email profile`、随机 `state`、PKCE `S256` 的 `code_challenge` 和随机 `nonce`），同时写入短期流程 Cookie `sl_oidc_flow`：
 
-- `HttpOnly`、`SameSite=Lax`、`Path=/api/v1/auth/callback`、`Max-Age=600`（10 分钟）。
+- `HttpOnly`、`SameSite=Lax`、`Path=/api/v1/auth/oidc/callback`、`Max-Age=600`（10 分钟）。
 - `OIDC_REDIRECT_URL` 为 `https://` 时带 `Secure`；本地 HTTP 开发和冒烟（`http://127.0.0.1:...`）不带 `Secure`。
 - 值是 HMAC 签过的，客户端不能改 `state`、PKCE verifier、nonce 或过期时间。
 
 回调建会话：
 
 ```http
-GET /api/v1/auth/callback?code=...&state=...
+GET /api/v1/auth/oidc/callback?code=...&state=...
 Cookie: sl_oidc_flow=...
 ```
 
@@ -470,7 +487,7 @@ curl -i -b cookies.txt -H 'X-Org-ID: 1' \
 
 ## Webhooks
 
-仅当 `console` 同时配置了 64 位小写 hex 主密钥 `WEBHOOK_SECRET_KEY` 且启用了至少一种会话登录方式（`OIDC_*` 或 `GITHUB_*`）时，才会挂载 `/api/v1/webhooks*`（任一缺失时路由返回 404，且 `GET /api/v1/auth/providers` 返回 `"webhooks":false`）。详见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)。
+仅当 `console` 同时配置了 64 位小写 hex 主密钥 `WEBHOOK_SECRET_KEY` 且启用了至少一种会话登录方式（`OIDC_*` 或 `GITHUB_*`）时，才会挂载 `/api/v1/webhooks*`（任一缺失时路由返回 404，且 `GET /api/v1/capabilities` 返回 `"webhooks":false`）。详见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)。
 
 全部 Webhook 接口走管理 API 鉴权链（`sl_session` + `X-Org-ID` + 按租户限流 + `CrossOriginProtection`），**仅授予 `owner` 与 `admin` 会话**（`webhooks:read` / `webhooks:write`；API Key 永远返回 403），响应一律带 `Cache-Control: no-store`。每个组织最多配置 `5` 个 Webhook（并发加行锁校验，超限返回 409 `{"error":"webhook limit exceeded"}`）。
 
@@ -508,7 +525,7 @@ curl -i localhost:8080/r/AbC123xy
 - 客户端：`browser`、`bot`、`cli`、`other`。
 - 访客：`HMAC-SHA256(VISITOR_SALT, 按天盐 + IP + User-Agent)` 的前 16 字节。不存原始 IP 和 User-Agent。
 
-客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才解析 `X-Forwarded-For`：结合 `TRUSTED_PROXY_CIDRS`（配置了可信代理网段时从右往左剥离可信代理跳，否则取最右一段合法 IP），既防客户端伪造，也防止多层反代（CDN + Nginx）导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
+客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才解析 `X-Forwarded-For`：结合 `TRUSTED_PROXY_CIDRS`（配置了可信代理网段时从右往左剥离可信代理跳，否则取最右一段合法 IP），既防客户端伪造，也防止多层反代（CDN + Nginx）导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。`VISITOR_SALT` 在 `FEATURE_ANALYTICS=true` 时由 redirector 启动必填，关闭点击统计（`FEATURE_ANALYTICS=false`）时可留空且不启动点击记录器。
 
 ## 健康检查
 

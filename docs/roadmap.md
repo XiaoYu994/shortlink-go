@@ -167,3 +167,10 @@
 - [x] 第 2 批：拆出 `pgdb`/`pgredirect`/`identity/oauth` 与只读缓存装饰器净化 `redirector` 二进制（新增 `make arch-check`）、支持 `OPS_ADDR`/`CONSOLE_OPS_ADDR` 独立运维端口、`TRUSTED_PROXY_CIDRS` 多跳客户端 IP 提取、管理面鉴权前按 IP 限流
 - [x] 第 3 批：引入无去重键电平对账 `cache.reconcile`、`Delete` 异步 `link.purge_stats`（按 PK 元组批删）、审计元数据 `fail-closed`（`audit.ErrMissingMeta`）与服务端权威签发 `X-Request-ID`
 - [x] 第 4 批：迁移 `013` 将三张日统计表与 `audit_logs` 转为按月范围分区表（含 `_default`）、worker 自动预建未来月表与整月 `DROP TABLE` 保留期淘汰（`90d`/`180d`）及 `EXPLAIN (ANALYZE, BUFFERS)` 实测验证
+
+## 模块化可插拔特性架构（[ADR 0029](adr/0029-modular-feature-plugins.md)，已完成）
+
+- [x] 阶段 A：`internal/config` 内置特性开关（`FEATURE_ANALYTICS`/`FEATURE_RISK_SCAN`）、`internal/postgres` 事务内扩展点 `TxHook`（5 个内置钩子）与 `cmd/console` 共享存储装配（`serve` / `worker` / CLI 一致）
+- [x] 阶段 B：两层登录插件抽象（`AuthMethod` + `SessionIssuer` + `OAuthAuthMethod`，统一 `/api/v1/auth/{id}/login·callback`）、`console.Module` 路由模块化、`GET /api/v1/capabilities` 与前端能力感知改造
+- [x] 阶段 C：`WorkerModule` 后台模块封装、`EnsureStatsPartitions`/`EnsureAuditPartitions` 拆分与已关闭特性任务 `disabledSkipHandler`（`job.Skip`）
+- [x] 阶段 D：数据面与基础设施轻量化（`FEATURE_ANALYTICS=false` 全链路裁剪点击采集/统计查询/点击字段与排序，`REDIS_URL=""` 可选无 Redis 极简单 PG 模式）与端到端极简模式冒烟验证

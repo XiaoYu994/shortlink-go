@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-# 先按 docs/runbook.md 准备 .env（DATABASE_URL、REDIS_URL、VISITOR_SALT），并启动数据库
+# 先按 docs/runbook.md 准备 .env（DATABASE_URL 必填；REDIS_URL 与 VISITOR_SALT 可按需启用，极简单 PG 模式可留空并设 FEATURE_ANALYTICS=false），并启动数据库
 make migrate
 make run-redirector   # 终端 1：公开跳转，默认 :8080，用 ADDR 改
 ```
@@ -40,7 +40,7 @@ curl -i localhost:8080/r/AbC123xy
 
 也可以通过本地 Dex 进行 OIDC 浏览器登录并用会话 Cookie 和 `X-Org-ID` 管理组织与短链，步骤见 [docs/runbook.md](docs/runbook.md)。
 
-两个进程共用 PostgreSQL、Redis 和 `internal/` 里的代码，进程之间不互相调用。
+两个进程共用 PostgreSQL、可选 Redis 和 `internal/` 里的代码，进程之间不互相调用。外围能力（缓存、点击统计、异步风控、Webhook、邀请邮件、OAuth/OIDC 登录）均按 [ADR 0029](docs/adr/0029-modular-feature-plugins.md) 模块化按需开关。
 部署时由反向代理把 `/r/` 转到 redirector，把 `/api/v1/` 转到 console；短链的公开地址不变。
 宿主机上的进程用 `deploy/nginx.conf`（compose profile `edge`）。容器里跑两个进程用根目录的 `Dockerfile` 和 profile `app`，入口是 `deploy/nginx.stack.conf`。`/healthz` 只表示进程活着；`/readyz` 表示可以接流量，console 会探 PostgreSQL，redirector 启动完成就算就绪；这两个路径和 `/metrics` 都不经过公网入口。
 
