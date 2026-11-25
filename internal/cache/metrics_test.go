@@ -153,8 +153,11 @@ func TestGetByCodeCanceledDoesNotCount(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.GetByCode(ctx, code); err != nil {
-		t.Fatalf("GetByCode: %v", err)
+	if _, err := s.GetByCode(ctx, code); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetByCode error = %v, want context.Canceled", err)
+	}
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store calls = %d, want 0", n)
 	}
 
 	assertCacheResult(t, s, resultHit, 0)

@@ -283,6 +283,9 @@ GetByCode 未命中或 Redis 故障时回源。负缓存的 value 是 JSON null�
 被限流的请求按请求计一次 shed，等待者也会收到同一个错误，见 ADR 0008。
 */
 func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := keyPrefix + code
 
 	cached, result := r.readCache(ctx, key, code)
@@ -302,9 +305,10 @@ func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error)
 		logx.SetCacheResult(ctx, resultHit)
 		return cached, nil
 	}
-	if result != resultSkipped {
-		logx.SetCacheResult(ctx, result)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	logx.SetCacheResult(ctx, result)
 
 	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数。
 	l, err, _ := doTyped[*link.Link](&r.group, key, func() (*link.Link, error) {
@@ -731,7 +735,6 @@ func (r *Reader) readStore(ctx context.Context, code, path string) (*link.Link, 
 	if path == resultFallback {
 		slots = r.fallbackSlots
 	} else {
-		// resultSkipped 是 ctx 已取消，仍然按普通回源处理。
 		path = resultMiss
 	}
 	select {

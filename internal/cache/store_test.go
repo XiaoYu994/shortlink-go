@@ -690,7 +690,7 @@ func TestStoreCreateOverwritesNegativeCache(t *testing.T) {
 	}
 }
 
-// TestStoreGetByCodeSkipsMetricOnCanceledContext 验证客户端断开不计进命中率，也不冒充 Redis 降级。
+// TestStoreGetByCodeSkipsMetricOnCanceledContext 验证客户端断开直接返回 ctx 错误，不回源也不计入缓存指标。
 func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 	rdb := newTestRedis(t)
 	code := newTestCode(t)
@@ -706,11 +706,14 @@ func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 	cancel()
 
 	got, err := s.GetByCode(ctx, code)
-	if err != nil {
-		t.Fatalf("GetByCode: %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetByCode error = %v, want context.Canceled", err)
 	}
-	if got.ID != want.ID {
-		t.Errorf("ID = %d, want %d", got.ID, want.ID)
+	if got != nil {
+		t.Fatalf("GetByCode = %+v, want nil", got)
+	}
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store calls = %d, want 0", n)
 	}
 	for _, result := range []string{resultHit, resultMiss, resultFallback} {
 		if n := testutil.ToFloat64(s.gets.WithLabelValues(result)); n != 0 {
@@ -719,6 +722,76 @@ func TestStoreGetByCodeSkipsMetricOnCanceledContext(t *testing.T) {
 	}
 	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); n != 0 {
 		t.Errorf("writes{result=error} = %v, want 0", n)
+	}
+}
+
+type cancelOnGetHook struct {
+	cancel context.CancelFunc
+	setN   atomic.Int32
+}
+
+func (h *cancelOnGetHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *cancelOnGetHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *cancelOnGetHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		switch cmd.Name() {
+		case "get":
+			h.cancel()
+			return context.Canceled
+		case "set", "setnx":
+			h.setN.Add(1)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+/*
+TestStoreGetByCodeCanceledDuringCacheReadDoesNotFetchOrigin 验证读缓存途中 ctx 取消（resultSkipped）时，
+不会通过 WithoutCancel 穿透进 singleflight、占满 missSlots 槽位、回源数据库或写回缓存。
+*/
+func TestStoreGetByCodeCanceledDuringCacheReadDoesNotFetchOrigin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = rdb.Close() })
+	hook := &cancelOnGetHook{cancel: cancel}
+	rdb.AddHook(hook)
+
+	next := &fakeStore{get: func(context.Context, string) (*link.Link, error) {
+		return &link.Link{ID: 99, Code: "abc12345", URL: "https://example.com/99"}, nil
+	}}
+	s := New(next, rdb, prometheus.NewRegistry(), Options{MissConcurrency: 1})
+	// 预先占满 missSlots：若误进入 singleflight 回源，会返回 503 shed 错误而不是 context.Canceled。
+	s.missSlots <- struct{}{}
+	defer func() { <-s.missSlots }()
+
+	got, err := s.GetByCode(ctx, "abc12345")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetByCode error = %v, want context.Canceled", err)
+	}
+	if got != nil {
+		t.Fatalf("GetByCode = %+v, want nil", got)
+	}
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store calls = %d, want 0", n)
+	}
+	if n := hook.setN.Load(); n != 0 {
+		t.Errorf("redis set calls = %d, want 0", n)
+	}
+	for _, result := range []string{resultHit, resultMiss, resultFallback} {
+		if n := testutil.ToFloat64(s.gets.WithLabelValues(result)); n != 0 {
+			t.Errorf("gets{result=%q} = %v, want 0", result, n)
+		}
+	}
+	for _, path := range []string{resultMiss, resultFallback} {
+		if n := testutil.ToFloat64(s.shed.WithLabelValues(path)); n != 0 {
+			t.Errorf("shed{path=%q} = %v, want 0", path, n)
+		}
 	}
 }
 
@@ -859,11 +932,6 @@ func TestJitteredTTL(t *testing.T) {
 		t.Error("jitteredTTL returned the same value 100 times; jitter is not applied")
 	}
 }
-
-/*
-TestStoreGetByCodeSingleflightSurvivesLeaderCancel 固定共享回源不跟随领头取消：
-领头请求断开后，还在等待的请求应该拿到链接，而不是 context.Canceled。
-*/
 
 func TestStoreGetByCodePopulatesRequestEvent(t *testing.T) {
 	rdb := newTestRedis(t)
