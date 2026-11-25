@@ -199,7 +199,7 @@ func (h *webhookHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req createWebhookRequest
 	if err := decodeStrict(body, &req); err != nil {
-		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, requestMessage(err))
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, decodeErrorMessage(err))
 		return
 	}
 
@@ -270,7 +270,7 @@ func (h *webhookHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req updateWebhookRequest
 	if err := decodeStrict(body, &req); err != nil {
-		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, requestMessage(err))
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, decodeErrorMessage(err))
 		return
 	}
 	if req.URL == nil && req.Description == nil && req.Events == nil && req.Enabled == nil {

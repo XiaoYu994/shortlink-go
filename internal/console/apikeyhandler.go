@@ -127,7 +127,7 @@ func (h *apiKeyHandler) handleIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	var req issueAPIKeyRequest
 	if err := decodeStrict(body, &req); err != nil {
-		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, requestMessage(err))
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, expiresAtDecodeMessage(err))
 		return
 	}
 

@@ -2,11 +2,9 @@ package console
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"shortlink/internal/audit"
@@ -126,8 +124,8 @@ func (h *orgHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func orgDecodeMessage(err error) string {
-	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok && (typeErr.Field == "name" || strings.HasSuffix(typeErr.Field, ".name")) {
+	if isJSONFieldError(err, "name") {
 		return identity.ErrInvalidOrgName.Error()
 	}
-	return requestMessage(err)
+	return decodeErrorMessage(err)
 }

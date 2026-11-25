@@ -2,11 +2,9 @@ package console
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"shortlink/internal/httpx"
@@ -185,10 +183,10 @@ func (h *memberHandler) handleRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 func memberRoleDecodeMessage(err error) string {
-	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok && (typeErr.Field == "role" || strings.HasSuffix(typeErr.Field, ".role")) {
+	if isJSONFieldError(err, "role") {
 		return "invalid role"
 	}
-	return requestMessage(err)
+	return decodeErrorMessage(err)
 }
 
 func (h *memberHandler) handleMemberError(w http.ResponseWriter, r *http.Request, op string, err error, targetUserID int64) {

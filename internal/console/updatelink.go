@@ -143,5 +143,5 @@ func (s *Server) writeDecodeError(w http.ResponseWriter, r *http.Request, err er
 		httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, string(bad))
 		return
 	}
-	httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, requestMessage(err))
+	httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, decodeErrorMessage(err))
 }

@@ -1,10 +1,8 @@
 package console
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"shortlink/internal/httpx"
@@ -32,7 +30,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	req, err := decodeCreateRequest(body)
 	if err != nil {
-		httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, requestMessage(err))
+		httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, expiresAtDecodeMessage(err))
 		return
 	}
 
@@ -71,39 +69,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusCreated, newCreatedLinkResponse(l))
 }
 
-/*
-decodeCreateRequest 解码创建请求。
-
-未知字段默认会被丢掉。expire_at 这种拼写会变成没传，链接就永不过期。
-DisallowUnknownFields 只在 Decoder 上，而 Decoder 只消费第一个 JSON 值，
-所以还要再读一次，确认后面没有另一个值。
-*/
+// decodeCreateRequest 按严格模式解码创建短链请求，未知字段（例如拼错的 expire_at）会被拒绝。
 func decodeCreateRequest(body []byte) (createLinkRequest, error) {
 	var req createLinkRequest
 	if err := decodeStrict(body, &req); err != nil {
 		return createLinkRequest{}, err
 	}
 	return req, nil
-}
-
-/*
-requestMessage 把解码错误收成给客户端的短句。
-expires_at 写成 "tomorrow" 时 JSON 本身是合法的，不能报成 invalid JSON body。
-encoding/json 把未知字段报成普通 error，文本以 json: unknown field 开头。
-*/
-func requestMessage(err error) string {
-	if _, ok := errors.AsType[*time.ParseError](err); ok {
-		return "invalid expires_at"
-	}
-	/*
-		数字、布尔、数组、对象不会进 time.Time 的解析，而是 UnmarshalTypeError。
-		Field 用的是 json 名，例如 expires_at。
-	*/
-	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok && strings.Contains(typeErr.Field, "expires_at") {
-		return "invalid expires_at"
-	}
-	if rest, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
-		return "unknown field " + rest
-	}
-	return "invalid JSON body"
 }
