@@ -125,6 +125,7 @@ RETURNING id, created_at
 - 回填少算了本月已删除的链接；之前按存量被卡住的租户，迁移后本月立刻有额度。
 - 同租户的创建仍然串行在租户行上，删除不再参与这把锁。
 - 需要同步的文档和注释：`docs/api.md`（配额说明、403 之后怎么办）、`docs/architecture.md`、`docs/runbook.md`（「查看和调整租户配额与限流」）、`link.ErrQuotaExceeded` 和 `postgres.TenantLimits` 的注释、`console` 的用法说明。
+- 2026-11-24（补充）：上文中沿用 0014 的“租户行不存在时照常插入、不计数（`OR NOT EXISTS (SELECT 1 FROM tenants ...)`）”已被 [ADR 0022](0022-postgres-query-and-lease-hardening.md) 取代：`Create` 遇到不存在的租户一律拒绝并返回 `ErrTenantNotFound`。
 
 ## 备选方案
 

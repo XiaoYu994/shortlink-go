@@ -87,7 +87,7 @@ idgen          -> 标准库
 logx           -> 标准库、github.com/lmittmann/tint
 ```
 
-`redirector.LinkStore` 与 `console.Store` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 与 `audit` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OrgStore`、`InvitationStore`、`APIKeyStore`、`AuditLogStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`identity.OIDCProvider`、`identity.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
+`redirector.LinkStore` 与 `console.Store` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 与 `audit` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OrgStore`、`InvitationStore`、`APIKeyStore`、`AuditLogStore`、`OIDCClient`、`GitHubClient` 和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`oauth.OIDCProvider`、`oauth.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。
 
 ## 请求流程
 
@@ -172,7 +172,7 @@ GET /api/v1/links/{code}/stats
 
 ## 配置
 
-`config.LoadRedirectorConfig`、`config.LoadConsoleConfig` 与 `config.LoadWorkerConfig` 分别在启动时加载共用基础配置与各自进程的专属配置并校验：
+`config.LoadBaseConfig` 与各进程入口的 `cmd/redirector/config.go`（`loadRedirectorConfig`）、`cmd/console/config.go`（`loadConsoleConfig` / `loadWorkerConfig`）分别在启动时加载共用基础配置与各自进程的专属配置并校验：
 
 - `ADDR` / `OPS_ADDR`：跳转进程的业务监听地址（默认 `:8080`）与可选独立运维端口
 - `CONSOLE_ADDR` / `CONSOLE_OPS_ADDR`：管理进程的业务监听地址（默认 `:8081`）与可选独立运维端口（不读 `ADDR`，[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
@@ -187,7 +187,7 @@ GET /api/v1/links/{code}/stats
 - `CACHE_FETCH_TIMEOUT`：默认 `1s`，单次回源超时；必须为正且不超过 `REQUEST_TIMEOUT`
 - `REDIS_URL`：必填，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；没有密码就是 `redis://localhost:6379/0`。`main` 用它 Ping，连不上则进程退出
 - `VISITOR_SALT`：访客哈希的 HMAC 密钥。redirector 启动时必填，为空直接报错；console 不用。生产从密钥管理注入，不能提交真实值
-- `TRUST_PROXY_HEADERS` / `TRUST_PROXY_CIDRS`：默认 `false`；设为 `true` 时结合可信代理 CIDR 从右往左剥离可信代理跳数读取真实客户端 IP，既防客户端伪造，也防多层代理导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
+- `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_CIDRS`：默认 `false`；设为 `true` 时结合可信代理 CIDR 从右往左剥离可信代理跳数读取真实客户端 IP，既防客户端伪造，也防多层代理导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
@@ -206,7 +206,7 @@ redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007]
 
 ## 监控
 
-两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。抓取不进访问日志、公网不转发运维路径，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。本地 `make prometheus` 按 `ADDR` 和 `CONSOLE_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080` 和 `8081`），生成的配置在 `deploy/prometheus.local.yml`；两个 job 的指标名相同，查询时用 `job` 区分。Prometheus 和探活直接打进程端口。宿主机入口：`docker compose --profile edge up -d nginx`，地址 `127.0.0.1:8088`。容器栈：`make stack`，入口 `127.0.0.1:28088`，进程端口 `127.0.0.1:28080` 和 `127.0.0.1:28081`。`make up` 不启动这套栈。
+两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。抓取不进访问日志、公网不转发运维路径，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。本地 `make prometheus` 按 `OPS_ADDR`/`ADDR`、`CONSOLE_OPS_ADDR`/`CONSOLE_ADDR` 和 `WORKER_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080`、`8081`、`8082`），生成的配置在 `deploy/prometheus.local.yml`；各 job 指标名相同，查询时用 `job` 区分。Prometheus 和探活直接打运维端口。宿主机入口：`docker compose --profile edge up -d nginx`，地址 `127.0.0.1:8088`。容器栈：`make stack`，入口 `127.0.0.1:28088`，业务端口映射 `127.0.0.1:28080` / `28081`（运维端点留在 compose 内网 `:9090` / `:9091`），`worker` 运维端口映射 `127.0.0.1:28082`。`make up` 不启动这套栈。
 
 ## 尚未实现
 

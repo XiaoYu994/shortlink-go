@@ -116,4 +116,5 @@ console tenant set --tenant ID [--link-quota N] [--rate-limit N]
 - 限流 map 最多每分钟被遍历一次；map 大小是活跃租户数，不是历史租户总数。
 - 2026-11-18：补充 Kubernetes 下的部署取舍（见「决策」）。按当前实现推导，尚未在集群上验证。
 - 2026-11-18：配额口径（`link_count` 的定义、删除释放配额、删除事务更新租户行、按 `links` 重算计数）已被 [ADR 0015](0015-monthly-link-quota.md) 取代；限流部分仍然有效。
+- 2026-11-24（补充）：上文中“租户行不存在时照常插入、不计数（`OR NOT EXISTS (SELECT 1 FROM tenants ...)`）”已被 [ADR 0022](0022-postgres-query-and-lease-hardening.md) 取代：`Create` 现在遇到不存在的租户一律拒绝并返回 `ErrTenantNotFound`。
 - 2026-11-24（演进补充）：虽然边缘 `nginx` 负责公网总入口 `limit_req`，管理面（`console`）应用层已在 `authenticate` 之前增加有界按 IP 限流器（`ipRateLimiter`，`CONSOLE_IP_RATE_LIMIT`/`CONSOLE_IP_RATE_BURST`，指标 `shortlink_ip_rate_limited_total`），防止伪造 token 穿透鉴权打满数据库，见 [ADR 0024](0024-process-boundary-and-ops-isolation.md)。

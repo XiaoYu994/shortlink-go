@@ -30,7 +30,7 @@
   - 多行 SQL 语句抽到文件顶部的包级 `const`，避免长 SQL 打断方法主流程；单行短 SQL 可就近内联。
   - 新增索引或改动查询/清理 SQL 时，在合成数据量上跑 `EXPLAIN (ANALYZE, BUFFERS)` 确认真正命中预期索引；禁止用 `OR` 混合有索引列与无索引列导致退化全表扫描。
   - 后台清理与租约回收 SQL 一律带 `LIMIT` 分批执行；在范围分区表（三张日统计表、`audit_logs`）上分批删改必须依据完整主键元组，禁止使用跨分区不唯一的 `ctid`；租约回写必须校验单调递增 Fencing Token（如 `jobs.lock_version`），不只依赖进程级 `WorkerID`；分区 DDL 必须在事务内设定 `SET LOCAL lock_timeout = '3s'` 且不得触碰 `*_default` 兜底分区。
-  - 避免给高频更新计数列（如 `tenants.link_usage`、`link_usage_month`）建索引，保留 PostgreSQL HOT Update 优化；高写表（`links`）保持适度 `fillfactor`。
+  - 避免给高频更新计数列（如 `tenants.link_usage`、`link_usage_month`）建索引，保留 PostgreSQL HOT Update 优化；仅在不涉及索引列更新时才可通过调整 `fillfactor` 配合 HOT 优化（如 `links.clicks` 被 `idx_links_tenant_clicks` 索引，未拆出独立计数表前设 `fillfactor` 无法触发 HOT）。
 
 ### 命名与文件
 

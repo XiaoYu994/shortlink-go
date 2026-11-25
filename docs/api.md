@@ -474,7 +474,7 @@ curl -i localhost:8080/r/AbC123xy
 - 客户端：`browser`、`bot`、`cli`、`other`。
 - 访客：`HMAC-SHA256(VISITOR_SALT, 按天盐 + IP + User-Agent)` 的前 16 字节。不存原始 IP 和 User-Agent。
 
-客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才解析 `X-Forwarded-For`：结合 `TRUST_PROXY_CIDRS`（配置了可信代理网段时从右往左剥离可信代理跳，否则取最右一段合法 IP），既防客户端伪造，也防止多层反代（CDN + Nginx）导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
+客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才解析 `X-Forwarded-For`：结合 `TRUSTED_PROXY_CIDRS`（配置了可信代理网段时从右往左剥离可信代理跳，否则取最右一段合法 IP），既防客户端伪造，也防止多层反代（CDN + Nginx）导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
 
 ## 健康检查
 

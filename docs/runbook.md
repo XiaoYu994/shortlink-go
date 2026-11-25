@@ -11,7 +11,7 @@ REDIS_URL=redis://localhost:6379/0
 VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`，多跳代理场景需同时配置 `TRUST_PROXY_CIDRS` 右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
+`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`，多跳代理场景需同时配置 `TRUSTED_PROXY_CIDRS` 右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
 
 `.env` 已被 gitignore，不会提交。
 
@@ -109,7 +109,7 @@ curl -i localhost:8081/readyz    # console 就绪，Ping PostgreSQL
 make stack
 ```
 
-它构建根目录的 `Dockerfile`（里面有 `redirector`、`console` 和 `migrate`），先把 compose 里的 `shortlink` 库迁到最新，再启动两个进程和 `deploy/nginx.stack.conf`。入口是 `http://127.0.0.1:28088`，只转发 `/r/` 和 `/api/`。探活和指标打 `127.0.0.1:28080`、`127.0.0.1:28081`，不占用本机的 `8080`/`8081`。
+它构建根目录的 `Dockerfile`（里面有 `redirector`、`console` 和 `migrate`），先把 compose 里的 `shortlink` 库迁到最新，再启动 `redirector`、`console`、`worker` 和 `deploy/nginx.stack.conf`。入口是 `http://127.0.0.1:28088`，只转发 `/r/` 和 `/api/`。`redirector` 与 `console` 的业务端口映射在 `127.0.0.1:28080`、`28081`（各自的 `/healthz`、`/readyz`、`/metrics` 隔离在 compose 内网运维端口 `:9090`、`:9091`，不映射暴露到宿主机），`worker` 运维端口映射在 `127.0.0.1:28082`，不占用本机的 `8080`/`8081`/`8082`。
 
 这套栈的连接串写在 `docker-compose.yml` 里，指向 compose 网络中的 PostgreSQL 和 Redis，不读宿主机 `.env`，也不会连到开发库。`VISITOR_SALT` 用的是开发占位值。它会拉起项目 compose 里的 PostgreSQL 和 Redis；本机 `5432` 或 `6379` 已经被别的容器占用时起不来，不要为了迁就端口去改连接串。不要和 `make run-redirector` 同时打同一份 Redis，缓存 key 会混在一起。本地 Prometheus 仍然抓宿主机上 `make run-*` 的端口，不抓这套容器。
 

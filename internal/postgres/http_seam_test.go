@@ -199,7 +199,7 @@ func TestHTTPAPIKeyScopesEnforced(t *testing.T) {
 }
 
 /*
-TestHTTPOIDCLoginPersistsSession 端到端串联 fakeoidc、identity.OIDCProvider、
+TestHTTPOIDCLoginPersistsSession 端到端串联 fakeoidc、oauth.OIDCProvider、
 console 登录/回调路由和真实 PostgreSQL 存储，验证首次与重复登录落库和会话 Cookie 哈希一致。
 */
 

@@ -165,7 +165,7 @@
 
 对应复盘见 [全量架构深度审查复盘](postmortems/2026-11-24-full-architecture-audit.md)，核心架构决策见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)、[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)、[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)。
 
-- [x] 第 1 批：迁移 `012` 部分清理索引与 `fillfactor=85`、`ClickRecorder` panic 告警指标、SSRF NAT64/6to4 与端口白名单、9 条 Prometheus 告警、nginx 网关限流、`devtest` 编译隔离与前端修复
+- [x] 第 1 批：迁移 `012` 部分清理索引、`ClickRecorder` panic 告警指标、SSRF NAT64/6to4 与端口白名单、9 条 Prometheus 告警、nginx 网关限流、`devtest` 编译隔离与前端修复
 - [x] 第 2 批：拆出 `pgdb`/`pgredirect`/`identity/oauth` 与只读缓存装饰器净化 `redirector` 二进制（新增 `make arch-check`）、支持 `OPS_ADDR`/`CONSOLE_OPS_ADDR` 独立运维端口、`TRUSTED_PROXY_CIDRS` 多跳客户端 IP 提取、管理面鉴权前按 IP 限流
 - [x] 第 3 批：引入无去重键电平对账 `cache.reconcile`、`Delete` 异步 `link.purge_stats`（按 PK 元组批删）、审计元数据 `fail-closed`（`audit.ErrMissingMeta`）与服务端权威签发 `X-Request-ID`
 - [x] 第 4 批：迁移 `013` 将三张日统计表与 `audit_logs` 转为按月范围分区表（含 `_default`）、worker 自动预建未来月表与整月 `DROP TABLE` 保留期淘汰（`90d`/`180d`）及 `EXPLAIN (ANALYZE, BUFFERS)` 实测验证

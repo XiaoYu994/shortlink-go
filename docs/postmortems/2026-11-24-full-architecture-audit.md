@@ -10,7 +10,7 @@
 
 | 批次 | 解决的关键问题 | 核心改动与决策 |
 | --- | --- | --- |
-| 第 1 批（合规索引、风控、告警、网关限流与前端修复） | `dead jobs`/过期邀请无清理策略；`ClickRecorder` panic 后静默停摆无告警；SSRF 未拦 NAT64/6to4 与非标准端口控制、4xx 被长期缓存；单 CTE 写事务分散；`alerts.yml` 仅 1 条；nginx 无 `limit_req`、compose 缺 `worker`；`--allow-test-host` 进默认生产编译；前端刷新恢复/去重/统计边界瑕疵 | 迁移 `012` 部分索引与清理任务；`shortlink_clicks_recorder_stopped` 指标与 9 条 Prometheus 告警；`64:ff9b::/96` & `2002::/16` 与端口白名单/4xx `Uncacheable`；`updateLinkSQL`/`RevokeAPIKey` 单 CTE 与 `fillfactor=85`；nginx `limit_req`；`devtest` build tag 隔离 |
+| 第 1 批（合规索引、风控、告警、网关限流与前端修复） | `dead jobs`/过期邀请无清理策略；`ClickRecorder` panic 后静默停摆无告警；SSRF 未拦 NAT64/6to4 与非标准端口控制、4xx 被长期缓存；单 CTE 写事务分散；`alerts.yml` 仅 1 条；nginx 无 `limit_req`、compose 缺 `worker`；`--allow-test-host` 进默认生产编译；前端刷新恢复/去重/统计边界瑕疵 | 迁移 `012` 部分索引与清理任务；`shortlink_clicks_recorder_stopped` 指标与 9 条 Prometheus 告警；`64:ff9b::/96` & `2002::/16` 与端口白名单/4xx `Uncacheable`；`updateLinkSQL`/`RevokeAPIKey` 单 CTE；nginx `limit_req`；`devtest` build tag 隔离 |
 | 第 2 批（进程边界净化、运维隔离、代理链与鉴权前限流） | `cmd/redirector` 误打包 `identity`、`go-oidc`、`oauth2`、`risk`、`job`、`audit`；`/metrics`/`/healthz` 与公网共端口；多跳反代取 `X-Forwarded-For` 最右一段导致 UV 塌缩；伪造 token 直接穿透至 Postgres；`postgres.Store` 单包单结构体跨界耦合 | 拆出 `internal/pgdb`、`internal/pgredirect`、`internal/identity/oauth`、只读 `storemetrics.NewReader`/`cache.NewReader`；`internal/config` 彻底去业务依赖；新增 `make arch-check`；支持 `OPS_ADDR` / `CONSOLE_OPS_ADDR` 独立监听、`TRUSTED_PROXY_CIDRS` 右向回溯、`console` 鉴权前有界按 IP 限流（`ADR 0024`） |
 | 第 3 批（缓存对账、异步清理、审计强约束与权威请求号） | 自助 `Update`/`Delete` Redis 失败无重试兜底；`risk/handler` 遇 `ErrNotUpdated` 重抓外网 URL；`Delete` 同步删三张统计表拉长行锁；`resolveAuditMeta` 静默降级 `system`/`operator`；客户端可伪造 `X-Request-ID` | 新增无 `dedup_key` 电平触发 `cache.reconcile` Outbox 任务与 `cache.Reader.Reconcile`；`Delete` 改为同事务入队 `link.purge_stats`（PK 元组批删）；`requireAuditMeta` fail-closed（`audit.ErrMissingMeta`）；`httpx.requestID` 始终服务端签发并将合法客户端值记入 `client_request_id`（`ADR 0025`） |
 | 第 4 批（按月分区治理、保留期自动化与文档沉淀） | 三张日统计表与 `audit_logs` 无保留期、长期膨胀 | 迁移 `013` 按月范围分区 + `_default` 兜底分区；`partition.go` 与 worker `partitions.maintain`（`90d`/`180d`）自动建月表及整月 `DROP TABLE`；全套文档与决策沉淀（`ADR 0026`） |
@@ -91,3 +91,4 @@ Execution Time: 0.090 ms
 2. **审计元数据 `fail-closed` 回归测试**：`internal/postgres/audit_test.go` 锁死缺失/非法 `audit.Meta` 直接返回 `audit.ErrMissingMeta`，防止未来新增写路径悄悄回退到静默降级。
 3. **测试态隔离编译标签（`devtest`）**：`--allow-test-host` 等仅测试旁路参数严格隔离在 `//go:build devtest`，线上构建产物不可出现。
 4. **分区清理 DDL 防误删护栏**：`DropExpired*Partitions` 对子分区名做严格正则校验且只以整个自然月上界判定过期，永久保护 `*_default` 兜底分区。
+5. **有意延后项决策说明（`links.clicks` 拆表与 `fillfactor`）**：由于 `idx_links_tenant_clicks` 索引了 `links.clicks`，即使调整 `links` 表的 `fillfactor` 也无法让点击更新变成 HOT Update，反而降低热页利用率；在将累计点击拆入独立窄表 `link_stats` 之前，保留 `links` 默认 `fillfactor` 与 [ADR 0017](../adr/0017-defer-click-write-optimization.md) 的现有单写入者边界。

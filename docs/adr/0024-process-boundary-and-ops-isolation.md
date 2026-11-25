@@ -50,7 +50,7 @@
 ### 4. `console` 鉴权前有界按 IP 限流
 
 - 在 [`internal/console/ratelimit.go`](../../internal/console/ratelimit.go) 增加独立于 `authenticate` 外层的 `ipRateLimiter`，对 `/api/v1/*` 生效（默认 `CONSOLE_IP_RATE_LIMIT=60`、突发 `CONSOLE_IP_RATE_BURST=120`，`0` 可关闭）。
-- 为防恶意随机源 IP 撑爆进程内存，映射表设置硬上限 `maxBuckets = 65536`：满容时先清理空闲条目，仍满则驱逐最久未访问条目，确保内存有界。
+- 为防恶意随机源 IP 撑爆进程内存，映射表设置硬上限 `maxBuckets = 65536`：满容时先清理空闲条目，仍满则 O(1) 随机驱逐一条已有条目（避免持锁 O(N) 扫描阻塞），确保内存有界。
 - 搭配网关层 `deploy/nginx.conf` 的 `limit_req`（`/r/` 与 `/api/` 分别限速并返回 `429`）形成网关+应用双层防御。
 
 ## 不做什么

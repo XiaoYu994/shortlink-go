@@ -48,6 +48,34 @@ PostgreSQL 的外键由系统触发器实现，成本与 MySQL 的 InnoDB 不完
   UNION ALL
   SELECT 'api_keys', count(*)
   FROM api_keys k LEFT JOIN tenants t ON t.id = k.tenant_id
+  WHERE t.id IS NULL
+  UNION ALL
+  SELECT 'link_clicks_daily', count(*)
+  FROM link_clicks_daily d LEFT JOIN tenants t ON t.id = d.tenant_id
+  WHERE t.id IS NULL
+  UNION ALL
+  SELECT 'memberships_tenant', count(*)
+  FROM memberships m LEFT JOIN tenants t ON t.id = m.tenant_id
+  WHERE t.id IS NULL
+  UNION ALL
+  SELECT 'memberships_user', count(*)
+  FROM memberships m LEFT JOIN users u ON u.id = m.user_id
+  WHERE u.id IS NULL
+  UNION ALL
+  SELECT 'sessions_user', count(*)
+  FROM sessions s LEFT JOIN users u ON u.id = s.user_id
+  WHERE u.id IS NULL
+  UNION ALL
+  SELECT 'invitations_tenant', count(*)
+  FROM invitations i LEFT JOIN tenants t ON t.id = i.tenant_id
+  WHERE t.id IS NULL
+  UNION ALL
+  SELECT 'jobs_tenant', count(*)
+  FROM jobs j LEFT JOIN tenants t ON t.id = j.tenant_id
+  WHERE j.tenant_id IS NOT NULL AND t.id IS NULL
+  UNION ALL
+  SELECT 'audit_logs_tenant', count(*)
+  FROM audit_logs a LEFT JOIN tenants t ON t.id = a.tenant_id
   WHERE t.id IS NULL;
   ```
 
