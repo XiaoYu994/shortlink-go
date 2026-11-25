@@ -35,6 +35,8 @@ const (
 	purgeStatsBatchLimit       = 500
 	maxPurgeStatsBatchesPerRun = 20
 	purgeStatsDeferDelay       = 100 * time.Millisecond
+	partitionMonthsAhead       = 2
+	partitionStartupTimeout    = 10 * time.Second
 )
 
 type workerCLIOptions struct {
@@ -107,6 +109,12 @@ func runWorker(cliOpts workerCLIOptions) error {
 	)
 
 	pgStore := postgres.NewStore(db)
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), partitionStartupTimeout)
+	_, startupPartErr := pgStore.EnsureMonthlyPartitions(startupCtx, time.Now().UTC(), partitionMonthsAhead)
+	cancelStartup()
+	if startupPartErr != nil {
+		return startupPartErr
+	}
 	linkStore := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
 		MissConcurrency: cfg.CacheMissConcurrency,
 		FetchTimeout:    cfg.CacheFetchTimeout,
@@ -233,6 +241,22 @@ func runWorker(cliOpts workerCLIOptions) error {
 						return pgStore.CleanupSupersededInvitations(ctx, cfg.InvitationRetention, limit)
 					})
 					return n1 + n2 + n3, err
+				},
+			},
+			{
+				Name:     "partitions.maintain",
+				Interval: cfg.CleanupInterval,
+				Run: func(ctx context.Context) (int64, error) {
+					now := time.Now().UTC()
+					if _, err := pgStore.EnsureMonthlyPartitions(ctx, now, partitionMonthsAhead); err != nil {
+						return 0, err
+					}
+					d1, err := pgStore.DropExpiredStatsPartitions(ctx, now, cfg.StatsRetentionDays)
+					if err != nil {
+						return d1, err
+					}
+					d2, err := pgStore.DropExpiredAuditPartitions(ctx, now, cfg.AuditRetentionDays)
+					return d1 + d2, err
 				},
 			},
 		},

@@ -305,6 +305,8 @@ func TestLoadWorkerConfig(t *testing.T) {
 		DoneJobRetention:    defaultWorkerRetention,
 		DeadJobRetention:    defaultWorkerLongRetention,
 		InvitationRetention: defaultWorkerLongRetention,
+		StatsRetentionDays:  defaultStatsRetentionDays,
+		AuditRetentionDays:  defaultAuditRetentionDays,
 		RiskFetchTimeout:    risk.DefaultFetchTimeout,
 		RiskHostRateLimit:   risk.DefaultHostRateLimit,
 	}
@@ -331,6 +333,8 @@ func TestLoadWorkerConfig(t *testing.T) {
 				"WORKER_DONE_JOB_RETENTION":   "48h",
 				"WORKER_DEAD_JOB_RETENTION":   "168h",
 				"WORKER_INVITATION_RETENTION": "168h",
+				"WORKER_STATS_RETENTION_DAYS": "45",
+				"WORKER_AUDIT_RETENTION_DAYS": "365",
 				"RISK_FETCH_TIMEOUT":          "3s",
 				"RISK_HOST_RATE_LIMIT":        "5",
 				"RISK_BLOCKED_HOSTS":          "bad.example:malware",
@@ -350,6 +354,8 @@ func TestLoadWorkerConfig(t *testing.T) {
 				DoneJobRetention:    48 * time.Hour,
 				DeadJobRetention:    168 * time.Hour,
 				InvitationRetention: 168 * time.Hour,
+				StatsRetentionDays:  45,
+				AuditRetentionDays:  365,
 				RiskFetchTimeout:    3 * time.Second,
 				RiskHostRateLimit:   5,
 				RiskBlockedHosts:    map[string]link.BanReason{"bad.example": link.BanReasonMalware},
@@ -386,6 +392,16 @@ func TestLoadWorkerConfig(t *testing.T) {
 			name:    "invalid risk allowed ports",
 			env:     map[string]string{"RISK_ALLOWED_PORTS": "80,99999"},
 			wantErr: "RISK_ALLOWED_PORTS",
+		},
+		{
+			name:    "non-positive stats retention days",
+			env:     map[string]string{"WORKER_STATS_RETENTION_DAYS": "0"},
+			wantErr: "WORKER_STATS_RETENTION_DAYS must be positive",
+		},
+		{
+			name:    "non-positive audit retention days",
+			env:     map[string]string{"WORKER_AUDIT_RETENTION_DAYS": "-5"},
+			wantErr: "WORKER_AUDIT_RETENTION_DAYS must be positive",
 		},
 	}
 
@@ -437,6 +453,8 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.DoneJobRetention == b.DoneJobRetention &&
 		a.DeadJobRetention == b.DeadJobRetention &&
 		a.InvitationRetention == b.InvitationRetention &&
+		a.StatsRetentionDays == b.StatsRetentionDays &&
+		a.AuditRetentionDays == b.AuditRetentionDays &&
 		a.RiskFetchTimeout == b.RiskFetchTimeout &&
 		a.RiskHostRateLimit == b.RiskHostRateLimit
 }

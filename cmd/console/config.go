@@ -25,6 +25,8 @@ const (
 	defaultWorkerCleanupInterval = time.Hour
 	defaultWorkerRetention       = 7 * 24 * time.Hour
 	defaultWorkerLongRetention   = 30 * 24 * time.Hour
+	defaultStatsRetentionDays    = 90
+	defaultAuditRetentionDays    = 180
 )
 
 // ConsoleConfig 是管理进程 HTTP 模式（cmd/console serve）的完整启动配置。
@@ -134,6 +136,8 @@ type WorkerConfig struct {
 	DoneJobRetention    time.Duration
 	DeadJobRetention    time.Duration
 	InvitationRetention time.Duration
+	StatsRetentionDays  int
+	AuditRetentionDays  int
 	RiskFetchTimeout    time.Duration
 	RiskHostRateLimit   int
 	RiskBlockedHosts    map[string]link.BanReason
@@ -156,6 +160,8 @@ func (cfg WorkerConfig) LogValue() slog.Value {
 		slog.Duration("done_job_retention", cfg.DoneJobRetention),
 		slog.Duration("dead_job_retention", cfg.DeadJobRetention),
 		slog.Duration("invitation_retention", cfg.InvitationRetention),
+		slog.Int("stats_retention_days", cfg.StatsRetentionDays),
+		slog.Int("audit_retention_days", cfg.AuditRetentionDays),
 		slog.Duration("risk_fetch_timeout", cfg.RiskFetchTimeout),
 		slog.Int("risk_host_rate_limit", cfg.RiskHostRateLimit),
 		slog.Int("risk_blocked_hosts_count", len(cfg.RiskBlockedHosts)),
@@ -276,6 +282,8 @@ func loadWorkerConfig() (WorkerConfig, error) {
 		DoneJobRetention:    defaultWorkerRetention,
 		DeadJobRetention:    defaultWorkerLongRetention,
 		InvitationRetention: defaultWorkerLongRetention,
+		StatsRetentionDays:  defaultStatsRetentionDays,
+		AuditRetentionDays:  defaultAuditRetentionDays,
 		RiskFetchTimeout:    risk.DefaultFetchTimeout,
 		RiskHostRateLimit:   risk.DefaultHostRateLimit,
 	}
@@ -311,6 +319,12 @@ func loadWorkerConfig() (WorkerConfig, error) {
 		return WorkerConfig{}, err
 	}
 	if cfg.InvitationRetention, err = config.EnvDuration("WORKER_INVITATION_RETENTION", cfg.InvitationRetention); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.StatsRetentionDays, err = config.EnvInt("WORKER_STATS_RETENTION_DAYS", cfg.StatsRetentionDays); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.AuditRetentionDays, err = config.EnvInt("WORKER_AUDIT_RETENTION_DAYS", cfg.AuditRetentionDays); err != nil {
 		return WorkerConfig{}, err
 	}
 	if cfg.RiskFetchTimeout, err = config.EnvDuration("RISK_FETCH_TIMEOUT", cfg.RiskFetchTimeout); err != nil {
@@ -408,6 +422,12 @@ func validateWorker(cfg WorkerConfig) error {
 	}
 	if cfg.InvitationRetention < 0 {
 		return errors.New("WORKER_INVITATION_RETENTION must not be negative")
+	}
+	if cfg.StatsRetentionDays <= 0 {
+		return errors.New("WORKER_STATS_RETENTION_DAYS must be positive")
+	}
+	if cfg.AuditRetentionDays <= 0 {
+		return errors.New("WORKER_AUDIT_RETENTION_DAYS must be positive")
 	}
 	if cfg.RiskFetchTimeout <= 0 {
 		return errors.New("RISK_FETCH_TIMEOUT must be positive")
