@@ -22,10 +22,12 @@ import (
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/oauth"
 	"shortlink/internal/postgres"
+	"shortlink/internal/safehttp"
 	"shortlink/internal/storemetrics"
+	"shortlink/internal/webhook"
 )
 
-func runServe() error {
+func runServe(cliOpts serveCLIOptions) error {
 	cfg, err := loadConsoleConfig()
 	if err != nil {
 		return err
@@ -75,12 +77,14 @@ func runServe() error {
 		return err
 	}
 	var (
-		sessions    console.SessionStore
-		members     console.MemberStore
-		orgs        console.OrgStore
-		invitations console.InvitationStore
-		apiKeys     console.APIKeyStore
-		auditLogs   console.AuditLogStore
+		sessions      console.SessionStore
+		members       console.MemberStore
+		orgs          console.OrgStore
+		invitations   console.InvitationStore
+		apiKeys       console.APIKeyStore
+		auditLogs     console.AuditLogStore
+		webhooks      console.WebhookStore
+		webhookCipher *webhook.SecretCipher
 	)
 	if oidcClient != nil || githubClient != nil {
 		sessions = pgStore
@@ -89,6 +93,22 @@ func runServe() error {
 		invitations = pgStore
 		apiKeys = pgStore
 		auditLogs = pgStore
+	}
+	if cfg.WebhookSecretKey != "" && sessions != nil {
+		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
+		if err != nil {
+			return fmt.Errorf("parse WEBHOOK_SECRET_KEY: %w", err)
+		}
+		webhookCipher, err = webhook.NewSecretCipher(key)
+		if err != nil {
+			return fmt.Errorf("init webhook cipher: %w", err)
+		}
+		webhooks = pgStore
+		logger.Info("webhooks api enabled")
+	} else if cfg.WebhookSecretKey == "" {
+		logger.Info("webhooks api disabled: WEBHOOK_SECRET_KEY is not set")
+	} else {
+		logger.Info("webhooks api disabled: OIDC or GitHub session auth is required")
 	}
 	if cfg.WebDistDir != "" {
 		info, err := os.Stat(cfg.WebDistDir)
@@ -100,16 +120,22 @@ func runServe() error {
 
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
 	srv := console.New(logger, store, cfg.RequestTimeout, registry, console.Options{
-		Keys:              pgStore,
-		Authorizer:        identity.NewMapAuthorizer(),
-		OIDC:              oidcClient,
-		GitHub:            githubClient,
-		Sessions:          sessions,
-		Members:           members,
-		Orgs:              orgs,
-		Invitations:       invitations,
-		APIKeys:           apiKeys,
-		AuditLogs:         auditLogs,
+		Keys:          pgStore,
+		Authorizer:    identity.NewMapAuthorizer(),
+		OIDC:          oidcClient,
+		GitHub:        githubClient,
+		Sessions:      sessions,
+		Members:       members,
+		Orgs:          orgs,
+		Invitations:   invitations,
+		APIKeys:       apiKeys,
+		AuditLogs:     auditLogs,
+		Webhooks:      webhooks,
+		WebhookCipher: webhookCipher,
+		WebhookURLOpts: safehttp.URLValidationOptions{
+			AllowedPorts:     cfg.WebhookAllowedPorts,
+			AllowedHostPorts: cliOpts.allowTestHosts,
+		},
 		WebDistDir:        cfg.WebDistDir,
 		PublicBaseURL:     cfg.PublicBaseURL,
 		TrustProxyHeaders: cfg.TrustProxyHeaders,

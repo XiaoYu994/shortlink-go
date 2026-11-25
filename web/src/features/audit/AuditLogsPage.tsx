@@ -37,6 +37,12 @@ const ACTION_META: Record<AuditAction, { label: string; variant: BadgeProps['var
   'invitation.redeem': { label: '兑现邀请', variant: 'success' },
   'apikey.issue': { label: '签发 API Key', variant: 'success' },
   'apikey.revoke': { label: '吊销 API Key', variant: 'destructive' },
+  'webhook.create': { label: '创建 Webhook', variant: 'success' },
+  'webhook.update': { label: '更新 Webhook', variant: 'outline' },
+  'webhook.delete': { label: '删除 Webhook', variant: 'destructive' },
+  'webhook.rotate_secret': { label: '轮换 Webhook 密钥', variant: 'secondary' },
+  'webhook.test': { label: '发送 Webhook 测试', variant: 'outline' },
+  'webhook.auto_disable': { label: '熔断停用 Webhook', variant: 'destructive' },
 };
 
 const ACTION_OPTIONS: ReadonlyArray<{ value: AuditAction; label: string }> = (
@@ -49,6 +55,7 @@ const TARGET_TYPE_LABELS: Record<AuditTargetType, string> = {
   member: '成员',
   invitation: '邀请',
   api_key: 'API Key',
+  webhook: 'Webhook',
 };
 
 const METADATA_KEY_LABELS: Record<string, string> = {
@@ -63,8 +70,16 @@ const METADATA_KEY_LABELS: Record<string, string> = {
   previous_source: '原封禁来源',
   url: '目标地址',
   disabled: '已停用',
+  enabled: '已启用',
   scopes: '权限范围',
   fields: '变更字段',
+  events: '订阅事件',
+  secret_prefix: '密钥前缀',
+  description: '备注',
+  delivery_id: '投递编号',
+  job_id: '任务编号',
+  consecutive_failures: '连续失败次数',
+  disabled_reason: '停用原因',
   link_quota: '月度配额',
   previous_link_quota: '原配额',
   rate_limit_per_second: '每秒限流',

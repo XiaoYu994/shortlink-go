@@ -6,6 +6,7 @@ import { LinkStatsPage } from '@/features/links/LinkStatsPage';
 import { LinksPage } from '@/features/links/LinksPage';
 import { MembersPage } from '@/features/members/MembersPage';
 import { OnboardingPage } from '@/features/orgs/OnboardingPage';
+import { WebhooksPage } from '@/features/webhooks/WebhooksPage';
 import { OrgRouteGuard, RootRedirect } from './AuthGuard';
 import { ROUTE_PATTERNS, routes } from './routes';
 
@@ -22,6 +23,7 @@ export function AppRouter() {
         <Route path="links/:code" element={<LinkStatsPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="api-keys" element={<APIKeysPage />} />
+        <Route path="webhooks" element={<WebhooksPage />} />
         <Route path="audit-logs" element={<AuditLogsPage />} />
       </Route>
 

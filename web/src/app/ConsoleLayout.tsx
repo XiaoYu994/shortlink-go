@@ -10,6 +10,7 @@ import {
   Plus,
   ScrollText,
   Users,
+  Webhook,
   X,
 } from 'lucide-react';
 import { NavLink, Outlet, useMatch, useNavigate } from 'react-router';
@@ -26,7 +27,12 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useLogout } from '@/features/auth/api';
-import { canManageAPIKeys, canReadAuditLogs, ROLE_LABELS } from '@/features/auth/permissions';
+import {
+  canManageAPIKeys,
+  canManageWebhooks,
+  canReadAuditLogs,
+  ROLE_LABELS,
+} from '@/features/auth/permissions';
 import { setLastOrgId } from '@/features/orgs/api';
 import { CreateOrgDialog } from '@/features/orgs/CreateOrgDialog';
 import { getErrorMessage } from '@/lib/api-client';
@@ -40,17 +46,20 @@ export function ConsoleLayout() {
   const navigate = useNavigate();
   const isMembersRoute = Boolean(useMatch(ROUTE_PATTERNS.orgMembers));
   const isAPIKeysRoute = Boolean(useMatch(ROUTE_PATTERNS.orgAPIKeys));
+  const isWebhooksRoute = Boolean(useMatch(ROUTE_PATTERNS.orgWebhooks));
   const isAuditLogsRoute = Boolean(useMatch(ROUTE_PATTERNS.orgAuditLogs));
   const logout = useLogout();
   const [createOrgOpen, setCreateOrgOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const keysLocked = !canManageAPIKeys(org.role);
+  const webhooksLocked = !canManageWebhooks(org.role);
   const auditLocked = !canReadAuditLogs(org.role);
   const navItems = [
     { to: routes.orgLinks(org.id), label: '短链管理', icon: Link2, locked: false },
     { to: routes.orgMembers(org.id), label: '成员与邀请', icon: Users, locked: false },
     { to: routes.orgAPIKeys(org.id), label: 'API Keys', icon: KeyRound, locked: keysLocked },
+    { to: routes.orgWebhooks(org.id), label: 'Webhooks', icon: Webhook, locked: webhooksLocked },
     { to: routes.orgAuditLogs(org.id), label: '审计日志', icon: ScrollText, locked: auditLocked },
   ];
 
@@ -66,9 +75,11 @@ export function ConsoleLayout() {
       ? 'members'
       : isAPIKeysRoute
         ? 'api-keys'
-        : isAuditLogsRoute
-          ? 'audit-logs'
-          : 'links';
+        : isWebhooksRoute
+          ? 'webhooks'
+          : isAuditLogsRoute
+            ? 'audit-logs'
+            : 'links';
     navigate(routes.orgSection(nextOrgId, section));
     setMobileMenuOpen(false);
   }

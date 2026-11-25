@@ -19,6 +19,7 @@ import (
 	"shortlink/internal/link"
 	"shortlink/internal/pgdb"
 	"shortlink/internal/pgredirect"
+	"shortlink/internal/webhook"
 )
 
 const (
@@ -63,12 +64,40 @@ inserted AS (
     WHERE EXISTS (SELECT 1 FROM quota)
     RETURNING id, code, url, expires_at, created_at, tenant_id
 ),
+event_meta AS (
+    SELECT 'evt_' || gen_random_uuid()::text AS event_id
+),
 enqueued AS (
     INSERT INTO jobs (kind, tenant_id, payload)
     SELECT $8::text,
            i.tenant_id,
            jsonb_build_object('link_id', i.id, 'code', i.code, 'url', i.url)
     FROM inserted i
+),
+webhook_jobs AS (
+    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+    SELECT $11::text,
+           i.tenant_id,
+           jsonb_build_object(
+               'webhook_id', w.id,
+               'event_id', em.event_id,
+               'event', $12::text,
+               'occurred_at', i.created_at,
+               'data', jsonb_strip_nulls(jsonb_build_object(
+                   'link_id', i.id,
+                   'code', i.code,
+                   'url', i.url,
+                   'expires_at', i.expires_at,
+                   'created_at', i.created_at
+               ))
+           ),
+           $13::int
+    FROM inserted i
+    CROSS JOIN event_meta em
+    JOIN webhooks w
+      ON w.tenant_id = i.tenant_id
+     AND w.enabled = TRUE
+     AND $12::text = ANY(w.events)
 ),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
@@ -161,6 +190,7 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 		err = s.db.QueryRowContext(ctx, insertLinkSQL,
 			code, l.URL, l.ExpiresAt, l.TenantID, actorKind, actorID, reqID,
 			job.KindLinkRiskScan, string(audit.ActionLinkCreate), string(audit.TargetLink),
+			job.KindWebhookDeliver, string(webhook.EventLinkCreated), webhook.DefaultMaxAttempts,
 		).Scan(&l.ID, &l.CreatedAt)
 		if err == nil {
 			l.Code = code

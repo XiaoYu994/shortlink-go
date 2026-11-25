@@ -45,20 +45,26 @@ func (k ActorKind) Valid() bool {
 type Action string
 
 const (
-	ActionOrgCreate          Action = "org.create"
-	ActionTenantLimitsUpdate Action = "tenant.limits_update"
-	ActionLinkCreate         Action = "link.create"
-	ActionLinkUpdate         Action = "link.update"
-	ActionLinkDelete         Action = "link.delete"
-	ActionLinkBan            Action = "link.ban"
-	ActionLinkUnban          Action = "link.unban"
-	ActionMemberRoleUpdate   Action = "member.role_update"
-	ActionMemberRemove       Action = "member.remove"
-	ActionInvitationCreate   Action = "invitation.create"
-	ActionInvitationRevoke   Action = "invitation.revoke"
-	ActionInvitationRedeem   Action = "invitation.redeem"
-	ActionAPIKeyIssue        Action = "apikey.issue"
-	ActionAPIKeyRevoke       Action = "apikey.revoke"
+	ActionOrgCreate           Action = "org.create"
+	ActionTenantLimitsUpdate  Action = "tenant.limits_update"
+	ActionLinkCreate          Action = "link.create"
+	ActionLinkUpdate          Action = "link.update"
+	ActionLinkDelete          Action = "link.delete"
+	ActionLinkBan             Action = "link.ban"
+	ActionLinkUnban           Action = "link.unban"
+	ActionMemberRoleUpdate    Action = "member.role_update"
+	ActionMemberRemove        Action = "member.remove"
+	ActionInvitationCreate    Action = "invitation.create"
+	ActionInvitationRevoke    Action = "invitation.revoke"
+	ActionInvitationRedeem    Action = "invitation.redeem"
+	ActionAPIKeyIssue         Action = "apikey.issue"
+	ActionAPIKeyRevoke        Action = "apikey.revoke"
+	ActionWebhookCreate       Action = "webhook.create"
+	ActionWebhookUpdate       Action = "webhook.update"
+	ActionWebhookDelete       Action = "webhook.delete"
+	ActionWebhookRotateSecret Action = "webhook.rotate_secret"
+	ActionWebhookTest         Action = "webhook.test"
+	ActionWebhookAutoDisable  Action = "webhook.auto_disable"
 )
 
 // AllActions 返回全部受支持的审计动作列表；每次返回新切片，避免调用方修改全局切片。
@@ -78,6 +84,12 @@ func AllActions() []Action {
 		ActionInvitationRedeem,
 		ActionAPIKeyIssue,
 		ActionAPIKeyRevoke,
+		ActionWebhookCreate,
+		ActionWebhookUpdate,
+		ActionWebhookDelete,
+		ActionWebhookRotateSecret,
+		ActionWebhookTest,
+		ActionWebhookAutoDisable,
 	}
 }
 
@@ -97,7 +109,13 @@ func (a Action) Valid() bool {
 		ActionInvitationRevoke,
 		ActionInvitationRedeem,
 		ActionAPIKeyIssue,
-		ActionAPIKeyRevoke:
+		ActionAPIKeyRevoke,
+		ActionWebhookCreate,
+		ActionWebhookUpdate,
+		ActionWebhookDelete,
+		ActionWebhookRotateSecret,
+		ActionWebhookTest,
+		ActionWebhookAutoDisable:
 		return true
 	default:
 		return false
@@ -113,12 +131,13 @@ const (
 	TargetMember     TargetType = "member"
 	TargetInvitation TargetType = "invitation"
 	TargetAPIKey     TargetType = "api_key"
+	TargetWebhook    TargetType = "webhook"
 )
 
 // Valid 报告 t 是否属于已定义的审计目标资源类型。
 func (t TargetType) Valid() bool {
 	switch t {
-	case TargetOrg, TargetLink, TargetMember, TargetInvitation, TargetAPIKey:
+	case TargetOrg, TargetLink, TargetMember, TargetInvitation, TargetAPIKey, TargetWebhook:
 		return true
 	default:
 		return false

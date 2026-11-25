@@ -3,11 +3,9 @@ package risk
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -23,164 +21,8 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/safehttp"
 )
-
-func TestIsBlockedAddr(t *testing.T) {
-	tests := []struct {
-		ip      string
-		blocked bool
-	}{
-		{"127.0.0.1", true},
-		{"127.0.1.1", true},
-		{"::1", true},
-		{"::ffff:127.0.0.1", true},
-		{"10.0.0.1", true},
-		{"172.16.0.1", true},
-		{"192.168.1.1", true},
-		{"169.254.169.254", true},
-		{"100.64.0.1", true},
-		{"0.0.0.0", true},
-		{"fe80::1", true},
-		{"fc00::1", true},
-		{"2001:db8::1", true},
-		{"64:ff9b::10.0.0.1", true},
-		{"64:ff9b:1::10.0.0.1", true},
-		{"2002:0a00:0001::1", true},
-		{"2001::1", true},
-		{"fec0::1", true},
-		{"100::1", true},
-		{"93.184.216.34", false},
-		{"1.1.1.1", false},
-		{"2606:2800:220:1:248:1893:25c8:1946", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.ip, func(t *testing.T) {
-			addr, err := netip.ParseAddr(tt.ip)
-			if err != nil {
-				t.Fatalf("ParseAddr(%q): %v", tt.ip, err)
-			}
-			if got := IsBlockedAddr(addr); got != tt.blocked {
-				t.Errorf("IsBlockedAddr(%q) = %v, want %v", tt.ip, got, tt.blocked)
-			}
-		})
-	}
-}
-
-type stubResolver struct {
-	ips map[string][]netip.Addr
-}
-
-func (r stubResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
-	return r.ips[host], nil
-}
-
-func TestSafeHTTPClientBlocksSSRFAndRedirects(t *testing.T) {
-	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/redirect-loopback":
-			http.Redirect(w, r, "http://127.0.0.1:8081/metrics", http.StatusFound)
-		case "/redirect-file":
-			w.Header().Set("Location", "file:///etc/passwd")
-			w.WriteHeader(http.StatusFound)
-		case "/redirect-chain":
-			http.Redirect(w, r, "/redirect-chain", http.StatusFound)
-		default:
-			_, _ = w.Write([]byte("ok"))
-		}
-	}))
-	defer localSrv.Close()
-
-	u, err := url.Parse(localSrv.URL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
-
-	t.Run("blocks loopback directly", func(t *testing.T) {
-		client := NewSafeHTTPClient(HTTPClientOptions{Timeout: time.Second})
-		resp, err := client.Get(localSrv.URL)
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if !errors.Is(err, ErrBlockedAddress) {
-			t.Fatalf("Get loopback error = %v, want ErrBlockedAddress", err)
-		}
-	})
-
-	t.Run("blocks DNS resolving to private ip", func(t *testing.T) {
-		client := NewSafeHTTPClient(HTTPClientOptions{
-			Timeout: time.Second,
-			Resolver: stubResolver{ips: map[string][]netip.Addr{
-				"rebind.example": {netip.MustParseAddr("169.254.169.254")},
-			}},
-		})
-		resp, err := client.Get("http://rebind.example/latest")
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if !errors.Is(err, ErrBlockedAddress) {
-			t.Fatalf("Get private DNS error = %v, want ErrBlockedAddress", err)
-		}
-	})
-
-	t.Run("blocks redirect from allowed host to other loopback", func(t *testing.T) {
-		client := NewSafeHTTPClient(HTTPClientOptions{
-			Timeout:          time.Second,
-			AllowedHostPorts: []string{u.Host},
-		})
-		resp, err := client.Get(localSrv.URL + "/redirect-loopback")
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if !errors.Is(err, ErrBlockedAddress) {
-			t.Fatalf("redirect to loopback error = %v, want ErrBlockedAddress", err)
-		}
-	})
-
-	t.Run("blocks redirect to non-http scheme", func(t *testing.T) {
-		client := NewSafeHTTPClient(HTTPClientOptions{
-			Timeout:          time.Second,
-			AllowedHostPorts: []string{u.Host},
-		})
-		resp, err := client.Get(localSrv.URL + "/redirect-file")
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if !errors.Is(err, ErrInvalidScheme) {
-			t.Fatalf("redirect to file error = %v, want ErrInvalidScheme", err)
-		}
-	})
-
-	t.Run("blocks redirect loop over max hops", func(t *testing.T) {
-		client := NewSafeHTTPClient(HTTPClientOptions{
-			Timeout:          time.Second,
-			MaxRedirects:     2,
-			AllowedHostPorts: []string{u.Host},
-		})
-		resp, err := client.Get(localSrv.URL + "/redirect-chain")
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if !errors.Is(err, ErrTooManyRedirects) {
-			t.Fatalf("redirect loop error = %v, want ErrTooManyRedirects", err)
-		}
-	})
-
-	t.Run("blocks non-standard port on public ip", func(t *testing.T) {
-		client := NewSafeHTTPClient(HTTPClientOptions{
-			Timeout: time.Second,
-			Resolver: stubResolver{ips: map[string][]netip.Addr{
-				"public.example": {netip.MustParseAddr("93.184.216.34")},
-			}},
-		})
-		resp, err := client.Get("http://public.example:8080/probe")
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if !errors.Is(err, ErrBlockedPort) {
-			t.Fatalf("Get non-80/443 port error = %v, want ErrBlockedPort", err)
-		}
-	})
-}
 
 func TestRuleScannerBodyLimitAndRules(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +44,7 @@ func TestRuleScannerBodyLimitAndRules(t *testing.T) {
 
 	u, _ := url.Parse(srv.URL)
 	scanner := NewRuleScanner(RuleScannerOptions{
-		HTTPClient:   NewSafeHTTPClient(HTTPClientOptions{Timeout: time.Second, AllowedHostPorts: []string{u.Host}}),
+		HTTPClient:   NewSafeHTTPClient(safehttp.ClientOptions{Timeout: time.Second, AllowedHostPorts: []string{u.Host}}),
 		MaxBodyBytes: 64,
 		BlockedHosts: map[string]link.BanReason{"evil.test": link.BanReasonMalware},
 	})
@@ -253,20 +95,6 @@ func TestParseKeywordRules(t *testing.T) {
 	}
 	if _, err := ParseKeywordRules("foo:unknown_reason"); err == nil {
 		t.Error("expected error for invalid reason")
-	}
-}
-
-func TestHostLimiter(t *testing.T) {
-	lim := NewHostLimiter(1)
-	if _, ok := lim.Allow("example.com"); !ok {
-		t.Fatal("first request should be allowed")
-	}
-	delay, ok := lim.Allow("example.com")
-	if ok || delay <= 0 {
-		t.Errorf("second immediate request = (%v, %v), want (delay>0, false)", delay, ok)
-	}
-	if _, ok := lim.Allow("other.com"); !ok {
-		t.Error("different host should not be affected")
 	}
 }
 
@@ -403,7 +231,7 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 	t.Run("permanent on blocked SSRF address and malformed payload", func(t *testing.T) {
 		h := NewHandler(HandlerOptions{
 			Scanner: &fakeScanner{fn: func(context.Context, string) (Verdict, error) {
-				return Verdict{}, fmt.Errorf("fetch: %w", ErrBlockedAddress)
+				return Verdict{}, fmt.Errorf("fetch: %w", safehttp.ErrBlockedAddress)
 			}},
 			Banner: &fakeBanner{},
 		})
@@ -416,7 +244,7 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 	})
 
 	t.Run("defers on host rate limit", func(t *testing.T) {
-		lim := NewHostLimiter(1)
+		lim := safehttp.NewHostLimiter(1)
 		lim.Allow("slow.example") // 消耗掉唯一令牌
 		h := NewHandler(HandlerOptions{
 			Scanner: &fakeScanner{fn: func(context.Context, string) (Verdict, error) {

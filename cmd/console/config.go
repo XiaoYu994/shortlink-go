@@ -14,7 +14,9 @@ import (
 	"shortlink/internal/job"
 	"shortlink/internal/link"
 	"shortlink/internal/logx"
+	"shortlink/internal/mailer"
 	"shortlink/internal/risk"
+	"shortlink/internal/webhook"
 )
 
 const (
@@ -33,12 +35,14 @@ const (
 type ConsoleConfig struct {
 	config.BaseConfig
 
-	OIDC              OIDCConfig
-	GitHub            GitHubConfig
-	WebDistDir        string
-	PublicBaseURL     string
-	TrustProxyHeaders bool
-	TrustedProxyCIDRs []netip.Prefix
+	OIDC                OIDCConfig
+	GitHub              GitHubConfig
+	WebDistDir          string
+	PublicBaseURL       string
+	WebhookSecretKey    string
+	WebhookAllowedPorts []int
+	TrustProxyHeaders   bool
+	TrustedProxyCIDRs   []netip.Prefix
 	// IPRateLimit 与 IPRateBurst 控制管理 API 鉴权前按源 IP 限流（0 表示关闭）。
 	IPRateLimit int
 	IPRateBurst int
@@ -106,6 +110,8 @@ func (cfg ConsoleConfig) LogValue() slog.Value {
 		slog.Any("github", cfg.GitHub.LogValue()),
 		slog.String("web_dist_dir", cfg.WebDistDir),
 		slog.String("public_base_url", cfg.PublicBaseURL),
+		slog.String("webhook_secret_key", logx.RedactSecret(cfg.WebhookSecretKey)),
+		slog.Int("webhook_allowed_ports_count", len(cfg.WebhookAllowedPorts)),
 		slog.Bool("trust_proxy_headers", cfg.TrustProxyHeaders),
 		slog.Int("trusted_proxy_cidrs_count", len(cfg.TrustedProxyCIDRs)),
 		slog.Int("ip_rate_limit", cfg.IPRateLimit),
@@ -125,27 +131,37 @@ Addr 来自 WORKER_ADDR，默认空表示不开启运维 HTTP 端口；设置后
 type WorkerConfig struct {
 	config.BaseConfig
 
-	Concurrency         int
-	MaxPerTenant        int
-	PollInterval        time.Duration
-	LeaseDuration       time.Duration
-	JobTimeout          time.Duration
-	ReapInterval        time.Duration
-	CleanupInterval     time.Duration
-	SessionRetention    time.Duration
-	DoneJobRetention    time.Duration
-	DeadJobRetention    time.Duration
-	InvitationRetention time.Duration
-	StatsRetentionDays  int
-	AuditRetentionDays  int
-	RiskFetchTimeout    time.Duration
-	RiskHostRateLimit   int
-	RiskBlockedHosts    map[string]link.BanReason
-	RiskBlockedKeywords map[string]link.BanReason
-	RiskAllowedPorts    []int
+	Concurrency                   int
+	MaxPerTenant                  int
+	PollInterval                  time.Duration
+	LeaseDuration                 time.Duration
+	JobTimeout                    time.Duration
+	ReapInterval                  time.Duration
+	CleanupInterval               time.Duration
+	SessionRetention              time.Duration
+	DoneJobRetention              time.Duration
+	DeadJobRetention              time.Duration
+	InvitationRetention           time.Duration
+	StatsRetentionDays            int
+	AuditRetentionDays            int
+	RiskFetchTimeout              time.Duration
+	RiskHostRateLimit             int
+	RiskBlockedHosts              map[string]link.BanReason
+	RiskBlockedKeywords           map[string]link.BanReason
+	RiskAllowedPorts              []int
+	WebhookSecretKey              string
+	WebhookAllowedPorts           []int
+	WebhookTimeout                time.Duration
+	WebhookHostRateLimit          int
+	WebhookRetryBaseDelay         time.Duration
+	WebhookRetryMaxDelay          time.Duration
+	WebhookMaxConsecutiveFailures int
+	WebhookDeliveryRetention      time.Duration
+	ConsolePublicURL              string
+	SMTP                          mailer.SMTPConfig
 }
 
-// LogValue 掩码基础连接串，保留后台调度与风控非敏感参数。
+// LogValue 掩码基础连接串、Webhook 主密钥和 SMTP 密码，保留非敏感调度与风控参数。
 func (cfg WorkerConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
@@ -167,6 +183,16 @@ func (cfg WorkerConfig) LogValue() slog.Value {
 		slog.Int("risk_blocked_hosts_count", len(cfg.RiskBlockedHosts)),
 		slog.Int("risk_blocked_keywords_count", len(cfg.RiskBlockedKeywords)),
 		slog.Int("risk_allowed_ports_count", len(cfg.RiskAllowedPorts)),
+		slog.String("webhook_secret_key", logx.RedactSecret(cfg.WebhookSecretKey)),
+		slog.Int("webhook_allowed_ports_count", len(cfg.WebhookAllowedPorts)),
+		slog.Duration("webhook_timeout", cfg.WebhookTimeout),
+		slog.Int("webhook_host_rate_limit", cfg.WebhookHostRateLimit),
+		slog.Duration("webhook_retry_base_delay", cfg.WebhookRetryBaseDelay),
+		slog.Duration("webhook_retry_max_delay", cfg.WebhookRetryMaxDelay),
+		slog.Int("webhook_max_consecutive_failures", cfg.WebhookMaxConsecutiveFailures),
+		slog.Duration("webhook_delivery_retention", cfg.WebhookDeliveryRetention),
+		slog.String("console_public_url", cfg.ConsolePublicURL),
+		slog.Any("smtp", cfg.SMTP.LogValue()),
 	)
 }
 
@@ -204,10 +230,23 @@ func loadConsoleConfig() (ConsoleConfig, error) {
 			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 			RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
 		},
-		WebDistDir:    strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
-		PublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
-		IPRateLimit:   defaultConsoleIPRateLimit,
-		IPRateBurst:   defaultConsoleIPRateBurst,
+		WebDistDir:       strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
+		PublicBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
+		WebhookSecretKey: strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
+		IPRateLimit:      defaultConsoleIPRateLimit,
+		IPRateBurst:      defaultConsoleIPRateBurst,
+	}
+	if cfg.WebhookSecretKey != "" {
+		if _, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey); err != nil {
+			return ConsoleConfig{}, err
+		}
+	}
+	if raw := os.Getenv("WEBHOOK_ALLOWED_PORTS"); raw != "" {
+		ports, err := config.ParsePorts(raw)
+		if err != nil {
+			return ConsoleConfig{}, fmt.Errorf("WEBHOOK_ALLOWED_PORTS: %w", err)
+		}
+		cfg.WebhookAllowedPorts = ports
 	}
 	if cfg.OpsAddr != "" && cfg.OpsAddr == cfg.Addr {
 		return ConsoleConfig{}, errors.New("CONSOLE_OPS_ADDR must differ from CONSOLE_ADDR")
@@ -270,22 +309,39 @@ func loadWorkerConfig() (WorkerConfig, error) {
 	}
 
 	cfg := WorkerConfig{
-		BaseConfig:          base,
-		Concurrency:         job.DefaultConcurrency,
-		MaxPerTenant:        job.DefaultMaxPerTenant,
-		PollInterval:        job.DefaultPollInterval,
-		LeaseDuration:       job.DefaultLeaseDuration,
-		JobTimeout:          job.DefaultJobTimeout,
-		ReapInterval:        job.DefaultReapInterval,
-		CleanupInterval:     defaultWorkerCleanupInterval,
-		SessionRetention:    defaultWorkerRetention,
-		DoneJobRetention:    defaultWorkerRetention,
-		DeadJobRetention:    defaultWorkerLongRetention,
-		InvitationRetention: defaultWorkerLongRetention,
-		StatsRetentionDays:  defaultStatsRetentionDays,
-		AuditRetentionDays:  defaultAuditRetentionDays,
-		RiskFetchTimeout:    risk.DefaultFetchTimeout,
-		RiskHostRateLimit:   risk.DefaultHostRateLimit,
+		BaseConfig:                    base,
+		Concurrency:                   job.DefaultConcurrency,
+		MaxPerTenant:                  job.DefaultMaxPerTenant,
+		PollInterval:                  job.DefaultPollInterval,
+		LeaseDuration:                 job.DefaultLeaseDuration,
+		JobTimeout:                    job.DefaultJobTimeout,
+		ReapInterval:                  job.DefaultReapInterval,
+		CleanupInterval:               defaultWorkerCleanupInterval,
+		SessionRetention:              defaultWorkerRetention,
+		DoneJobRetention:              defaultWorkerRetention,
+		DeadJobRetention:              defaultWorkerLongRetention,
+		InvitationRetention:           defaultWorkerLongRetention,
+		StatsRetentionDays:            defaultStatsRetentionDays,
+		AuditRetentionDays:            defaultAuditRetentionDays,
+		RiskFetchTimeout:              risk.DefaultFetchTimeout,
+		RiskHostRateLimit:             risk.DefaultHostRateLimit,
+		WebhookSecretKey:              strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
+		WebhookTimeout:                webhook.DefaultTimeout,
+		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
+		WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
+		WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
+		WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
+		WebhookDeliveryRetention:      webhook.DefaultDeliveryRetention,
+		ConsolePublicURL:              strings.TrimRight(strings.TrimSpace(os.Getenv("CONSOLE_PUBLIC_URL")), "/"),
+		SMTP: mailer.SMTPConfig{
+			Host:     strings.TrimSpace(os.Getenv("SMTP_HOST")),
+			Port:     mailer.DefaultSMTPPort,
+			Username: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
+			Password: os.Getenv("SMTP_PASSWORD"),
+			From:     strings.TrimSpace(os.Getenv("SMTP_FROM")),
+			TLSMode:  strings.ToLower(config.EnvString("SMTP_TLS_MODE", mailer.TLSModeStartTLS)),
+			Timeout:  mailer.DefaultSMTPTimeout,
+		},
 	}
 
 	if cfg.Concurrency, err = config.EnvInt("WORKER_CONCURRENCY", cfg.Concurrency); err != nil {
@@ -353,6 +409,37 @@ func loadWorkerConfig() (WorkerConfig, error) {
 			return WorkerConfig{}, fmt.Errorf("RISK_ALLOWED_PORTS: %w", err)
 		}
 		cfg.RiskAllowedPorts = ports
+	}
+	if raw := os.Getenv("WEBHOOK_ALLOWED_PORTS"); raw != "" {
+		ports, err := config.ParsePorts(raw)
+		if err != nil {
+			return WorkerConfig{}, fmt.Errorf("WEBHOOK_ALLOWED_PORTS: %w", err)
+		}
+		cfg.WebhookAllowedPorts = ports
+	}
+	if cfg.WebhookTimeout, err = config.EnvDuration("WEBHOOK_TIMEOUT", cfg.WebhookTimeout); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.WebhookHostRateLimit, err = config.EnvInt("WEBHOOK_HOST_RATE_LIMIT", cfg.WebhookHostRateLimit); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.WebhookRetryBaseDelay, err = config.EnvDuration("WEBHOOK_RETRY_BASE_DELAY", cfg.WebhookRetryBaseDelay); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.WebhookRetryMaxDelay, err = config.EnvDuration("WEBHOOK_RETRY_MAX_DELAY", cfg.WebhookRetryMaxDelay); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.WebhookMaxConsecutiveFailures, err = config.EnvInt("WEBHOOK_MAX_CONSECUTIVE_FAILURES", cfg.WebhookMaxConsecutiveFailures); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.WebhookDeliveryRetention, err = config.EnvDuration("WORKER_WEBHOOK_DELIVERY_RETENTION", cfg.WebhookDeliveryRetention); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.SMTP.Port, err = config.EnvInt("SMTP_PORT", cfg.SMTP.Port); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.SMTP.Timeout, err = config.EnvDuration("SMTP_TIMEOUT", cfg.SMTP.Timeout); err != nil {
+		return WorkerConfig{}, err
 	}
 
 	if err := validateWorker(cfg); err != nil {
@@ -434,6 +521,57 @@ func validateWorker(cfg WorkerConfig) error {
 	}
 	if cfg.RiskHostRateLimit < 0 {
 		return errors.New("RISK_HOST_RATE_LIMIT must not be negative")
+	}
+	if cfg.WebhookSecretKey != "" {
+		if _, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey); err != nil {
+			return err
+		}
+	}
+	if cfg.WebhookTimeout <= 0 {
+		return errors.New("WEBHOOK_TIMEOUT must be positive")
+	}
+	if cfg.WebhookTimeout >= cfg.JobTimeout {
+		return errors.New("WEBHOOK_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
+	}
+	if cfg.WebhookHostRateLimit < 0 {
+		return errors.New("WEBHOOK_HOST_RATE_LIMIT must not be negative")
+	}
+	if cfg.WebhookRetryBaseDelay <= 0 {
+		return errors.New("WEBHOOK_RETRY_BASE_DELAY must be positive")
+	}
+	if cfg.WebhookRetryMaxDelay < cfg.WebhookRetryBaseDelay {
+		return errors.New("WEBHOOK_RETRY_MAX_DELAY must not be less than WEBHOOK_RETRY_BASE_DELAY")
+	}
+	if cfg.WebhookMaxConsecutiveFailures < 0 {
+		return errors.New("WEBHOOK_MAX_CONSECUTIVE_FAILURES must not be negative")
+	}
+	if cfg.WebhookDeliveryRetention < 0 {
+		return errors.New("WORKER_WEBHOOK_DELIVERY_RETENTION must not be negative")
+	}
+	if cfg.ConsolePublicURL != "" {
+		if err := config.ValidateIssuerURL("CONSOLE_PUBLIC_URL", cfg.ConsolePublicURL); err != nil {
+			return err
+		}
+	}
+	if cfg.SMTP.Port < 1 || cfg.SMTP.Port > 65535 {
+		return errors.New("SMTP_PORT must be in 1..65535")
+	}
+	if !mailer.ValidTLSMode(cfg.SMTP.TLSMode) {
+		return fmt.Errorf("SMTP_TLS_MODE must be starttls, smtps, or none, got %q", cfg.SMTP.TLSMode)
+	}
+	if cfg.SMTP.Timeout <= 0 {
+		return errors.New("SMTP_TIMEOUT must be positive")
+	}
+	if cfg.SMTP.Timeout >= cfg.JobTimeout {
+		return errors.New("SMTP_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
+	}
+	if (cfg.SMTP.Username == "") != (cfg.SMTP.Password == "") {
+		return errors.New("SMTP_USERNAME and SMTP_PASSWORD must both be set or both be empty")
+	}
+	if cfg.SMTP.Enabled() {
+		if _, err := mailer.NewSMTPSender(cfg.SMTP); err != nil {
+			return err
+		}
 	}
 	return nil
 }

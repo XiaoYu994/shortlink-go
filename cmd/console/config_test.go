@@ -16,50 +16,68 @@ import (
 	"shortlink/internal/job"
 	"shortlink/internal/link"
 	"shortlink/internal/logx"
+	"shortlink/internal/mailer"
 	"shortlink/internal/pgdb"
 	"shortlink/internal/risk"
+	"shortlink/internal/webhook"
 )
 
 func baseConsoleTestEnv() map[string]string {
 	return map[string]string{
-		"ADDR":                        "",
-		"CONSOLE_ADDR":                "",
-		"CONSOLE_OPS_ADDR":            "",
-		"DATABASE_URL":                "postgres://localhost/shortlink",
-		"REDIS_URL":                   "redis://localhost:6379/0",
-		"LOG_LEVEL":                   "",
-		"LOG_FORMAT":                  "",
-		"PPROF_ADDR":                  "",
-		"TRUST_PROXY_HEADERS":         "",
-		"TRUSTED_PROXY_CIDRS":         "",
-		"CONSOLE_IP_RATE_LIMIT":       "",
-		"CONSOLE_IP_RATE_BURST":       "",
-		"OIDC_ISSUER":                 "",
-		"OIDC_CLIENT_ID":              "",
-		"OIDC_CLIENT_SECRET":          "",
-		"OIDC_REDIRECT_URL":           "",
-		"GITHUB_CLIENT_ID":            "",
-		"GITHUB_CLIENT_SECRET":        "",
-		"GITHUB_REDIRECT_URL":         "",
-		"WEB_DIST_DIR":                "",
-		"PUBLIC_BASE_URL":             "",
-		"WORKER_ADDR":                 "",
-		"WORKER_CONCURRENCY":          "",
-		"WORKER_MAX_PER_TENANT":       "",
-		"WORKER_POLL_INTERVAL":        "",
-		"WORKER_LEASE_DURATION":       "",
-		"WORKER_JOB_TIMEOUT":          "",
-		"WORKER_REAP_INTERVAL":        "",
-		"WORKER_CLEANUP_INTERVAL":     "",
-		"WORKER_SESSION_RETENTION":    "",
-		"WORKER_DONE_JOB_RETENTION":   "",
-		"WORKER_DEAD_JOB_RETENTION":   "",
-		"WORKER_INVITATION_RETENTION": "",
-		"RISK_FETCH_TIMEOUT":          "",
-		"RISK_HOST_RATE_LIMIT":        "",
-		"RISK_BLOCKED_HOSTS":          "",
-		"RISK_BLOCKED_KEYWORDS":       "",
-		"RISK_ALLOWED_PORTS":          "",
+		"ADDR":                              "",
+		"CONSOLE_ADDR":                      "",
+		"CONSOLE_OPS_ADDR":                  "",
+		"DATABASE_URL":                      "postgres://localhost/shortlink",
+		"REDIS_URL":                         "redis://localhost:6379/0",
+		"LOG_LEVEL":                         "",
+		"LOG_FORMAT":                        "",
+		"PPROF_ADDR":                        "",
+		"TRUST_PROXY_HEADERS":               "",
+		"TRUSTED_PROXY_CIDRS":               "",
+		"CONSOLE_IP_RATE_LIMIT":             "",
+		"CONSOLE_IP_RATE_BURST":             "",
+		"OIDC_ISSUER":                       "",
+		"OIDC_CLIENT_ID":                    "",
+		"OIDC_CLIENT_SECRET":                "",
+		"OIDC_REDIRECT_URL":                 "",
+		"GITHUB_CLIENT_ID":                  "",
+		"GITHUB_CLIENT_SECRET":              "",
+		"GITHUB_REDIRECT_URL":               "",
+		"WEB_DIST_DIR":                      "",
+		"PUBLIC_BASE_URL":                   "",
+		"WORKER_ADDR":                       "",
+		"WORKER_CONCURRENCY":                "",
+		"WORKER_MAX_PER_TENANT":             "",
+		"WORKER_POLL_INTERVAL":              "",
+		"WORKER_LEASE_DURATION":             "",
+		"WORKER_JOB_TIMEOUT":                "",
+		"WORKER_REAP_INTERVAL":              "",
+		"WORKER_CLEANUP_INTERVAL":           "",
+		"WORKER_SESSION_RETENTION":          "",
+		"WORKER_DONE_JOB_RETENTION":         "",
+		"WORKER_DEAD_JOB_RETENTION":         "",
+		"WORKER_INVITATION_RETENTION":       "",
+		"RISK_FETCH_TIMEOUT":                "",
+		"RISK_HOST_RATE_LIMIT":              "",
+		"RISK_BLOCKED_HOSTS":                "",
+		"RISK_BLOCKED_KEYWORDS":             "",
+		"RISK_ALLOWED_PORTS":                "",
+		"WEBHOOK_SECRET_KEY":                "",
+		"WEBHOOK_ALLOWED_PORTS":             "",
+		"WEBHOOK_TIMEOUT":                   "",
+		"WEBHOOK_HOST_RATE_LIMIT":           "",
+		"WEBHOOK_RETRY_BASE_DELAY":          "",
+		"WEBHOOK_RETRY_MAX_DELAY":           "",
+		"WEBHOOK_MAX_CONSECUTIVE_FAILURES":  "",
+		"WORKER_WEBHOOK_DELIVERY_RETENTION": "",
+		"CONSOLE_PUBLIC_URL":                "",
+		"SMTP_HOST":                         "",
+		"SMTP_PORT":                         "",
+		"SMTP_USERNAME":                     "",
+		"SMTP_PASSWORD":                     "",
+		"SMTP_FROM":                         "",
+		"SMTP_TLS_MODE":                     "",
+		"SMTP_TIMEOUT":                      "",
 	}
 }
 
@@ -293,22 +311,33 @@ func TestLoadWorkerConfig(t *testing.T) {
 	base := baseConsoleTestEnv()
 
 	defaults := WorkerConfig{
-		BaseConfig:          defaultBaseConfig(""),
-		Concurrency:         job.DefaultConcurrency,
-		MaxPerTenant:        job.DefaultMaxPerTenant,
-		PollInterval:        job.DefaultPollInterval,
-		LeaseDuration:       job.DefaultLeaseDuration,
-		JobTimeout:          job.DefaultJobTimeout,
-		ReapInterval:        job.DefaultReapInterval,
-		CleanupInterval:     defaultWorkerCleanupInterval,
-		SessionRetention:    defaultWorkerRetention,
-		DoneJobRetention:    defaultWorkerRetention,
-		DeadJobRetention:    defaultWorkerLongRetention,
-		InvitationRetention: defaultWorkerLongRetention,
-		StatsRetentionDays:  defaultStatsRetentionDays,
-		AuditRetentionDays:  defaultAuditRetentionDays,
-		RiskFetchTimeout:    risk.DefaultFetchTimeout,
-		RiskHostRateLimit:   risk.DefaultHostRateLimit,
+		BaseConfig:                    defaultBaseConfig(""),
+		Concurrency:                   job.DefaultConcurrency,
+		MaxPerTenant:                  job.DefaultMaxPerTenant,
+		PollInterval:                  job.DefaultPollInterval,
+		LeaseDuration:                 job.DefaultLeaseDuration,
+		JobTimeout:                    job.DefaultJobTimeout,
+		ReapInterval:                  job.DefaultReapInterval,
+		CleanupInterval:               defaultWorkerCleanupInterval,
+		SessionRetention:              defaultWorkerRetention,
+		DoneJobRetention:              defaultWorkerRetention,
+		DeadJobRetention:              defaultWorkerLongRetention,
+		InvitationRetention:           defaultWorkerLongRetention,
+		StatsRetentionDays:            defaultStatsRetentionDays,
+		AuditRetentionDays:            defaultAuditRetentionDays,
+		RiskFetchTimeout:              risk.DefaultFetchTimeout,
+		RiskHostRateLimit:             risk.DefaultHostRateLimit,
+		WebhookTimeout:                webhook.DefaultTimeout,
+		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
+		WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
+		WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
+		WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
+		WebhookDeliveryRetention:      webhook.DefaultDeliveryRetention,
+		SMTP: mailer.SMTPConfig{
+			Port:    mailer.DefaultSMTPPort,
+			TLSMode: mailer.TLSModeStartTLS,
+			Timeout: mailer.DefaultSMTPTimeout,
+		},
 	}
 
 	tests := []struct {
@@ -342,26 +371,100 @@ func TestLoadWorkerConfig(t *testing.T) {
 				"RISK_ALLOWED_PORTS":          "80, 443, 8443",
 			},
 			want: WorkerConfig{
-				BaseConfig:          defaultBaseConfig("127.0.0.1:8082"),
-				Concurrency:         16,
-				MaxPerTenant:        2,
-				PollInterval:        100 * time.Millisecond,
-				LeaseDuration:       45 * time.Second,
-				JobTimeout:          15 * time.Second,
-				ReapInterval:        10 * time.Second,
-				CleanupInterval:     30 * time.Minute,
-				SessionRetention:    24 * time.Hour,
-				DoneJobRetention:    48 * time.Hour,
-				DeadJobRetention:    168 * time.Hour,
-				InvitationRetention: 168 * time.Hour,
-				StatsRetentionDays:  45,
-				AuditRetentionDays:  365,
-				RiskFetchTimeout:    3 * time.Second,
-				RiskHostRateLimit:   5,
-				RiskBlockedHosts:    map[string]link.BanReason{"bad.example": link.BanReasonMalware},
-				RiskBlockedKeywords: map[string]link.BanReason{"smoke-phish": link.BanReasonPhishing},
-				RiskAllowedPorts:    []int{80, 443, 8443},
+				BaseConfig:                    defaultBaseConfig("127.0.0.1:8082"),
+				Concurrency:                   16,
+				MaxPerTenant:                  2,
+				PollInterval:                  100 * time.Millisecond,
+				LeaseDuration:                 45 * time.Second,
+				JobTimeout:                    15 * time.Second,
+				ReapInterval:                  10 * time.Second,
+				CleanupInterval:               30 * time.Minute,
+				SessionRetention:              24 * time.Hour,
+				DoneJobRetention:              48 * time.Hour,
+				DeadJobRetention:              168 * time.Hour,
+				InvitationRetention:           168 * time.Hour,
+				StatsRetentionDays:            45,
+				AuditRetentionDays:            365,
+				RiskFetchTimeout:              3 * time.Second,
+				RiskHostRateLimit:             5,
+				RiskBlockedHosts:              map[string]link.BanReason{"bad.example": link.BanReasonMalware},
+				RiskBlockedKeywords:           map[string]link.BanReason{"smoke-phish": link.BanReasonPhishing},
+				RiskAllowedPorts:              []int{80, 443, 8443},
+				WebhookTimeout:                webhook.DefaultTimeout,
+				WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
+				WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
+				WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
+				WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
+				WebhookDeliveryRetention:      webhook.DefaultDeliveryRetention,
+				SMTP: mailer.SMTPConfig{
+					Port:    mailer.DefaultSMTPPort,
+					TLSMode: mailer.TLSModeStartTLS,
+					Timeout: mailer.DefaultSMTPTimeout,
+				},
 			},
+		},
+		{
+			name: "webhook and smtp explicit values",
+			env: map[string]string{
+				"WEBHOOK_SECRET_KEY":                strings.Repeat("ab", 32),
+				"WEBHOOK_ALLOWED_PORTS":             "443",
+				"WEBHOOK_TIMEOUT":                   "4s",
+				"WEBHOOK_HOST_RATE_LIMIT":           "10",
+				"WEBHOOK_RETRY_BASE_DELAY":          "5s",
+				"WEBHOOK_RETRY_MAX_DELAY":           "2m",
+				"WEBHOOK_MAX_CONSECUTIVE_FAILURES":  "0",
+				"WORKER_WEBHOOK_DELIVERY_RETENTION": "48h",
+				"CONSOLE_PUBLIC_URL":                "https://console.example.com/",
+				"SMTP_HOST":                         "smtp.example.com",
+				"SMTP_PORT":                         "2525",
+				"SMTP_USERNAME":                     "mailer",
+				"SMTP_PASSWORD":                     "mail-pass",
+				"SMTP_FROM":                         "Shortlink <noreply@example.com>",
+				"SMTP_TLS_MODE":                     "NONE",
+				"SMTP_TIMEOUT":                      "8s",
+			},
+			want: func() WorkerConfig {
+				c := defaults
+				c.WebhookSecretKey = strings.Repeat("ab", 32)
+				c.WebhookAllowedPorts = []int{443}
+				c.WebhookTimeout = 4 * time.Second
+				c.WebhookHostRateLimit = 10
+				c.WebhookRetryBaseDelay = 5 * time.Second
+				c.WebhookRetryMaxDelay = 2 * time.Minute
+				c.WebhookMaxConsecutiveFailures = 0
+				c.WebhookDeliveryRetention = 48 * time.Hour
+				c.ConsolePublicURL = "https://console.example.com"
+				c.SMTP = mailer.SMTPConfig{
+					Host:     "smtp.example.com",
+					Port:     2525,
+					Username: "mailer",
+					Password: "mail-pass",
+					From:     "Shortlink <noreply@example.com>",
+					TLSMode:  mailer.TLSModeNone,
+					Timeout:  8 * time.Second,
+				}
+				return c
+			}(),
+		},
+		{
+			name:    "invalid webhook secret key",
+			env:     map[string]string{"WEBHOOK_SECRET_KEY": "not-hex"},
+			wantErr: "WEBHOOK_SECRET_KEY",
+		},
+		{
+			name:    "webhook timeout must be less than job timeout",
+			env:     map[string]string{"WEBHOOK_TIMEOUT": "20s", "WORKER_JOB_TIMEOUT": "20s"},
+			wantErr: "WEBHOOK_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+		},
+		{
+			name:    "smtp host requires smtp from",
+			env:     map[string]string{"SMTP_HOST": "smtp.example.com"},
+			wantErr: "from is required",
+		},
+		{
+			name:    "smtp invalid tls mode",
+			env:     map[string]string{"SMTP_TLS_MODE": "plain"},
+			wantErr: "SMTP_TLS_MODE",
 		},
 		{
 			name:    "job timeout without commit margin exceeds lease",
@@ -421,7 +524,8 @@ func TestLoadWorkerConfig(t *testing.T) {
 			if !workerConfigEqual(got, tt.want) ||
 				!maps.Equal(got.RiskBlockedHosts, tt.want.RiskBlockedHosts) ||
 				!maps.Equal(got.RiskBlockedKeywords, tt.want.RiskBlockedKeywords) ||
-				!slices.Equal(got.RiskAllowedPorts, tt.want.RiskAllowedPorts) {
+				!slices.Equal(got.RiskAllowedPorts, tt.want.RiskAllowedPorts) ||
+				!slices.Equal(got.WebhookAllowedPorts, tt.want.WebhookAllowedPorts) {
 				t.Errorf("loadWorkerConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -434,6 +538,8 @@ func consoleConfigEqual(a, b ConsoleConfig) bool {
 		a.GitHub == b.GitHub &&
 		a.WebDistDir == b.WebDistDir &&
 		a.PublicBaseURL == b.PublicBaseURL &&
+		a.WebhookSecretKey == b.WebhookSecretKey &&
+		slices.Equal(a.WebhookAllowedPorts, b.WebhookAllowedPorts) &&
 		a.TrustProxyHeaders == b.TrustProxyHeaders &&
 		slices.Equal(a.TrustedProxyCIDRs, b.TrustedProxyCIDRs) &&
 		a.IPRateLimit == b.IPRateLimit &&
@@ -456,7 +562,16 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.StatsRetentionDays == b.StatsRetentionDays &&
 		a.AuditRetentionDays == b.AuditRetentionDays &&
 		a.RiskFetchTimeout == b.RiskFetchTimeout &&
-		a.RiskHostRateLimit == b.RiskHostRateLimit
+		a.RiskHostRateLimit == b.RiskHostRateLimit &&
+		a.WebhookSecretKey == b.WebhookSecretKey &&
+		a.WebhookTimeout == b.WebhookTimeout &&
+		a.WebhookHostRateLimit == b.WebhookHostRateLimit &&
+		a.WebhookRetryBaseDelay == b.WebhookRetryBaseDelay &&
+		a.WebhookRetryMaxDelay == b.WebhookRetryMaxDelay &&
+		a.WebhookMaxConsecutiveFailures == b.WebhookMaxConsecutiveFailures &&
+		a.WebhookDeliveryRetention == b.WebhookDeliveryRetention &&
+		a.ConsolePublicURL == b.ConsolePublicURL &&
+		a.SMTP == b.SMTP
 }
 
 func TestConsoleConfigRedaction(t *testing.T) {
@@ -475,15 +590,26 @@ func TestConsoleConfigRedaction(t *testing.T) {
 		ClientSecret: "github-top-secret",
 		RedirectURL:  "https://console.example.com/api/v1/auth/github/callback",
 	}
-	conCfg := ConsoleConfig{BaseConfig: base, OIDC: oidcCfg, GitHub: ghCfg}
-	workerCfg := WorkerConfig{BaseConfig: base, Concurrency: 8, RiskBlockedKeywords: map[string]link.BanReason{"evil": link.BanReasonPhishing}}
+	webhookMasterKey := strings.Repeat("ef", 32)
+	conCfg := ConsoleConfig{BaseConfig: base, OIDC: oidcCfg, GitHub: ghCfg, WebhookSecretKey: webhookMasterKey}
+	workerCfg := WorkerConfig{
+		BaseConfig:          base,
+		Concurrency:         8,
+		RiskBlockedKeywords: map[string]link.BanReason{"evil": link.BanReasonPhishing},
+		WebhookSecretKey:    webhookMasterKey,
+		SMTP: mailer.SMTPConfig{
+			Host:     "smtp.example.com",
+			Username: "mailer",
+			Password: "smtp-top-secret",
+		},
+	}
 
 	var buf bytes.Buffer
 	logger, _ := base.NewLoggerWithService(&buf, "console-config-test")
 	logger.Info("dump", "console", conCfg, "worker", workerCfg, "oidc", oidcCfg, "github", ghCfg)
 
 	combined := buf.String() + "\n" + fmt.Sprintf("%+v %+v %+v %+v", conCfg, workerCfg, oidcCfg, ghCfg)
-	for _, secret := range []string{"pg-secret", "redis-secret", "oidc-top-secret", "github-top-secret"} {
+	for _, secret := range []string{"pg-secret", "redis-secret", "oidc-top-secret", "github-top-secret", webhookMasterKey, "smtp-top-secret"} {
 		if strings.Contains(combined, secret) {
 			t.Errorf("secret %q leaked in config output: %s", secret, combined)
 		}

@@ -19,9 +19,15 @@ export type AuditAction =
   | 'invitation.revoke'
   | 'invitation.redeem'
   | 'apikey.issue'
-  | 'apikey.revoke';
+  | 'apikey.revoke'
+  | 'webhook.create'
+  | 'webhook.update'
+  | 'webhook.delete'
+  | 'webhook.rotate_secret'
+  | 'webhook.test'
+  | 'webhook.auto_disable';
 
-export type AuditTargetType = 'org' | 'link' | 'member' | 'invitation' | 'api_key';
+export type AuditTargetType = 'org' | 'link' | 'member' | 'invitation' | 'api_key' | 'webhook';
 
 export interface AuditEvent {
   id: number;

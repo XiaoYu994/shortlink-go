@@ -1,4 +1,4 @@
-package risk
+package safehttp
 
 import (
 	"strings"
@@ -9,14 +9,13 @@ import (
 )
 
 const (
-	DefaultHostRateLimit = 2
 	hostLimiterIdleTTL   = 10 * time.Minute
 	hostLimiterSweepStep = time.Minute
 )
 
 /*
-HostLimiter 按目标站点 host 做进程内令牌桶限速，防止风控 worker 集中抓取压垮第三方站点（ADR 0020）。
-结构和 internal/console/ratelimit.go 保持一致：空闲桶在请求路径惰性清理，不单开后台 goroutine。
+HostLimiter 按目标站点 host 做进程内令牌桶限速，防止后台任务集中冲击同一第三方站点（ADR 0020、ADR 0027）。
+空闲桶在请求路径惰性清理，不单开后台 goroutine。
 */
 type HostLimiter struct {
 	limit     int
@@ -39,7 +38,7 @@ func NewHostLimiter(perSecond int) *HostLimiter {
 	}
 }
 
-// Allow 判断当前能否向 host 发起抓取；被限速时返回建议延迟和 false。
+// Allow 判断当前能否向 host 发起出站请求；被限速时返回建议延迟和 false。
 func (l *HostLimiter) Allow(host string) (retryAfter time.Duration, allowed bool) {
 	if l == nil || l.limit <= 0 {
 		return 0, true

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 
 	"shortlink/internal/audit"
 	"shortlink/internal/identity"
+	"shortlink/internal/job"
+	"shortlink/internal/mailer"
 )
 
 const (
@@ -46,6 +49,19 @@ FOR UPDATE`
 	revokeInvitationSQL = `UPDATE invitations
 SET revoked_at = now()
 WHERE id = $1 AND tenant_id = $2`
+
+	enqueueInvitationEmailSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts)
+VALUES ($1, $2, $3::jsonb, $4, $5)
+ON CONFLICT (kind, dedup_key) WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running')
+DO NOTHING`
+
+	getInvitationEmailTargetSQL = `SELECT i.id, i.tenant_id, COALESCE(t.name, ''), i.email, i.role,
+       COALESCE(u.name, ''), COALESCE(u.email, ''),
+       i.created_at, i.expires_at, i.accepted_at, i.revoked_at, i.superseded_at
+FROM invitations i
+LEFT JOIN tenants t ON t.id = i.tenant_id
+LEFT JOIN users u ON u.id = i.invited_by
+WHERE i.id = $1`
 
 	// 三条清理语句分别沿迁移 012 的部分索引按批次删除，禁止用 OR 混合条件。
 	cleanupExpiredInvitationsByExpirySQL = `DELETE FROM invitations
@@ -150,6 +166,21 @@ func (s *Store) CreateInvitation(ctx context.Context, p CreateInvitationParams) 
 	}
 	if err := insertAuditLogTx(ctx, tx, inv.TenantID, explicitUserID, audit.ActionInvitationCreate, audit.TargetInvitation, strconv.FormatInt(inv.ID, 10), auditMeta); err != nil {
 		return identity.Invitation{}, fmt.Errorf("create invitation: %w", err)
+	}
+	emailPayload, err := json.Marshal(struct {
+		InvitationID int64 `json:"invitation_id"`
+	}{InvitationID: inv.ID})
+	if err != nil {
+		return identity.Invitation{}, fmt.Errorf("create invitation: marshal email payload: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, enqueueInvitationEmailSQL,
+		job.KindInvitationEmail,
+		inv.TenantID,
+		emailPayload,
+		"invitation:"+strconv.FormatInt(inv.ID, 10),
+		job.DefaultMaxAttempts,
+	); err != nil {
+		return identity.Invitation{}, fmt.Errorf("create invitation: enqueue email: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return identity.Invitation{}, fmt.Errorf("create invitation: commit: %w", err)
@@ -364,4 +395,35 @@ func (s *Store) CleanupRevokedInvitations(ctx context.Context, retention time.Du
 // CleanupSupersededInvitations 分批删除超过保留期的被重邀替代邀请。
 func (s *Store) CleanupSupersededInvitations(ctx context.Context, retention time.Duration, limit int) (int64, error) {
 	return s.execRetentionCleanup(ctx, "cleanup superseded invitations", cleanupSupersededInvitationsSQL, retention, limit)
+}
+
+// GetInvitationEmailTarget 按邀请 ID 查询发信所需的实时状态、组织名与邀请人展示信息（ADR 0027）。
+func (s *Store) GetInvitationEmailTarget(ctx context.Context, invitationID int64) (mailer.InvitationEmailTarget, error) {
+	if invitationID <= 0 {
+		return mailer.InvitationEmailTarget{}, identity.ErrInvitationNotFound
+	}
+	var (
+		t            mailer.InvitationEmailTarget
+		expiresAt    sql.NullTime
+		acceptedAt   sql.NullTime
+		revokedAt    sql.NullTime
+		supersededAt sql.NullTime
+	)
+	err := s.db.QueryRowContext(ctx, getInvitationEmailTargetSQL, invitationID).Scan(
+		&t.InvitationID, &t.TenantID, &t.TenantName, &t.Email, &t.Role,
+		&t.InviterName, &t.InviterEmail,
+		&t.CreatedAt, &expiresAt, &acceptedAt, &revokedAt, &supersededAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return mailer.InvitationEmailTarget{}, identity.ErrInvitationNotFound
+	}
+	if err != nil {
+		return mailer.InvitationEmailTarget{}, fmt.Errorf("get invitation email target: %w", err)
+	}
+	t.CreatedAt = t.CreatedAt.UTC()
+	t.ExpiresAt = nullTimeUTC(expiresAt)
+	t.AcceptedAt = nullTimeUTC(acceptedAt)
+	t.RevokedAt = nullTimeUTC(revokedAt)
+	t.SupersededAt = nullTimeUTC(supersededAt)
+	return t, nil
 }

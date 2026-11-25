@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"shortlink/internal/link"
+	"shortlink/internal/safehttp"
 )
 
 // Verdict 表示一次 URL 风控扫描的结论。
@@ -84,7 +85,7 @@ type RuleScanner struct {
 func NewRuleScanner(opts RuleScannerOptions) *RuleScanner {
 	client := opts.HTTPClient
 	if client == nil {
-		client = NewSafeHTTPClient(HTTPClientOptions{})
+		client = NewSafeHTTPClient(safehttp.ClientOptions{})
 	}
 	maxBody := opts.MaxBodyBytes
 	if maxBody <= 0 {
@@ -133,7 +134,7 @@ HTTP 5xx 视为目标站临时故障返回错误以便退避重试；4xx 视为�
 func (s *RuleScanner) Scan(ctx context.Context, targetURL string) (Verdict, error) {
 	u, err := url.Parse(strings.TrimSpace(targetURL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return Verdict{}, fmt.Errorf("%w: %q", ErrInvalidScheme, targetURL)
+		return Verdict{}, fmt.Errorf("%w: %q", safehttp.ErrInvalidScheme, targetURL)
 	}
 
 	host := strings.ToLower(u.Hostname())

@@ -13,6 +13,7 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/safehttp"
 )
 
 // LinkBanner 是风控处理器需要的最小封禁能力，由 cache.Store 实现。
@@ -32,7 +33,7 @@ type HandlerOptions struct {
 	Scanner Scanner
 	Banner  LinkBanner
 	Cache   *VerdictCache
-	Limiter *HostLimiter
+	Limiter *safehttp.HostLimiter
 	Logger  *slog.Logger
 }
 
@@ -65,7 +66,7 @@ func NewHandler(opts HandlerOptions) job.Handler {
 		if !hit {
 			u, err := url.Parse(p.URL)
 			if err != nil || u.Hostname() == "" {
-				return job.Permanent(fmt.Errorf("parse target url: %w", ErrInvalidScheme))
+				return job.Permanent(fmt.Errorf("parse target url: %w", safehttp.ErrInvalidScheme))
 			}
 			if delay, allowed := opts.Limiter.Allow(u.Hostname()); !allowed {
 				return job.Defer(delay, "host rate limited: "+u.Hostname())
@@ -73,7 +74,7 @@ func NewHandler(opts HandlerOptions) job.Handler {
 
 			verdict, err = opts.Scanner.Scan(ctx, p.URL)
 			if err != nil {
-				if errors.Is(err, ErrBlockedAddress) || errors.Is(err, ErrBlockedPort) || errors.Is(err, ErrInvalidScheme) || errors.Is(err, ErrTooManyRedirects) {
+				if errors.Is(err, safehttp.ErrBlockedAddress) || errors.Is(err, safehttp.ErrBlockedPort) || errors.Is(err, safehttp.ErrInvalidScheme) || errors.Is(err, safehttp.ErrTooManyRedirects) {
 					return job.Permanent(err)
 				}
 				return err

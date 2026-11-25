@@ -1,0 +1,140 @@
+import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { jsonResponse, renderWithOrg } from '@/test/test-utils';
+import { WebhooksPage } from './WebhooksPage';
+
+describe('WebhooksPage', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('blocks member role without firing /api/v1/webhooks request', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === '/api/v1/auth/providers') {
+        return jsonResponse({ oidc: true, github: false, webhooks: true });
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+
+    renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'member' });
+
+    expect(screen.getByText('仅 Owner 与 Admin 可管理 Webhooks')).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalledWith('/api/v1/webhooks', expect.anything());
+  });
+
+  it('shows disabled notice when server does not enable webhooks', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === '/api/v1/auth/providers') {
+        return jsonResponse({ oidc: true, github: false, webhooks: false });
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+
+    renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'owner' });
+
+    expect(await screen.findByText('服务端尚未启用 Webhook 功能')).toBeInTheDocument();
+  });
+
+  it('creates webhook, reveals secret once, triggers test ping, and inspects deliveries', async () => {
+    const user = userEvent.setup();
+    const secret = 'whsec_' + 'a'.repeat(64);
+    let created = false;
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/v1/auth/providers') {
+        return jsonResponse({ oidc: true, github: false, webhooks: true });
+      }
+      if (url === '/api/v1/webhooks' && init?.method === 'POST') {
+        created = true;
+        return jsonResponse(
+          {
+            id: 12,
+            url: 'https://hooks.example.com/events',
+            description: 'prod-sink',
+            events: ['link.created', 'link.banned'],
+            secret_prefix: secret.slice(0, 12),
+            enabled: true,
+            consecutive_failures: 0,
+            created_at: '2026-11-25T08:00:00Z',
+            updated_at: '2026-11-25T08:00:00Z',
+            secret,
+          },
+          201,
+        );
+      }
+      if (url === '/api/v1/webhooks') {
+        return jsonResponse({
+          items: created
+            ? [
+                {
+                  id: 12,
+                  url: 'https://hooks.example.com/events',
+                  description: 'prod-sink',
+                  events: ['link.created', 'link.banned'],
+                  secret_prefix: secret.slice(0, 12),
+                  enabled: true,
+                  consecutive_failures: 0,
+                  created_at: '2026-11-25T08:00:00Z',
+                  updated_at: '2026-11-25T08:00:00Z',
+                },
+              ]
+            : [],
+        });
+      }
+      if (url === '/api/v1/webhooks/12/test' && init?.method === 'POST') {
+        return jsonResponse({ job_id: 91, delivery_id: 'dlv_91' }, 202);
+      }
+      if (url === '/api/v1/webhooks/12/deliveries?limit=20') {
+        return jsonResponse({
+          items: [
+            {
+              id: 501,
+              webhook_id: 12,
+              job_id: 91,
+              delivery_id: 'dlv_91',
+              event: 'webhook.ping',
+              attempt: 1,
+              status: 'success',
+              http_status: 200,
+              duration_ms: 14,
+              created_at: '2026-11-25T08:01:00Z',
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    renderWithOrg(<WebhooksPage />, { orgId: 5, role: 'owner' });
+
+    await screen.findByText('还没有 Webhook 订阅');
+    await user.click(screen.getByRole('button', { name: /添加第一条订阅/ }));
+    await user.type(await screen.findByLabelText('回调 URL'), 'https://hooks.example.com/events');
+    await user.type(screen.getByLabelText('备注（可选）'), 'prod-sink');
+    await user.click(screen.getByRole('button', { name: '确认创建' }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/webhooks',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    expect(await screen.findByTestId('webhook-plaintext-secret')).toHaveTextContent(secret);
+    expect(await screen.findByText('https://hooks.example.com/events')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /测试 Ping/ }));
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/webhooks/12/test',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    await user.click(screen.getByRole('button', { name: /投递记录/ }));
+    expect(await screen.findByText('HTTP 200')).toBeInTheDocument();
+    expect(screen.getByText(/dlv_91/)).toBeInTheDocument();
+  });
+});

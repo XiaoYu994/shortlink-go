@@ -19,8 +19,8 @@ func TestEnumsValidAndAllActions(t *testing.T) {
 	}
 
 	actions := AllActions()
-	if len(actions) != 14 {
-		t.Fatalf("len(AllActions()) = %d, want 14", len(actions))
+	if len(actions) != 20 {
+		t.Fatalf("len(AllActions()) = %d, want 20", len(actions))
 	}
 	for _, act := range actions {
 		if !act.Valid() {
@@ -36,7 +36,7 @@ func TestEnumsValidAndAllActions(t *testing.T) {
 		t.Fatal("AllActions() returned shared backing array")
 	}
 
-	for _, tt := range []TargetType{TargetOrg, TargetLink, TargetMember, TargetInvitation, TargetAPIKey} {
+	for _, tt := range []TargetType{TargetOrg, TargetLink, TargetMember, TargetInvitation, TargetAPIKey, TargetWebhook} {
 		if !tt.Valid() {
 			t.Errorf("%q.Valid() = false, want true", tt)
 		}

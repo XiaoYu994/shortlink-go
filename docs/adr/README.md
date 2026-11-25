@@ -43,6 +43,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0024](0024-process-boundary-and-ops-isolation.md) | 进程边界净化、独立运维端口、可信代理链与鉴权前 IP 限流 | Accepted |
 | [0025](0025-reconcile-cache-async-purge-and-audit-hardening.md) | 缓存电平对账、异步统计清理与审计元数据 fail-closed | Accepted |
 | [0026](0026-timeseries-partitioning-and-retention.md) | 时序统计表与审计日志的按月范围分区及保留期治理 | Accepted |
+| [0027](0027-webhooks-and-async-invitation-email.md) | Webhook 订阅投递与异步成员邀请邮件 | Accepted |
 
 ## 模板
 

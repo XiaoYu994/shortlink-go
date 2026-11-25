@@ -181,6 +181,7 @@ type authFlowCookie struct {
 type authProvidersResponse struct {
 	OIDC          bool   `json:"oidc"`
 	GitHub        bool   `json:"github"`
+	Webhooks      bool   `json:"webhooks"`
 	PublicBaseURL string `json:"public_base_url,omitempty"`
 }
 

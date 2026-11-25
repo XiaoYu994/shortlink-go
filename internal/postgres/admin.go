@@ -11,6 +11,7 @@ import (
 	"shortlink/internal/audit"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/webhook"
 )
 
 /*
@@ -98,7 +99,10 @@ updated AS (
     FROM target t
     WHERE l.id = t.id AND NOT t.is_banned
     RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks
+              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks, l.updated_at
+),
+event_meta AS (
+    SELECT 'evt_' || gen_random_uuid()::text AS event_id
 ),
 enqueued AS (
     INSERT INTO jobs (kind, tenant_id, payload)
@@ -114,6 +118,33 @@ reconciled AS (
            NULLIF(u.tenant_id, 0),
            jsonb_build_object('code', u.code)
     FROM updated u
+),
+webhook_jobs AS (
+    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+    SELECT $17::text,
+           u.tenant_id,
+           jsonb_build_object(
+               'webhook_id', w.id,
+               'event_id', em.event_id,
+               'event', $18::text,
+               'occurred_at', u.updated_at,
+               'data', jsonb_strip_nulls(jsonb_build_object(
+                   'link_id', u.id,
+                   'code', u.code,
+                   'url', u.url,
+                   'expires_at', u.expires_at,
+                   'disabled_at', u.disabled_at,
+                   'changed_fields', $12::jsonb->'fields',
+                   'updated_at', u.updated_at
+               ))
+           ),
+           $19::int
+    FROM updated u
+    CROSS JOIN event_meta em
+    JOIN webhooks w
+      ON w.tenant_id = u.tenant_id
+     AND w.enabled = TRUE
+     AND $18::text = ANY(w.events)
 ),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
@@ -166,6 +197,9 @@ updated AS (
     RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
               l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, p.newly_banned
 ),
+event_meta AS (
+    SELECT 'evt_' || gen_random_uuid()::text AS event_id
+),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
     SELECT u.tenant_id,
@@ -190,6 +224,33 @@ reconciled AS (
            NULLIF(u.tenant_id, 0),
            jsonb_build_object('code', u.code)
     FROM updated u
+),
+webhook_jobs AS (
+    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+    SELECT $10::text,
+           u.tenant_id,
+           jsonb_build_object(
+               'webhook_id', w.id,
+               'event_id', em.event_id,
+               'event', $11::text,
+               'occurred_at', u.banned_at,
+               'data', jsonb_build_object(
+                   'link_id', u.id,
+                   'code', u.code,
+                   'url', u.url,
+                   'banned_at', u.banned_at,
+                   'ban_reason', u.ban_reason,
+                   'ban_source', u.ban_source
+               )
+           ),
+           $12::int
+    FROM updated u
+    CROSS JOIN event_meta em
+    JOIN webhooks w
+      ON w.tenant_id = u.tenant_id
+     AND w.enabled = TRUE
+     AND $11::text = ANY(w.events)
+    WHERE u.newly_banned
 )
 SELECT ` + linkColumns + ` FROM updated`
 
@@ -215,6 +276,9 @@ updated AS (
     RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
               l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, t.newly_banned
 ),
+event_meta AS (
+    SELECT 'evt_' || gen_random_uuid()::text AS event_id
+),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
     SELECT u.tenant_id,
@@ -239,6 +303,33 @@ reconciled AS (
            NULLIF(u.tenant_id, 0),
            jsonb_build_object('code', u.code)
     FROM updated u
+),
+webhook_jobs AS (
+    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+    SELECT $11::text,
+           u.tenant_id,
+           jsonb_build_object(
+               'webhook_id', w.id,
+               'event_id', em.event_id,
+               'event', $12::text,
+               'occurred_at', u.banned_at,
+               'data', jsonb_build_object(
+                   'link_id', u.id,
+                   'code', u.code,
+                   'url', u.url,
+                   'banned_at', u.banned_at,
+                   'ban_reason', u.ban_reason,
+                   'ban_source', u.ban_source
+               )
+           ),
+           $13::int
+    FROM updated u
+    CROSS JOIN event_meta em
+    JOIN webhooks w
+      ON w.tenant_id = u.tenant_id
+     AND w.enabled = TRUE
+     AND $12::text = ANY(w.events)
+    WHERE u.newly_banned
 )
 SELECT COALESCE(u.id, t.id),
        COALESCE(u.code, t.code),
@@ -270,8 +361,11 @@ updated AS (
     FROM prev p
     WHERE l.id = p.id
     RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source,
+              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.updated_at,
               p.was_banned, p.ban_reason AS previous_reason, p.ban_source AS previous_source
+),
+event_meta AS (
+    SELECT 'evt_' || gen_random_uuid()::text AS event_id
 ),
 audited AS (
     INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
@@ -297,12 +391,70 @@ reconciled AS (
            NULLIF(u.tenant_id, 0),
            jsonb_build_object('code', u.code)
     FROM updated u
+),
+webhook_jobs AS (
+    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+    SELECT $8::text,
+           u.tenant_id,
+           jsonb_build_object(
+               'webhook_id', w.id,
+               'event_id', em.event_id,
+               'event', $9::text,
+               'occurred_at', u.updated_at,
+               'data', jsonb_strip_nulls(jsonb_build_object(
+                   'link_id', u.id,
+                   'code', u.code,
+                   'url', u.url,
+                   'expires_at', u.expires_at,
+                   'disabled_at', u.disabled_at,
+                   'previous_reason', u.previous_reason,
+                   'previous_source', u.previous_source,
+                   'unbanned_at', u.updated_at
+               ))
+           ),
+           $10::int
+    FROM updated u
+    CROSS JOIN event_meta em
+    JOIN webhooks w
+      ON w.tenant_id = u.tenant_id
+     AND w.enabled = TRUE
+     AND $9::text = ANY(w.events)
+    WHERE u.was_banned
 )
 SELECT ` + linkColumns + ` FROM updated`
 
 	enqueueDeleteJobsSQL = `INSERT INTO jobs (kind, tenant_id, payload)
 VALUES ($1, NULLIF($2::bigint, 0), jsonb_build_object('code', $3::text)),
        ($4, NULLIF($2::bigint, 0), jsonb_build_object('link_id', $5::bigint))`
+
+	enqueueDeleteWebhooksSQL = `WITH event_meta AS (
+    SELECT 'evt_' || gen_random_uuid()::text AS event_id
+),
+ts AS (
+    SELECT now() AS occurred_at
+)
+INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+SELECT $1::text,
+       w.tenant_id,
+       jsonb_build_object(
+           'webhook_id', w.id,
+           'event_id', em.event_id,
+           'event', $2::text,
+           'occurred_at', ts.occurred_at,
+           'data', jsonb_build_object(
+               'link_id', $4::bigint,
+               'code', $5::text,
+               'url', $6::text,
+               'deleted_at', ts.occurred_at
+           )
+       ),
+       $7::int
+FROM event_meta em
+CROSS JOIN ts
+JOIN webhooks w
+  ON w.tenant_id = $3::bigint
+ AND w.enabled = TRUE
+ AND $2::text = ANY(w.events)`
 
 	/*
 		按完整主键元组分批删除统计行，严禁使用 ctid：
@@ -610,7 +762,8 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 		code, tenantID, hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue,
 		actorKind, actorID, reqID, string(metaJSON),
 		job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink),
-		job.KindCacheReconcile)
+		job.KindCacheReconcile,
+		job.KindWebhookDeliver, string(webhook.EventLinkUpdated), webhook.DefaultMaxAttempts)
 	var (
 		got      link.AdminLink
 		isBanned bool
@@ -669,6 +822,10 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 	if _, err := tx.ExecContext(ctx, enqueueDeleteJobsSQL,
 		job.KindCacheReconcile, tenantID, code, job.KindLinkPurgeStats, id); err != nil {
 		return fmt.Errorf("delete link: enqueue jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, enqueueDeleteWebhooksSQL,
+		job.KindWebhookDeliver, string(webhook.EventLinkDeleted), tenantID, id, code, urlStr, webhook.DefaultMaxAttempts); err != nil {
+		return fmt.Errorf("delete link: enqueue webhooks: %w", err)
 	}
 	if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
 		"link_id": id,
@@ -745,7 +902,8 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 	if expectedURL == "" {
 		got, err := scanLink(s.db.QueryRowContext(ctx, banLinkSQL,
 			code, string(reason), string(source), actorKind, actorID, reqID,
-			string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile))
+			string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile,
+			job.KindWebhookDeliver, string(webhook.EventLinkBanned), webhook.DefaultMaxAttempts))
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, link.ErrNotFound
 		}
@@ -758,7 +916,8 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 	var urlMatched bool
 	got, err := scanLink(s.db.QueryRowContext(ctx, banLinkIfURLSQL,
 		code, string(reason), string(source), expectedURL, actorKind, actorID, reqID,
-		string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile), &urlMatched)
+		string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile,
+		job.KindWebhookDeliver, string(webhook.EventLinkBanned), webhook.DefaultMaxAttempts), &urlMatched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
@@ -783,7 +942,8 @@ func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
 	}
 	got, err := scanLink(s.db.QueryRowContext(ctx, unbanLinkSQL,
 		code, actorKind, actorID, reqID, string(audit.ActionLinkUnban), string(audit.TargetLink),
-		job.KindCacheReconcile))
+		job.KindCacheReconcile,
+		job.KindWebhookDeliver, string(webhook.EventLinkUnbanned), webhook.DefaultMaxAttempts))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}

@@ -24,9 +24,12 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/httpx"
 	"shortlink/internal/job"
+	"shortlink/internal/mailer"
 	"shortlink/internal/postgres"
 	"shortlink/internal/risk"
+	"shortlink/internal/safehttp"
 	"shortlink/internal/storemetrics"
+	"shortlink/internal/webhook"
 )
 
 const (
@@ -121,7 +124,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 		Logger:          logger,
 	})
 
-	httpClient := risk.NewSafeHTTPClient(risk.HTTPClientOptions{
+	httpClient := risk.NewSafeHTTPClient(safehttp.ClientOptions{
 		Timeout:          cfg.RiskFetchTimeout,
 		AllowedPorts:     cfg.RiskAllowedPorts,
 		AllowedHostPorts: cliOpts.allowTestHosts,
@@ -132,7 +135,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 		BlockedKeywords: cfg.RiskBlockedKeywords,
 	})
 	verdictCache := risk.NewVerdictCache(rdb, registry, risk.VerdictCacheOptions{Logger: logger})
-	hostLimiter := risk.NewHostLimiter(cfg.RiskHostRateLimit)
+	hostLimiter := safehttp.NewHostLimiter(cfg.RiskHostRateLimit)
 	riskHandler := risk.NewHandler(risk.HandlerOptions{
 		Scanner: scanner,
 		Banner:  linkStore,
@@ -141,8 +144,59 @@ func runWorker(cliOpts workerCLIOptions) error {
 		Logger:  logger,
 	})
 
+	var webhookCipher *webhook.SecretCipher
+	if cfg.WebhookSecretKey != "" {
+		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
+		if err != nil {
+			return fmt.Errorf("parse WEBHOOK_SECRET_KEY: %w", err)
+		}
+		webhookCipher, err = webhook.NewSecretCipher(key)
+		if err != nil {
+			return fmt.Errorf("init webhook cipher: %w", err)
+		}
+	} else {
+		logger.Info("webhooks disabled: WEBHOOK_SECRET_KEY is not set")
+	}
+
+	webhookClient := safehttp.NewClient(safehttp.ClientOptions{
+		Timeout:          cfg.WebhookTimeout,
+		DisableRedirects: true,
+		AllowedPorts:     cfg.WebhookAllowedPorts,
+		AllowedHostPorts: cliOpts.allowTestHosts,
+	})
+	webhookThreshold := cfg.WebhookMaxConsecutiveFailures
+	if webhookThreshold == 0 {
+		webhookThreshold = -1 // 显式配置 0 关闭自动熔断（区分未配置零值默认 10）。
+	}
+	webhookHandler := webhook.NewHandler(webhook.HandlerOptions{
+		Store:                  pgStore,
+		HTTPClient:             webhookClient,
+		Limiter:                safehttp.NewHostLimiter(cfg.WebhookHostRateLimit),
+		Cipher:                 webhookCipher,
+		RetryBaseDelay:         cfg.WebhookRetryBaseDelay,
+		RetryMaxDelay:          cfg.WebhookRetryMaxDelay,
+		MaxConsecutiveFailures: webhookThreshold,
+		Registry:               registry,
+		Logger:                 logger,
+	})
+
+	var emailSender mailer.Sender
+	if cfg.SMTP.Enabled() {
+		smtpSender, err := mailer.NewSMTPSender(cfg.SMTP)
+		if err != nil {
+			return fmt.Errorf("init smtp sender: %w", err)
+		}
+		emailSender = smtpSender
+		logger.Info("invitation email sender enabled", "host", cfg.SMTP.Host, "port", cfg.SMTP.Port, "tls_mode", cfg.SMTP.TLSMode)
+	} else {
+		logger.Info("invitation email sender disabled: SMTP_HOST is not set")
+	}
+	invitationEmailHandler := newInvitationEmailHandler(pgStore, emailSender, cfg.ConsolePublicURL, logger)
+
 	runner := job.New(pgStore, map[string]job.Handler{
-		job.KindLinkRiskScan: riskHandler,
+		job.KindLinkRiskScan:    riskHandler,
+		job.KindWebhookDeliver:  webhookHandler,
+		job.KindInvitationEmail: invitationEmailHandler,
 		job.KindCacheReconcile: func(ctx context.Context, j job.Job) error {
 			var p struct {
 				Code string `json:"code"`
@@ -257,6 +311,15 @@ func runWorker(cliOpts workerCLIOptions) error {
 					}
 					d2, err := pgStore.DropExpiredAuditPartitions(ctx, now, cfg.AuditRetentionDays)
 					return d1 + d2, err
+				},
+			},
+			{
+				Name:     "webhooks.cleanup_deliveries",
+				Interval: cfg.CleanupInterval,
+				Run: func(ctx context.Context) (int64, error) {
+					return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+						return pgStore.CleanupWebhookDeliveries(ctx, cfg.WebhookDeliveryRetention, limit)
+					})
 				},
 			},
 		},

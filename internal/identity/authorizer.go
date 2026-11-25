@@ -24,6 +24,8 @@ func NewMapAuthorizer() *MapAuthorizer {
 				PermAPIKeysRead,
 				PermAPIKeysWrite,
 				PermAuditRead,
+				PermWebhooksRead,
+				PermWebhooksWrite,
 			),
 			RoleAdmin: permSet(
 				PermLinksRead,
@@ -34,6 +36,8 @@ func NewMapAuthorizer() *MapAuthorizer {
 				PermAPIKeysRead,
 				PermAPIKeysWrite,
 				PermAuditRead,
+				PermWebhooksRead,
+				PermWebhooksWrite,
 			),
 			RoleMember: permSet(
 				PermLinksRead,

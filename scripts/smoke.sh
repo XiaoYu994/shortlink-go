@@ -1,8 +1,8 @@
 #!/bin/sh
 # 冒烟测试：启动 redirector 和 console 两个真实进程，按 docs/api.md 的契约走一遍
 # 健康检查、创建、跳转、HEAD、停用和启用、封禁和解封、404、非法参数、过期、路由隔离、
-# 访客去重、配额、限流、Dex OIDC 登录（邀请兑现、/me、成员列表、会话创建、CSRF 与登出失效）
-# 和指标，最后检查 SIGTERM 优雅退出。
+# 访客去重、配额、限流、Dex OIDC 登录（邀请兑现、/me、成员列表、会话创建、CSRF 与登出失效）、
+# Webhook 订阅/HMAC 签名/500 重试/全生命周期投递/投递记录、异步邀请邮件与指标，最后检查 SIGTERM 优雅退出。
 #
 # 由 make smoke 调用；也可以直接 ./scripts/smoke.sh，前提是 bin/redirector、bin/console
 # 已构建、测试库已准备。脚本用独立端口、测试库和测试 Redis，不碰本机正在跑的服务和开发库。
@@ -36,6 +36,8 @@ REDIRECTOR_PID=
 CONSOLE_PID=
 WORKER_PID=
 STUB_PID=
+WEBHOOK_STUB_PID=
+SMTP_STUB_PID=
 WATCHDOG_PID=
 
 cleanup() {
@@ -44,7 +46,7 @@ cleanup() {
 		kill "$WATCHDOG_PID" 2>/dev/null || true
 		wait "$WATCHDOG_PID" 2>/dev/null || true
 	fi
-	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}"; do
+	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}" "${WEBHOOK_STUB_PID:-}" "${SMTP_STUB_PID:-}"; do
 		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 			kill -TERM "$pid" 2>/dev/null || true
 			i=0
@@ -197,12 +199,16 @@ console_addr=${SMOKE_CONSOLE_ADDR:-127.0.0.1:18081}
 console_ops_addr=${SMOKE_CONSOLE_OPS_ADDR:-127.0.0.1:19091}
 worker_addr=${SMOKE_WORKER_ADDR:-127.0.0.1:18082}
 risk_stub_port=${SMOKE_RISK_STUB_PORT:-18089}
+webhook_stub_port=${SMOKE_WEBHOOK_STUB_PORT:-18090}
+smtp_stub_port=${SMOKE_SMTP_STUB_PORT:-18091}
 REDIRECTOR_BASE=http://$redirector_addr
 REDIRECTOR_OPS_BASE=http://$redirector_ops_addr
 CONSOLE_BASE=http://$console_addr
 CONSOLE_OPS_BASE=http://$console_ops_addr
 WORKER_BASE=http://$worker_addr
 RISK_STUB_HOST=127.0.0.1:$risk_stub_port
+WEBHOOK_STUB_HOST=127.0.0.1:$webhook_stub_port
+SMOKE_WEBHOOK_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 export LOG_LEVEL=error
 # redirector 没有盐会拒绝启动。CI 从 .env.example 生成 .env，本机可能还没配。
 VISITOR_SALT=${VISITOR_SALT:-smoke-visitor-salt}
@@ -234,6 +240,11 @@ psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
 mkdir -p "$TMP/webdist"
 printf '%s\n' '<!doctype html><html><body>smoke-web-console</body></html>' >"$TMP/webdist/index.html"
 
+# 确认生产构建的 ./bin/console serve 拒绝测试专用开关 --allow-test-host。
+if ./bin/console serve --allow-test-host "$WEBHOOK_STUB_HOST" >/dev/null 2>&1; then
+	fail '生产 bin/console serve 不应允许 --allow-test-host'
+fi
+
 # 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
 ADDR=$redirector_addr OPS_ADDR=$redirector_ops_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
@@ -243,8 +254,9 @@ OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
 OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
 OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
 OIDC_REDIRECT_URL=$SMOKE_OIDC_REDIRECT_URL \
+WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
 WEB_DIST_DIR=$TMP/webdist \
-	./bin/console serve >"$CONSOLE_LOG" 2>&1 &
+	"$CONSOLE_BIN" serve --allow-test-host "$WEBHOOK_STUB_HOST" >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
 wait_ready "$REDIRECTOR_OPS_BASE" "$REDIRECTOR_PID" redirector
@@ -589,6 +601,7 @@ status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code
 	"$CONSOLE_BASE/api/v1/auth/providers")
 assert_eq "$status" 200 'GET /api/v1/auth/providers 状态码'
 grep -q '"oidc":true' "$TMP/body" || fail "auth/providers 缺少 oidc=true: $(cat "$TMP/body")"
+grep -q '"webhooks":true' "$TMP/body" || fail "auth/providers 缺少 webhooks=true: $(cat "$TMP/body")"
 
 status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
 	-X POST -H 'Content-Type: application/json' \
@@ -750,6 +763,195 @@ while ! curl -fsS --max-time 1 "http://$RISK_STUB_HOST/safe.html" >/dev/null 2>&
 	sleep 0.1
 done
 
+cat <<'EOF' >"$TMP/webhook_stub.py"
+import hashlib
+import hmac
+import json
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+secret_path = sys.argv[2]
+events_path = sys.argv[3]
+state_lock = threading.Lock()
+seen_created = False
+
+
+def verify_sig(secret, header, body):
+    parts = {}
+    for item in header.split(","):
+        if "=" in item:
+            k, v = item.strip().split("=", 1)
+            parts[k.strip()] = v.strip()
+    ts = parts.get("t", "")
+    v1 = parts.get("v1", "")
+    if not ts or not v1 or not secret:
+        return False
+    expected = hmac.new(secret.encode("utf-8"), f"{ts}.".encode("utf-8") + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(v1, expected)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        global seen_created
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            with open(secret_path, "r", encoding="utf-8") as f:
+                secret = f.read().strip()
+        except FileNotFoundError:
+            secret = ""
+
+        sig_hdr = self.headers.get("X-Shortlink-Signature", "")
+        delivery_id = self.headers.get("X-Shortlink-Delivery", "")
+        event_hdr = self.headers.get("X-Shortlink-Event", "")
+
+        if not verify_sig(secret, sig_hdr, body):
+            status = 401
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(b"invalid signature")
+            return
+
+        env = json.loads(body.decode("utf-8"))
+        ev = env.get("event", event_hdr)
+        with state_lock:
+            if ev == "link.created" and not seen_created:
+                seen_created = True
+                status = 500
+            else:
+                status = 200
+            with open(events_path, "a", encoding="utf-8") as out:
+                out.write(json.dumps({
+                    "event": ev,
+                    "event_id": env.get("id"),
+                    "delivery_id": delivery_id,
+                    "status": status,
+                    "data": env.get("data"),
+                }) + "\n")
+                out.flush()
+
+        self.send_response(status)
+        self.end_headers()
+        self.wfile.write(b"simulated error" if status == 500 else b"accepted")
+
+    def log_message(self, format, *args):
+        pass
+
+
+ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+EOF
+
+cat <<'EOF' >"$TMP/smtp_stub.py"
+import json
+import socketserver
+import sys
+import threading
+
+port = int(sys.argv[1])
+mails_path = sys.argv[2]
+write_lock = threading.Lock()
+
+
+class SMTPHandler(socketserver.StreamRequestHandler):
+    def send_line(self, line):
+        self.wfile.write((line + "\r\n").encode("utf-8"))
+        self.wfile.flush()
+
+    def handle(self):
+        self.send_line("220 smoke-smtp ESMTP ready")
+        mail_from = ""
+        rcpt_to = []
+        while True:
+            raw = self.rfile.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            upper = line.upper()
+            if upper.startswith("EHLO ") or upper.startswith("HELO ") or upper in ("EHLO", "HELO"):
+                self.send_line("250 OK")
+            elif upper.startswith("MAIL FROM:"):
+                mail_from = line[10:].strip()
+                rcpt_to = []
+                self.send_line("250 OK")
+            elif upper.startswith("RCPT TO:"):
+                rcpt_to.append(line[8:].strip())
+                self.send_line("250 OK")
+            elif upper == "DATA":
+                self.send_line("354 End data with <CR><LF>.<CR><LF>")
+                lines = []
+                while True:
+                    dline = self.rfile.readline()
+                    if not dline:
+                        break
+                    decoded = dline.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if decoded == ".":
+                        break
+                    if decoded.startswith(".."):
+                        decoded = decoded[1:]
+                    lines.append(decoded)
+                with write_lock:
+                    with open(mails_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "mail_from": mail_from,
+                            "rcpt_to": rcpt_to,
+                            "data": "\n".join(lines),
+                        }) + "\n")
+                        f.flush()
+                self.send_line("250 2.0.0 Queued")
+            elif upper == "RSET":
+                mail_from = ""
+                rcpt_to = []
+                self.send_line("250 OK")
+            elif upper == "NOOP":
+                self.send_line("250 OK")
+            elif upper == "QUIT":
+                self.send_line("221 Bye")
+                break
+            else:
+                self.send_line("500 unrecognized command")
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+Server(("127.0.0.1", port), SMTPHandler).serve_forever()
+EOF
+
+: >"$TMP/webhook_events.jsonl"
+: >"$TMP/smtp_mails.jsonl"
+python3 "$TMP/webhook_stub.py" "$webhook_stub_port" "$TMP/webhook_secret.txt" "$TMP/webhook_events.jsonl" >"$TMP/webhook_stub.log" 2>&1 &
+WEBHOOK_STUB_PID=$!
+python3 "$TMP/smtp_stub.py" "$smtp_stub_port" "$TMP/smtp_mails.jsonl" >"$TMP/smtp_stub.log" 2>&1 &
+SMTP_STUB_PID=$!
+
+i=0
+while ! curl -fsS --max-time 1 "http://$WEBHOOK_STUB_HOST/health" >/dev/null 2>&1; do
+	kill -0 "$WEBHOOK_STUB_PID" 2>/dev/null || fail '本地 Webhook 接收桩启动失败'
+	i=$((i + 1))
+	[ "$i" -ge 50 ] && fail '本地 Webhook 接收桩 5 秒内未就绪'
+	sleep 0.1
+done
+
+i=0
+while ! python3 -c "import socket; socket.create_connection(('127.0.0.1', int('$smtp_stub_port')), timeout=1).close()" >/dev/null 2>&1; do
+	kill -0 "$SMTP_STUB_PID" 2>/dev/null || fail '本地 SMTP 接收桩启动失败'
+	i=$((i + 1))
+	[ "$i" -ge 50 ] && fail '本地 SMTP 接收桩 5 秒内未就绪'
+	sleep 0.1
+done
+
 # 确认生产构建的 ./bin/console 拒绝测试专用开关 --allow-test-host。
 if ./bin/console worker --allow-test-host "$RISK_STUB_HOST" >/dev/null 2>&1; then
 	fail '生产 bin/console 不应允许 --allow-test-host'
@@ -759,7 +961,16 @@ WORKER_ADDR=$worker_addr \
 WORKER_POLL_INTERVAL=50ms \
 RISK_HOST_RATE_LIMIT=100 \
 RISK_BLOCKED_KEYWORDS=smoke-phish-marker:phishing \
-	"$CONSOLE_BIN" worker --allow-test-host "$RISK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
+WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
+WEBHOOK_HOST_RATE_LIMIT=100 \
+WEBHOOK_RETRY_BASE_DELAY=200ms \
+WEBHOOK_RETRY_MAX_DELAY=500ms \
+CONSOLE_PUBLIC_URL=$CONSOLE_BASE \
+SMTP_HOST=127.0.0.1 \
+SMTP_PORT=$smtp_stub_port \
+SMTP_FROM=noreply@shortlink.local \
+SMTP_TLS_MODE=none \
+	"$CONSOLE_BIN" worker --allow-test-host "$RISK_STUB_HOST" --allow-test-host "$WEBHOOK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
 wait_ready "$WORKER_BASE" "$WORKER_PID" worker
 
@@ -809,6 +1020,122 @@ grep -Fq '"actor_kind":"system"' "$TMP/body" || fail "异步风控审计日志�
 grep -Fq "\"target_id\":\"$risk_code\"" "$TMP/body" || fail "异步风控审计日志缺少 target_id=$risk_code: $(cat "$TMP/body")"
 grep -Fq '"request_id":"job:' "$TMP/body" || fail "异步风控审计日志缺少 job request_id: $(cat "$TMP/body")"
 
+echo 'smoke: webhooks and async invitation email'
+status=$(request "$CONSOLE_BASE" GET /api/v1/webhooks)
+assert_eq "$status" 403 'API Key 访问 /api/v1/webhooks 应返回 403'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$return_cookies" \
+	-d "{\"url\":\"http://$WEBHOOK_STUB_HOST/hook\",\"description\":\"smoke hook\",\"events\":[\"link.created\",\"link.updated\",\"link.deleted\",\"link.banned\",\"link.unbanned\"]}" \
+	"$CONSOLE_BASE/api/v1/webhooks")
+assert_eq "$status" 201 'POST /api/v1/webhooks 状态码'
+assert_eq "$(header Cache-Control)" 'no-store' 'POST /api/v1/webhooks Cache-Control'
+wh_id=$(sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' "$TMP/body")
+wh_secret=$(sed -n 's/.*"secret":"\(whsec_[0-9a-f]\{64\}\)".*/\1/p' "$TMP/body")
+[ -n "$wh_id" ] && [ -n "$wh_secret" ] || fail "无法解析 Webhook ID 或 secret: $(cat "$TMP/body")"
+printf '%s' "$wh_secret" >"$TMP/webhook_secret.txt"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H "X-Org-ID: $smoke_tenant_id" \
+	-b "$return_cookies" \
+	"$CONSOLE_BASE/api/v1/webhooks/$wh_id/test")
+assert_eq "$status" 202 'POST /api/v1/webhooks/{id}/test 状态码'
+ping_delivery_id=$(sed -n 's/.*"delivery_id":"\(dlv_[0-9][0-9]*\)".*/\1/p' "$TMP/body")
+[ -n "$ping_delivery_id" ] || fail "无法解析 test ping delivery_id: $(cat "$TMP/body")"
+
+i=0
+while ! python3 -c "
+import json, sys
+with open('$TMP/webhook_events.jsonl', 'r', encoding='utf-8') as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+sys.exit(0 if any(r['event'] == 'webhook.ping' and r['status'] == 200 and r['delivery_id'] == '$ping_delivery_id' for r in rows) else 1)
+" >/dev/null 2>&1; do
+	i=$((i + 1))
+	[ "$i" -ge 100 ] && fail "webhook.ping 10 秒内未成功送达: $(cat "$TMP/webhook_events.jsonl")"
+	sleep 0.1
+done
+
+wh_safe_url="http://$RISK_STUB_HOST/safe.html"
+status=$(request "$CONSOLE_BASE" POST /api/v1/links "{\"url\":\"$wh_safe_url\"}")
+assert_eq "$status" 201 '创建触发 Webhook 的短链状态码'
+wh_location=$(header Location)
+wh_code=${wh_location#/r/}
+
+i=0
+while ! python3 -c "
+import json, sys
+with open('$TMP/webhook_events.jsonl', 'r', encoding='utf-8') as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+by_del = {}
+for r in rows:
+    if r['event'] == 'link.created' and isinstance(r.get('data'), dict) and r['data'].get('code') == '$wh_code':
+        by_del.setdefault(r['delivery_id'], []).append(r['status'])
+sys.exit(0 if any(500 in statuses and 200 in statuses for statuses in by_del.values()) else 1)
+" >/dev/null 2>&1; do
+	i=$((i + 1))
+	[ "$i" -ge 100 ] && fail "link.created Webhook 500->200 同 DeliveryID 重试 10 秒内未完成: $(cat "$TMP/webhook_events.jsonl")"
+	sleep 0.1
+done
+
+status=$(request "$CONSOLE_BASE" PATCH "/api/v1/links/$wh_code" "{\"url\":\"$wh_safe_url?v=2\"}")
+assert_eq "$status" 200 'Webhook 生命周期 PATCH 短链状态码'
+./bin/console link ban --code "$wh_code" --reason spam || fail 'Webhook 生命周期 link ban 失败'
+./bin/console link unban --code "$wh_code" || fail 'Webhook 生命周期 link unban 失败'
+status=$(request "$CONSOLE_BASE" DELETE "/api/v1/links/$wh_code")
+assert_eq "$status" 204 'Webhook 生命周期 DELETE 短链状态码'
+
+i=0
+while ! python3 -c "
+import json, sys
+with open('$TMP/webhook_events.jsonl', 'r', encoding='utf-8') as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+got = {r['event'] for r in rows if r['status'] == 200 and isinstance(r.get('data'), dict) and r['data'].get('code') == '$wh_code'}
+want = {'link.created', 'link.updated', 'link.banned', 'link.unbanned', 'link.deleted'}
+sys.exit(0 if want.issubset(got) else 1)
+" >/dev/null 2>&1; do
+	i=$((i + 1))
+	[ "$i" -ge 100 ] && fail "link 完整生命周期 Webhook 事件 10 秒内未全部送达: $(cat "$TMP/webhook_events.jsonl")"
+	sleep 0.1
+done
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$return_cookies" \
+	"$CONSOLE_BASE/api/v1/webhooks/$wh_id/deliveries?limit=20")
+assert_eq "$status" 200 'GET /api/v1/webhooks/{id}/deliveries 状态码'
+assert_eq "$(header Cache-Control)" 'no-store' 'GET /api/v1/webhooks/{id}/deliveries Cache-Control'
+for token in '"status":"retry"' '"status":"success"' '"event":"webhook.ping"' '"event":"link.created"' '"event":"link.deleted"'; do
+	grep -Fq "$token" "$TMP/body" || fail "deliveries 缺少预期字段 $token: $(cat "$TMP/body")"
+done
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "X-Org-ID: $smoke_tenant_id" \
+	-b "$return_cookies" \
+	-d '{"email":"invitee-smoke@example.com","role":"member"}' \
+	"$CONSOLE_BASE/api/v1/invitations")
+assert_eq "$status" 201 '创建触发异步邮件的邀请状态码'
+
+i=0
+while ! python3 -c "
+import json, sys
+with open('$TMP/smtp_mails.jsonl', 'r', encoding='utf-8') as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+ok = any(
+    any('invitee-smoke@example.com' in rcpt for rcpt in r.get('rcpt_to', []))
+    and 'smoke' in r.get('data', '')
+    and '$CONSOLE_BASE/login' in r.get('data', '')
+    for r in rows
+)
+sys.exit(0 if ok else 1)
+" >/dev/null 2>&1; do
+	i=$((i + 1))
+	[ "$i" -ge 100 ] && fail "异步邀请邮件 10 秒内未送达本地 SMTP 桩: $(cat "$TMP/smtp_mails.jsonl")"
+	sleep 0.1
+done
+
 echo 'smoke: metrics'
 status=$(request "$REDIRECTOR_OPS_BASE" GET /metrics)
 assert_eq "$status" 200 'redirector GET /metrics 状态码'
@@ -833,6 +1160,10 @@ fi
 status=$(request "$WORKER_BASE" GET /metrics)
 assert_eq "$status" 200 'worker GET /metrics 状态码'
 grep -q 'shortlink_jobs_processed_total{kind="link.risk_scan",result="done"}' "$TMP/body" || fail 'worker 指标缺少已完成风控任务计数'
+grep -q 'shortlink_jobs_processed_total{kind="webhook.deliver",result="done"}' "$TMP/body" || fail 'worker 指标缺少已完成 Webhook 投递任务计数'
+grep -q 'shortlink_jobs_processed_total{kind="invitation.email",result="done"}' "$TMP/body" || fail 'worker 指标缺少已完成邀请邮件任务计数'
+grep -q 'shortlink_webhook_deliveries_total{event="link.created",result="retry"}' "$TMP/body" || fail 'worker 指标缺少 Webhook 重试计数'
+grep -q 'shortlink_webhook_deliveries_total{event="link.created",result="success"}' "$TMP/body" || fail 'worker 指标缺少 Webhook 成功计数'
 grep -q 'shortlink_jobs_oldest_pending_age_seconds{kind="link.risk_scan"}' "$TMP/body" || fail 'worker 指标缺少最老待执行任务时长'
 
 echo 'smoke: shutdown'

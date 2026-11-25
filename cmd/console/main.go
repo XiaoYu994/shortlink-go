@@ -33,16 +33,17 @@ func main() {
 		不能因为 HTTP 模式或 link 命令要连 Redis，就让它们也依赖 Redis。
 	*/
 	if len(args) > 0 && args[0] == "serve" {
-		// 和 console help / key issue -h 一致：help 是成功路径。
-		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			writeUsage(os.Stderr)
+		serveOpts, ok, err := parseServeArgs(args[1:], os.Stderr)
+		if !ok {
+			if err != nil {
+				if !errors.Is(err, errUsage) {
+					_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+				}
+				os.Exit(2)
+			}
 			return
 		}
-		if len(args) > 1 {
-			writeUsage(os.Stderr)
-			os.Exit(2)
-		}
-		if err := runServe(); err != nil {
+		if err := runServe(serveOpts); err != nil {
 			logx.NewFallback(os.Stderr, "console").Error("fatal", "err", err)
 			os.Exit(1)
 		}

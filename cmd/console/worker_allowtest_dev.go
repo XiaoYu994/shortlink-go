@@ -25,7 +25,11 @@ func registerWorkerTestFlags(fs *flag.FlagSet, opts *workerCLIOptions) {
 }
 
 func validateWorkerTestFlags(opts workerCLIOptions) error {
-	for _, hp := range opts.allowTestHosts {
+	return validateLoopbackHostPorts(opts.allowTestHosts)
+}
+
+func validateLoopbackHostPorts(hosts []string) error {
+	for _, hp := range hosts {
 		if err := validateLoopbackHostPort(hp); err != nil {
 			return fmt.Errorf("--allow-test-host %q: %w", hp, err)
 		}

@@ -38,6 +38,13 @@ export const ENDPOINTS = {
     listCreate: v1('/api-keys'),
     detail: (id: number) => v1(`/api-keys/${id}`),
   },
+  webhooks: {
+    listCreate: v1('/webhooks'),
+    detail: (id: number) => v1(`/webhooks/${id}`),
+    rotateSecret: (id: number) => v1(`/webhooks/${id}/rotate-secret`),
+    test: (id: number) => v1(`/webhooks/${id}/test`),
+    deliveries: (id: number) => v1(`/webhooks/${id}/deliveries`),
+  },
   auditLogs: {
     list: v1('/audit-logs'),
   },

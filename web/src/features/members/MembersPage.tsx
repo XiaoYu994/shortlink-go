@@ -288,7 +288,7 @@ export function MembersPage() {
               title="暂无邀请记录"
               description={
                 canManage
-                  ? '邀请同事后，对方使用同邮箱的 OIDC 或 GitHub 账号登录时会自动加入当前组织。'
+                  ? '发起邀请后会同步进入异步邮件通知队列（需配置 SMTP），对方使用同邮箱的 OIDC 或 GitHub 账号登录时会自动加入当前组织。'
                   : '组织管理员发起的成员邀请会展示在这里。'
               }
               action={

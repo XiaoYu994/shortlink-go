@@ -7,6 +7,7 @@ export type Role = 'owner' | 'admin' | 'member' | 'viewer';
 export interface AuthProviders {
   oidc: boolean;
   github: boolean;
+  webhooks?: boolean;
   public_base_url?: string;
 }
 
@@ -68,6 +69,12 @@ export function useAuthProviders() {
 export function usePublicBaseUrl(): string | undefined {
   const { data } = useAuthProviders();
   return data?.public_base_url;
+}
+
+// 报告后端是否启用了 Webhook 管理（配置了 WEBHOOK_SECRET_KEY）。
+export function useWebhooksEnabled(): boolean {
+  const { data } = useAuthProviders();
+  return Boolean(data?.webhooks);
 }
 
 export function useMe() {

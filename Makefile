@@ -74,7 +74,8 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 	@set -eu; \
 	check_absent() { \
 		pkg=$$1; shift; \
-		deps=$$(go list -deps "$$pkg"); \
+		self=$$(go list "$$pkg"); \
+		deps=$$(go list -deps "$$pkg" | grep -Fxv "$$self"); \
 		for forbid in "$$@"; do \
 			if printf '%s\n' "$$deps" | grep -Eq "$$forbid"; then \
 				echo "arch-check 失败: $$pkg 不应依赖 $$forbid" >&2; \
@@ -83,18 +84,26 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 		done; \
 	}; \
 	check_absent ./cmd/redirector \
-		'^shortlink/internal/(identity|risk|job|audit|postgres)(/|$$)' \
+		'^shortlink/internal/(identity|risk|job|audit|postgres|safehttp|webhook|mailer)(/|$$)' \
 		'^github\.com/coreos/go-oidc' \
 		'^golang\.org/x/oauth2'; \
 	check_absent ./internal/httpx \
-		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit)(/|$$)'; \
+		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit|safehttp|webhook|mailer)(/|$$)'; \
 	check_absent ./internal/identity \
 		'^github\.com/coreos/go-oidc' \
 		'^golang\.org/x/oauth2' \
 		'^github\.com/jackc/pgx' \
 		'^github\.com/redis/go-redis'; \
 	check_absent ./internal/config \
-		'^shortlink/internal/(postgres|pgredirect|cache|job|risk|link|identity)(/|$$)'; \
+		'^shortlink/internal/(postgres|pgredirect|cache|job|risk|link|identity|safehttp|webhook|mailer)(/|$$)'; \
+	check_absent ./internal/safehttp \
+		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit|webhook|mailer)(/|$$)'; \
+	check_absent ./internal/mailer \
+		'^shortlink/internal/' \
+		'^github\.com/jackc/pgx' \
+		'^github\.com/redis/go-redis' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
 	echo "arch-check: ok"
 
 verify: check arch-check lint build ## 完整代码检查：check + arch-check + golangci-lint + build

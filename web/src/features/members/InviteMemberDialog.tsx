@@ -88,9 +88,10 @@ export function InviteMemberDialog({
                 <DialogTitle>邀请已登记</DialogTitle>
               </div>
               <DialogDescription>
-                当前暂未开启自动邮件通知。请将下方控制台登录入口发给{' '}
-                <strong className="font-mono text-zinc-900">{createdInv.email}</strong>
-                ，对方使用该已验证邮箱登录后将自动以 {ROLE_LABELS[createdInv.role]} 身份加入组织。
+                若后端已配置 SMTP，系统会自动向{' '}
+                <strong className="font-mono text-zinc-900">{createdInv.email}</strong>{' '}
+                发送邀请邮件；你也可以复制下方控制台登录入口发给对方，登录后将自动以{' '}
+                {ROLE_LABELS[createdInv.role]} 身份加入组织。
               </DialogDescription>
             </DialogHeader>
 

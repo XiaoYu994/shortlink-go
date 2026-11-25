@@ -11,7 +11,7 @@
 | console | `GET` | `/healthz` | 存活检查，不访问依赖，返回 `ok` |
 | console | `GET` | `/readyz` | 就绪检查，PostgreSQL 能 Ping 通才返回 `ok` |
 | console | `GET` | `/metrics` | Prometheus 指标，运维端点 |
-| console | `GET` | `/api/v1/auth/providers` | 查询当前已启用的登录方式（`oidc`、`github`），无需鉴权 |
+| console | `GET` | `/api/v1/auth/providers` | 查询当前已启用的登录方式与能力开关（`oidc`、`github`、`webhooks`、`public_base_url`），无需鉴权 |
 | console | `GET` | `/api/v1/auth/login` | 发起 OIDC 授权码登录（支持可选相对路径 `?return_to=/...`，仅配置完整 `OIDC_*` 时注册） |
 | console | `GET` | `/api/v1/auth/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（有 `return_to` 时 302 跳转，否则返回 200 JSON；仅配置完整 `OIDC_*` 时注册） |
 | console | `GET` | `/api/v1/auth/github/login` | 发起 GitHub OAuth 2.0 登录（支持可选 `?return_to=/...`，仅配置完整 `GITHUB_*` 时注册） |
@@ -29,6 +29,13 @@
 | console | `POST` | `/api/v1/api-keys` | 为当前组织签发 API Key（明文只返回一次，需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
 | console | `DELETE` | `/api/v1/api-keys/{id}` | 吊销当前组织的 API Key（需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
 | console | `GET` | `/api/v1/audit-logs` | 查询当前组织的操作审计日志（支持按 `action` 筛选与 Keyset 游标分页，需要 `audit:read`） |
+| console | `GET` | `/api/v1/webhooks` | 当前组织 Webhook 订阅列表（不含密文，需同时配置 `WEBHOOK_SECRET_KEY` 且启用 OIDC/GitHub 登录，需要 `webhooks:read`，仅 `owner`/`admin` 会话） |
+| console | `POST` | `/api/v1/webhooks` | 创建 Webhook 订阅（`secret` 明文仅返回一次，最多 5 个，需要 `webhooks:write`，仅 `owner`/`admin` 会话） |
+| console | `PATCH` | `/api/v1/webhooks/{id}` | 修改 Webhook `url`、`description`、`events` 或 `enabled`（手动启用清零连续失败计数，需要 `webhooks:write`） |
+| console | `DELETE` | `/api/v1/webhooks/{id}` | 删除 Webhook 订阅并写审计日志（排队任务自动跳过，历史投递明细不可再查并由后台保留期任务分批清理；返回 204，需要 `webhooks:write`） |
+| console | `POST` | `/api/v1/webhooks/{id}/rotate-secret` | 轮换签名密钥（旧密钥立即失效，新 `secret` 明文仅返回一次，需要 `webhooks:write`） |
+| console | `POST` | `/api/v1/webhooks/{id}/test` | 异步入队一条 `webhook.ping` 测试任务（返回 `202 Accepted`，需要 `webhooks:write`） |
+| console | `GET` | `/api/v1/webhooks/{id}/deliveries` | 按 Keyset 游标分页查询指定 Webhook 的投递历史（需要 `webhooks:read`） |
 | console | `GET` | `/`（及前端路径） | 可选：配置 `WEB_DIST_DIR` 时托管最小前端控制台 SPA，`/api/*`、`/r/*`、运维路径严格保持隔离 |
 | console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
@@ -246,7 +253,7 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 
 ## 登录方式查询与回调跳转
 
-`GET /api/v1/auth/providers` 始终注册、无需鉴权，返回 `{"oidc":true,"github":false,"public_base_url":"http://127.0.0.1:8080"}`（未配置 `PUBLIC_BASE_URL` 时省略 `public_base_url`），供前端控制台按服务端配置渲染登录按钮与公开短链跳转地址。
+`GET /api/v1/auth/providers` 始终注册、无需鉴权，返回 `{"oidc":true,"github":false,"webhooks":true,"public_base_url":"http://127.0.0.1:8080"}`（未配置 `PUBLIC_BASE_URL` 时省略 `public_base_url`），供前端控制台按服务端配置渲染登录按钮、Webhook 菜单及公开短链跳转地址。
 
 `/api/v1/auth/login` 与 `/api/v1/auth/github/login` 支持可选查询参数 `?return_to=/...`：
 
@@ -435,7 +442,7 @@ curl -i -X POST -b cookies.txt \
 三个接口均走管理 API 鉴权链（要求 `sl_session` + `X-Org-ID`，受限流和跨站写保护），权限沿用 `members:read` / `members:write`：
 
 - `GET /api/v1/invitations`（需要 `members:read`）：按 `id` 降序返回当前组织的全部邀请，含派生状态 `status`（`pending`/`accepted`/`revoked`/`expired`）、`invited_by`、`created_at`、`expires_at`、`accepted_at`、`revoked_at`。
-- `POST /api/v1/invitations`（需要 `members:write`）：请求体 `{"email":"bob@example.com","role":"member","expires_at":"..."}`（`expires_at` 可选，须为将来时间）。自动写入 `invited_by = 当前用户 ID`；遵循角色等级（`admin` 不可邀请 `owner`，返回 403）；同组织同邮箱已存在待兑现邀请返回 409。受邀用户随后以该已验证邮箱登录时自动兑现为组织成员。
+- `POST /api/v1/invitations`（需要 `members:write`）：请求体 `{"email":"bob@example.com","role":"member","expires_at":"..."}`（`expires_at` 可选，须为将来时间）。自动写入 `invited_by = 当前用户 ID`；遵循角色等级（`admin` 不可邀请 `owner`，返回 403）；同组织同邮箱已存在待兑现邀请返回 409。同一事务原子入队 `invitation.email` 任务；当 `console worker` 配置了 `SMTP_*` 时异步发送包含组织名与登录链接（`CONSOLE_PUBLIC_URL`）的邀请邮件（未配置 SMTP 时直接跳过，不影响人工复制登录入口）。受邀用户随后以该已验证邮箱登录时自动兑现为组织成员。
 - `DELETE /api/v1/invitations/{id}`（需要 `members:write`）：撤销当前组织的待兑现邀请，成功返回 `204 No Content`。跨组织或不存在返回 404；非 `pending` 状态返回 409；`admin` 不可撤销 `owner` 邀请（403）。
 
 ### 组织 API Key 自助管理
@@ -456,10 +463,35 @@ curl -i -b cookies.txt -H 'X-Org-ID: 1' \
 - 需要 `audit:read`（**仅授 `owner` 与 `admin` 会话**；`member`、`viewer` 与任何 API Key 一律返回 403），走管理 API 鉴权链并附带 `Cache-Control: no-store`（详见 [ADR 0023](adr/0023-audit-logs.md)）。
 - 查询参数：
   - `limit`：每页条数，默认 `20`，最大 `100`，非法值返回 400 `{"error":"invalid limit"}`。
-  - `action`：可选动作过滤，枚举值：`org.create`、`tenant.limits_update`、`link.create`、`link.update`、`link.delete`、`link.ban`、`link.unban`、`member.role_update`、`member.remove`、`invitation.create`、`invitation.revoke`、`invitation.redeem`、`apikey.issue`、`apikey.revoke`；非法值返回 400 `{"error":"invalid action"}`。
+  - `action`：可选动作过滤，枚举值：`org.create`、`tenant.limits_update`、`link.create`、`link.update`、`link.delete`、`link.ban`、`link.unban`、`member.role_update`、`member.remove`、`invitation.create`、`invitation.revoke`、`invitation.redeem`、`apikey.issue`、`apikey.revoke`、`webhook.create`、`webhook.update`、`webhook.delete`、`webhook.rotate_secret`、`webhook.test`、`webhook.auto_disable`；非法值返回 400 `{"error":"invalid action"}`。
   - `cursor`：可选游标（上一页返回的 `next_cursor`，即最后一条审计记录的正整数 `id`）；非法值返回 400 `{"error":"invalid cursor"}`。
 - 返回 `200 OK`：`{"items":[...],"next_cursor":"..."}`（无下一页时省略 `next_cursor`）。每项包含 `id`、`actor_kind`（`user` / `api_key` / `operator` / `system`）、可选 `actor_id` / `actor_email` / `actor_name`、`action`、`target_type`、`target_id`、可选 `request_id`（HTTP 请求 ID 或 worker `job:<id>`）、非敏感 `metadata` 对象与 `created_at`（UTC RFC3339）。
 - 审计事件与业务变更在同一数据库事务内原子提交，仅记录真实发生的状态变更（重复幂等 `ban`/`unban` 或校验失败的写操作不写入审计行）。
+
+## Webhooks
+
+仅当 `console` 同时配置了 64 位小写 hex 主密钥 `WEBHOOK_SECRET_KEY` 且启用了至少一种会话登录方式（`OIDC_*` 或 `GITHUB_*`）时，才会挂载 `/api/v1/webhooks*`（任一缺失时路由返回 404，且 `GET /api/v1/auth/providers` 返回 `"webhooks":false`）。详见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)。
+
+全部 Webhook 接口走管理 API 鉴权链（`sl_session` + `X-Org-ID` + 按租户限流 + `CrossOriginProtection`），**仅授予 `owner` 与 `admin` 会话**（`webhooks:read` / `webhooks:write`；API Key 永远返回 403），响应一律带 `Cache-Control: no-store`。每个组织最多配置 `5` 个 Webhook（并发加行锁校验，超限返回 409 `{"error":"webhook limit exceeded"}`）。
+
+### 订阅管理接口
+
+- `GET /api/v1/webhooks`（`webhooks:read`）：按 `id` 降序返回当前组织全部订阅元数据（`id`、`url`、可选 `description`、`events`、`secret_prefix`、`enabled`、`consecutive_failures`、可选 `disabled_reason`/`disabled_at`、可选 `created_by`、`created_at`、`updated_at`）。
+- `POST /api/v1/webhooks`（`webhooks:write`）：请求体 `{"url":"https://hooks.example.com/shortlink","description":"prod","events":["link.created","link.banned"]}`。URL 经过严格 SSRF 校验（禁止内网/回环/元数据网段，只允许 80/443 或 `WEBHOOK_ALLOWED_PORTS` 白名单端口，最长 2048 字节）；`events` 为非空子集（可选：`link.created`、`link.updated`、`link.deleted`、`link.banned`、`link.unbanned`）。成功返回 `201 Created` 与仅出现一次的明文 `"secret":"whsec_<64位hex>"`（AES-256-GCM 密文绑定 `tenant_id` AAD 存库）。
+- `PATCH /api/v1/webhooks/{id}`（`webhooks:write`）：部分更新 `url`、`description`、`events`、`enabled`（至少传一个字段）。将 `enabled` 设为 `true` 时会清零 `consecutive_failures` 并清空 `disabled_reason`/`disabled_at`。
+- `DELETE /api/v1/webhooks/{id}`（`webhooks:write`）：在单事务内删除 `webhooks` 订阅行并写入 `webhook.delete` 审计日志，返回 `204 No Content`。尚未投递的排队任务回表查不到订阅时自动 `Skip`；关联的历史 `webhook_deliveries` 行不再对管理接口可见，由 worker 周期保留期清理任务分批删除。
+- `POST /api/v1/webhooks/{id}/rotate-secret`（`webhooks:write`）：立即生成新密钥覆盖密文并返回 `200 OK` + 新 `"secret":"whsec_..."`。
+- `POST /api/v1/webhooks/{id}/test`（`webhooks:write`）：无论订阅当前是否启用，立即入队一条 `webhook.ping` 任务（单次尝试不重试，不影响连续失败计数），返回 `202 Accepted`：`{"job_id":123,"delivery_id":"dlv_123"}`。
+- `GET /api/v1/webhooks/{id}/deliveries`（`webhooks:read`）：按 `id` 降序分页查询指定订阅的投递尝试记录（支持 `limit` 默认 20/最大 100、`cursor` 游标），每项含 `id`、`webhook_id`、`job_id`、`delivery_id`、`event`、`attempt`、`status`（`success`/`retry`/`failed`）、可选 `http_status`、`duration_ms`、可选 `error_message`/`response_snippet`（已脱敏截断）、`created_at`。
+
+### 投递格式与 HMAC 签名校验
+
+短链写入路径（`link.created`、`link.updated`、`link.deleted`、`link.banned`、`link.unbanned`）在 PostgreSQL 业务事务内按条件 `enabled = TRUE AND events @> ARRAY[$event]` 原子扇出 `webhook.deliver` 任务到 `jobs` 队列。`console worker` 投递 HTTP POST 请求：
+
+- 固定禁用自动重定向（收到 `3xx` 直接判终态失败），默认单次超时 `5s`，按目标 `host` 令牌桶限速（超限调用 `job.Defer` 延迟调度，不消耗尝试次数）。
+- 请求头包含：`Content-Type: application/json; charset=utf-8`、`User-Agent: shortlink-webhook/1.0`、`X-Shortlink-Event`、`X-Shortlink-Delivery: dlv_<job_id>`（同一任务跨重试保持不变，供接收端幂等去重）与 `X-Shortlink-Signature: t=<unix_sec>,v1=<hex_hmac>`。
+- 签名明文为 `"<unix_sec>." + <原始请求体字节>`，使用订阅明文密钥做 `HMAC-SHA256`（十六进制小写）。建议接收端先检查 `|now - t| <= 300s`，再对完整原始请求体计算 HMAC 并用常量时间比较（如 Go `hmac.Equal` / Python `hmac.compare_digest`）。
+- 投递结果判定：`2xx` 记成功（并清零 `consecutive_failures`）；网络超时、`408`、`429`、`5xx` 按独立指数退避重试（默认最多 `6` 次）；`3xx`、除 `408`/`429` 外的 `4xx` 与 SSRF 拦截直接标记终态失败。非 `webhook.ping` 终态失败连续达到阈值（默认 `10`，配置 `0` 关闭）时自动熔断停用订阅并写 `webhook.auto_disable` 系统审计日志。
 
 ## 跳转
 
@@ -519,12 +551,15 @@ curl -i localhost:8081/metrics   # console
 - `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）
 - `shortlink_clicks_written_total`（交给存储的点击数，`result` 为 `success` 或 `error`。启动后两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`；只有 redirector 有）
 - `shortlink_clicks_recorder_stopped`（`ClickRecorder` 后台写入协程因 panic 停机时置 `1`，触发紧急告警）
-- `shortlink_jobs_processed_total`（后台任务完成计数，`kind` 包括 `link.risk_scan`、`cache.reconcile`、`link.purge_stats`，`result` 为 `done`、`skipped`、`retry`、`dead`；仅 `console worker` 配置 `WORKER_ADDR` 时暴露）
+- `shortlink_jobs_processed_total`（后台任务完成计数，`kind` 包括 `link.risk_scan`、`cache.reconcile`、`link.purge_stats`、`webhook.deliver`、`invitation.email`，`result` 为 `done`、`skipped`、`retry`、`dead`；仅 `console worker` 配置 `WORKER_ADDR` 时暴露）
 - `shortlink_job_duration_seconds`（后台任务执行耗时直方图，`kind`；仅 `console worker`）
 - `shortlink_jobs_in_flight`（当前执行中的后台任务数，`kind`；仅 `console worker`）
 - `shortlink_jobs_reaped_total`（超时租约回收次数，`kind`；仅 `console worker`）
 - `shortlink_jobs_oldest_pending_age_seconds`（最老待执行任务等待秒数，`kind`，反映异步风控暴露窗口；仅 `console worker`）
 - `shortlink_risk_cache_lookups_total`（风控扫描结果缓存查找次数，`result` 为 `hit`、`miss`、`fallback`；仅 `console worker`）
+- `shortlink_webhook_deliveries_total`（Webhook 出站投递结果计数，`event` 为订阅事件或 `webhook.ping`，`result` 为 `success`、`retry`、`failed`、`skipped`、`deferred`；仅 `console worker`）
+- `shortlink_webhook_delivery_duration_seconds`（Webhook 出站 HTTP 投递耗时直方图，`event`；仅 `console worker`）
+- `shortlink_webhook_auto_disabled_total`（Webhook 连续终态失败触发自动熔断停用的累计次数；仅 `console worker`）
 
 它是运维端点，不版本化，公网隔离由部署层保证。
 

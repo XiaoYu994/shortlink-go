@@ -766,3 +766,58 @@ func TestRunnerInjectsJobContextIntoLogs(t *testing.T) {
 		}
 	})
 }
+
+func TestRunnerRetryAfterOverridesBackoffAndMarksDeadOnExhaustion(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q := newFakeQueue()
+		jobID := q.add(Job{Kind: KindWebhookDeliver, MaxAttempts: 2})
+
+		var attempts atomic.Int32
+		customDelay := 12 * time.Second
+
+		runner := New(q, map[string]Handler{
+			KindWebhookDeliver: func(_ context.Context, _ Job) error {
+				attempts.Add(1)
+				return RetryAfter(customDelay, errors.New("upstream 503"))
+			},
+		}, nil, prometheus.NewRegistry(), Options{
+			Concurrency:     1,
+			PollInterval:    20 * time.Millisecond,
+			BaseBackoff:     time.Second,
+			MaxBackoff:      2 * time.Second,
+			MetricsInterval: time.Hour,
+			ReapInterval:    time.Hour,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- runner.Run(ctx) }()
+
+		// 第一次尝试失败后，RunAt 应至少推迟 customDelay（远大于 MaxBackoff=2s）。
+		synctest.Wait()
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		j1, ok := q.get(jobID)
+		if !ok || j1.Status != StatusPending || j1.Attempts != 1 {
+			t.Fatalf("after 1st attempt = %+v, want pending attempt 1", j1)
+		}
+		if remaining := time.Until(j1.RunAt); remaining < 11*time.Second {
+			t.Fatalf("remaining backoff = %v, want ~%v", remaining, customDelay)
+		}
+
+		// 等待超过 customDelay，第二次尝试也失败，耗尽 MaxAttempts=2 进入 dead。
+		time.Sleep(customDelay)
+		synctest.Wait()
+
+		j2, _ := q.get(jobID)
+		if j2.Status != StatusDead || j2.Attempts != 2 || attempts.Load() != 2 {
+			t.Fatalf("after 2nd attempt = %+v (calls=%d), want dead with 2 attempts", j2, attempts.Load())
+		}
+
+		cancel()
+		if err := <-errCh; err != nil {
+			t.Fatalf("Run error = %v", err)
+		}
+	})
+}

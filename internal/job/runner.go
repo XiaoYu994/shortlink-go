@@ -404,7 +404,10 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 		r.processed.WithLabelValues(j.Kind, resultDead).Inc()
 
 	default:
-		delay := Backoff(j.Attempts, r.opts.BaseBackoff, r.opts.MaxBackoff)
+		delay, customDelay := RetryAfterDelay(err)
+		if !customDelay {
+			delay = Backoff(j.Attempts, r.opts.BaseBackoff, r.opts.MaxBackoff)
+		}
 		if rerr := r.queue.Retry(commitCtx, RetryParams{
 			ID:             j.ID,
 			LockedBy:       r.opts.WorkerID,

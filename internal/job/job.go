@@ -26,6 +26,10 @@ const (
 	KindCacheReconcile = "cache.reconcile"
 	// KindLinkPurgeStats 是删除短链后异步分批清理三张日聚合统计表的任务（ADR 0025）。
 	KindLinkPurgeStats = "link.purge_stats"
+	// KindWebhookDeliver 是向租户订阅端点投递生命周期事件或 ping 的异步任务（ADR 0027）。
+	KindWebhookDeliver = "webhook.deliver"
+	// KindInvitationEmail 是创建组织成员邀请后异步发送通知邮件的任务（ADR 0027）。
+	KindInvitationEmail = "invitation.email"
 
 	DefaultMaxAttempts   = 5
 	DefaultReapBatchSize = 500
@@ -177,6 +181,37 @@ func DeferDelay(err error) (time.Duration, bool) {
 		return 0, false
 	}
 	return de.delay, true
+}
+
+type retryAfterError struct {
+	delay time.Duration
+	err   error
+}
+
+func (e retryAfterError) Error() string { return e.err.Error() }
+func (e retryAfterError) Unwrap() error { return e.err }
+
+/*
+RetryAfter 为失败任务指定自定义下次退避时长，同时照常消耗一次重试次数（与 Defer 区分）。
+用于 webhook.deliver 等拥有独立重试节拍的任务（ADR 0027）。
+*/
+func RetryAfter(delay time.Duration, err error) error {
+	if err == nil {
+		return nil
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	return retryAfterError{delay: delay, err: err}
+}
+
+// RetryAfterDelay 取出 RetryAfter 指定的退避时长。
+func RetryAfterDelay(err error) (time.Duration, bool) {
+	re, ok := errors.AsType[retryAfterError](err)
+	if !ok {
+		return 0, false
+	}
+	return re.delay, true
 }
 
 /*

@@ -69,6 +69,7 @@ web/src/
     ├── links/              # 短链列表（游标分页/状态筛选/服务端关键词搜索/直达查询）、创建成功态+二维码、统计页
     ├── members/            # 成员列表/改角色/移出、邀请列表/登录入口复制/撤销
     ├── api-keys/           # API Key 列表（名称/最近使用）、按 scope 签发（明文一次性展示+cURL）、吊销
+    ├── webhooks/           # Webhook 订阅管理、密钥轮换/一次性展示、测试 Ping 与投递记录抽屉
     └── audit/              # 组织操作审计日志（动作筛选、游标分页、请求编号复制）
 ```
 
@@ -95,11 +96,11 @@ web/src/
 
 ---
 
-## 后续扩展新页面（例如阶段 15 Webhook 管理）怎么加
+## 后续扩展新页面怎么加
 
 只需四步，不改现有业务模块（更多规范见 [web/AGENTS.md](AGENTS.md)）：
 
 1. 在 `src/lib/endpoints.ts` 注册后端端点，在 `src/app/routes.ts` 注册路由模式与构造函数；
-2. 新建 `src/features/audit/`，放 `api.ts`（query keys + hooks）、`AuditLogsPage.tsx` 与对应测试；
+2. 新建 `src/features/<domain>/`（参考 `src/features/webhooks/` 或 `src/features/audit/`），放 `api.ts`（query keys + hooks）、页面/弹窗组件与对应测试；
 3. 在 `src/app/router.tsx` 的 `/orgs/:orgId` 下挂载路由，并在 `src/app/ConsoleLayout.tsx` 的 `navItems` 数组里加导航入口；
 4. 运行 `make web-check` 校验格式、类型、Lint、测试与构建。

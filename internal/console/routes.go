@@ -47,6 +47,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	if s.auditLogs != nil {
 		mux.Handle("GET "+apiV1Prefix+"/audit-logs", s.consoleRoute(identity.PermAuditRead, s.auditLogs.handleList))
 	}
+	if s.webhooks != nil {
+		mux.Handle("GET "+apiV1Prefix+"/webhooks", s.consoleRoute(identity.PermWebhooksRead, s.webhooks.handleList))
+		mux.Handle("POST "+apiV1Prefix+"/webhooks", s.consoleRoute(identity.PermWebhooksWrite, s.webhooks.handleCreate))
+		mux.Handle("PATCH "+apiV1Prefix+"/webhooks/{id}", s.consoleRoute(identity.PermWebhooksWrite, s.webhooks.handleUpdate))
+		mux.Handle("DELETE "+apiV1Prefix+"/webhooks/{id}", s.consoleRoute(identity.PermWebhooksWrite, s.webhooks.handleDelete))
+		mux.Handle("POST "+apiV1Prefix+"/webhooks/{id}/rotate-secret", s.consoleRoute(identity.PermWebhooksWrite, s.webhooks.handleRotateSecret))
+		mux.Handle("POST "+apiV1Prefix+"/webhooks/{id}/test", s.consoleRoute(identity.PermWebhooksWrite, s.webhooks.handleTest))
+		mux.Handle("GET "+apiV1Prefix+"/webhooks/{id}/deliveries", s.consoleRoute(identity.PermWebhooksRead, s.webhooks.handleListDeliveries))
+	}
 	mux.Handle("POST "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksWrite, s.handleCreate))
 	mux.Handle("GET "+apiV1Prefix+"/links", s.consoleRoute(identity.PermLinksRead, s.handleList))
 	mux.Handle("GET "+apiV1Prefix+"/links/{code}", s.consoleRoute(identity.PermLinksRead, s.handleGet))
@@ -80,6 +89,7 @@ func (s *Server) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, authProvidersResponse{
 		OIDC:          s.auth != nil && s.auth.oidc != nil,
 		GitHub:        s.auth != nil && s.auth.github != nil,
+		Webhooks:      s.webhooks != nil,
 		PublicBaseURL: s.publicBaseURL,
 	})
 }

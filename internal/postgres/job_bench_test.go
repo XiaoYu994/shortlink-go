@@ -19,6 +19,7 @@ import (
 	"shortlink/internal/idgen"
 	"shortlink/internal/job"
 	"shortlink/internal/risk"
+	"shortlink/internal/safehttp"
 )
 
 /*
@@ -185,7 +186,7 @@ FROM generate_series(1, $3)`, tenantID, string(payload), b.N); err != nil {
 				vc = risk.NewVerdictCache(rdb, prometheus.NewRegistry(), risk.VerdictCacheOptions{})
 			}
 			scanner := risk.NewRuleScanner(risk.RuleScannerOptions{
-				HTTPClient: risk.NewSafeHTTPClient(risk.HTTPClientOptions{
+				HTTPClient: risk.NewSafeHTTPClient(safehttp.ClientOptions{
 					Timeout:          5 * time.Second,
 					AllowedHostPorts: []string{stubURL.Host},
 				}),
@@ -195,7 +196,7 @@ FROM generate_series(1, $3)`, tenantID, string(payload), b.N); err != nil {
 				Scanner: scanner,
 				Banner:  linkStore,
 				Cache:   vc,
-				Limiter: risk.NewHostLimiter(0),
+				Limiter: safehttp.NewHostLimiter(0),
 			})
 
 			b.ResetTimer()

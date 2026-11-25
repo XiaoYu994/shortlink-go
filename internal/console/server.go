@@ -13,6 +13,8 @@ import (
 
 	"shortlink/internal/httpx"
 	"shortlink/internal/link"
+	"shortlink/internal/safehttp"
+	"shortlink/internal/webhook"
 )
 
 /*
@@ -57,14 +59,17 @@ type Options struct {
 		Members / Orgs / Invitations / APIKeys 非空时，分别注册对应组织自助与成员管理路由（ADR 0018、ADR 0021）。
 		全为空时不挂登录、会话与自助路由，只支持 API Key（ADR 0018）。
 	*/
-	OIDC        OIDCClient
-	GitHub      GitHubClient
-	Sessions    SessionStore
-	Members     MemberStore
-	Orgs        OrgStore
-	Invitations InvitationStore
-	APIKeys     APIKeyStore
-	AuditLogs   AuditLogStore
+	OIDC           OIDCClient
+	GitHub         GitHubClient
+	Sessions       SessionStore
+	Members        MemberStore
+	Orgs           OrgStore
+	Invitations    InvitationStore
+	APIKeys        APIKeyStore
+	AuditLogs      AuditLogStore
+	Webhooks       WebhookStore
+	WebhookCipher  *webhook.SecretCipher
+	WebhookURLOpts safehttp.URLValidationOptions
 	// WebDistDir 非空时在 / 挂载前端构建产物（SPA），不拦截 /api/*、/r/* 和运维端点（ADR 0021）。
 	WebDistDir string
 	// PublicBaseURL 是公开短链跳转基地址（如 https://s.example.com），随 /api/v1/auth/providers 下发给前端展示与复制。
@@ -96,6 +101,7 @@ type Server struct {
 	invitations   *invitationHandler
 	apiKeys       *apiKeyHandler
 	auditLogs     *auditHandler
+	webhooks      *webhookHandler
 	web           http.Handler
 	publicBaseURL string
 	limiter       *tenantRateLimiter
@@ -122,6 +128,9 @@ type serverDeps struct {
 	invitations       InvitationStore
 	apiKeys           APIKeyStore
 	auditLogs         AuditLogStore
+	webhooks          WebhookStore
+	webhookCipher     *webhook.SecretCipher
+	webhookURLOpts    safehttp.URLValidationOptions
 	webDistDir        string
 	publicBaseURL     string
 	sessionTTL        time.Duration
@@ -157,6 +166,9 @@ func New(logger *slog.Logger, store Store, requestTimeout time.Duration, registr
 		invitations:       opts.Invitations,
 		apiKeys:           opts.APIKeys,
 		auditLogs:         opts.AuditLogs,
+		webhooks:          opts.Webhooks,
+		webhookCipher:     opts.WebhookCipher,
+		webhookURLOpts:    opts.WebhookURLOpts,
 		webDistDir:        opts.WebDistDir,
 		publicBaseURL:     opts.PublicBaseURL,
 		sessionTTL:        opts.SessionTTL,
@@ -198,6 +210,10 @@ func newServer(d serverDeps) *Server {
 	if d.auditLogs != nil {
 		auditLogs = newAuditHandler(logger, d.auditLogs)
 	}
+	var webhooks *webhookHandler
+	if d.webhooks != nil && d.webhookCipher != nil {
+		webhooks = newWebhookHandler(logger, d.webhooks, d.webhookCipher, d.webhookURLOpts)
+	}
 	var web http.Handler
 	if d.webDistDir != "" {
 		web = newWebSPAHandler(d.webDistDir)
@@ -218,6 +234,7 @@ func newServer(d serverDeps) *Server {
 		invitations:   invitations,
 		apiKeys:       apiKeys,
 		auditLogs:     auditLogs,
+		webhooks:      webhooks,
 		web:           web,
 		publicBaseURL: d.publicBaseURL,
 		limiter:       newTenantRateLimiter(),

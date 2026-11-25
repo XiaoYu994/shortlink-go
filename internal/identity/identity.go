@@ -106,14 +106,16 @@ func NormalizeEmail(raw string) (string, error) {
 type Perm string
 
 const (
-	PermLinksRead    Perm = "links:read"
-	PermLinksWrite   Perm = "links:write"
-	PermStatsRead    Perm = "stats:read"
-	PermMembersRead  Perm = "members:read"
-	PermMembersWrite Perm = "members:write"
-	PermAPIKeysRead  Perm = "apikeys:read"
-	PermAPIKeysWrite Perm = "apikeys:write"
-	PermAuditRead    Perm = "audit:read"
+	PermLinksRead     Perm = "links:read"
+	PermLinksWrite    Perm = "links:write"
+	PermStatsRead     Perm = "stats:read"
+	PermMembersRead   Perm = "members:read"
+	PermMembersWrite  Perm = "members:write"
+	PermAPIKeysRead   Perm = "apikeys:read"
+	PermAPIKeysWrite  Perm = "apikeys:write"
+	PermAuditRead     Perm = "audit:read"
+	PermWebhooksRead  Perm = "webhooks:read"
+	PermWebhooksWrite Perm = "webhooks:write"
 )
 
 /*

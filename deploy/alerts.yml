@@ -73,13 +73,36 @@ groups:
           description: 任务类型 {{ $labels.kind }} 最老待执行任务等待超过 300 秒，检查 console worker 存活与并发。
 
       - alert: ShortlinkJobsDead
-        expr: sum by (kind) (increase(shortlink_jobs_processed_total{result="dead"}[5m])) > 0
+        # 排除第三方端点噪声较高的 webhook.deliver，单独由下方 Webhook 规则监控。
+        expr: sum by (kind) (increase(shortlink_jobs_processed_total{result="dead",kind!="webhook.deliver"}[5m])) > 0
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: 有后台任务进入 dead 终态
           description: 任务类型 {{ $labels.kind }} 最近 5 分钟有任务重试耗尽或永久失败进入 dead，请排查 last_error。
+
+      - alert: ShortlinkWebhookHighFailureRate
+        expr: |
+          sum(rate(shortlink_webhook_deliveries_total{result="failed"}[5m]))
+          /
+          clamp_min(sum(rate(shortlink_webhook_deliveries_total{result=~"success|failed"}[5m])), 1e-9) > 0.2
+          and sum(increase(shortlink_webhook_deliveries_total{result="failed"}[5m])) >= 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Webhook 终态投递失败率过高
+          description: 最近 5 分钟 Webhook 终态投递失败比例超过 20% 且至少 5 次失败，请检查订阅端健康状况。
+
+      - alert: ShortlinkWebhookAutoDisabled
+        expr: increase(shortlink_webhook_auto_disabled_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: 有 Webhook 订阅因连续失败自动熔断
+          description: 最近 5 分钟有订阅达到连续终态失败阈值并已自动停用。
 
       - alert: ShortlinkWorkerDown
         expr: up{job="worker"} == 0
