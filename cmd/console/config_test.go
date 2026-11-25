@@ -83,17 +83,16 @@ func baseConsoleTestEnv() map[string]string {
 
 func defaultBaseConfig(addr string) config.BaseConfig {
 	return config.BaseConfig{
-		Addr:                 addr,
-		DatabaseURL:          "postgres://localhost/shortlink",
-		RedisURL:             "redis://localhost:6379/0",
-		Pool:                 pgdb.DefaultPoolConfig(),
-		RequestTimeout:       config.DefaultRequestTimeout,
-		ShutdownTimeout:      config.DefaultShutdownTimeout,
-		DrainDelay:           config.DefaultDrainDelay,
-		LogLevel:             slog.LevelInfo,
-		LogFormat:            config.LogFormatText,
-		CacheMissConcurrency: cache.DefaultMissConcurrency,
-		CacheFetchTimeout:    cache.DefaultFetchTimeout,
+		Addr:              addr,
+		DatabaseURL:       "postgres://localhost/shortlink",
+		RedisURL:          "redis://localhost:6379/0",
+		Pool:              pgdb.DefaultPoolConfig(),
+		RequestTimeout:    config.DefaultRequestTimeout,
+		ShutdownTimeout:   config.DefaultShutdownTimeout,
+		DrainDelay:        config.DefaultDrainDelay,
+		LogLevel:          slog.LevelInfo,
+		LogFormat:         config.LogFormatText,
+		CacheFetchTimeout: cache.DefaultFetchTimeout,
 	}
 }
 
@@ -112,10 +111,11 @@ func TestLoadConsoleConfig(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "defaults ignore ADDR and do not require VISITOR_SALT",
+			name: "defaults ignore ADDR and redirector-only env",
 			env: map[string]string{
-				"ADDR":       ":8080",
-				"PPROF_ADDR": "0.0.0.0:6060",
+				"ADDR":                   ":8080",
+				"PPROF_ADDR":             "0.0.0.0:6060",
+				"CACHE_MISS_CONCURRENCY": "0",
 			},
 			want: defaults,
 		},
@@ -346,7 +346,13 @@ func TestLoadWorkerConfig(t *testing.T) {
 		want    WorkerConfig
 		wantErr string
 	}{
-		{name: "defaults", want: defaults},
+		{
+			name: "defaults ignore redirector-only env",
+			env: map[string]string{
+				"CACHE_MISS_CONCURRENCY": "0",
+			},
+			want: defaults,
+		},
 		{
 			name: "explicit worker values",
 			env: map[string]string{

@@ -33,9 +33,8 @@ const (
 		保证读完 body，并在超时后还有时间把 504 写回客户端。
 	*/
 	DefaultRequestTimeout = 5 * time.Second
-	// DefaultCacheMissConcurrency 与 DefaultCacheFetchTimeout 为进程未显式覆写时的默认回源保护参数。
-	DefaultCacheMissConcurrency = 8
-	DefaultCacheFetchTimeout    = time.Second
+	// DefaultCacheFetchTimeout 为进程未显式覆写时的默认缓存回源/复查超时。
+	DefaultCacheFetchTimeout = time.Second
 
 	// LogFormatText / LogFormatJSON 区分本地可读日志与生产结构化采集日志。
 	LogFormatText = "text"
@@ -47,10 +46,9 @@ BaseConfigDefaults 指定进程级别的默认监听与缓存参数。
 由各 cmd 包传入，避免多个进程在共享 .env 中争夺同一个环境变量。
 */
 type BaseConfigDefaults struct {
-	Addr                 string
-	OpsAddr              string
-	CacheMissConcurrency int
-	CacheFetchTimeout    time.Duration
+	Addr              string
+	OpsAddr           string
+	CacheFetchTimeout time.Duration
 }
 
 /*
@@ -74,32 +72,26 @@ type BaseConfig struct {
 	LogLevel   slog.Level // 日志级别，默认 info
 	LogFormat  string     // text 或 json，默认 text
 
-	// CacheMissConcurrency 是普通缓存未命中的回源并发上限。
-	CacheMissConcurrency int
-	// CacheFetchTimeout 是单次回源超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
+	// CacheFetchTimeout 是单次回源或写后复查的超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
 	CacheFetchTimeout time.Duration
 }
 
 // LoadBaseConfig 加载并校验各进程共用的基础环境变量。
 func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
-	if defaults.CacheMissConcurrency <= 0 {
-		defaults.CacheMissConcurrency = DefaultCacheMissConcurrency
-	}
 	if defaults.CacheFetchTimeout <= 0 {
 		defaults.CacheFetchTimeout = DefaultCacheFetchTimeout
 	}
 
 	cfg := BaseConfig{
-		Addr:                 defaults.Addr,
-		OpsAddr:              defaults.OpsAddr,
-		Pool:                 pgdb.DefaultPoolConfig(),
-		RequestTimeout:       DefaultRequestTimeout,
-		ShutdownTimeout:      DefaultShutdownTimeout,
-		DrainDelay:           DefaultDrainDelay,
-		LogLevel:             slog.LevelInfo,
-		LogFormat:            LogFormatText,
-		CacheMissConcurrency: defaults.CacheMissConcurrency,
-		CacheFetchTimeout:    defaults.CacheFetchTimeout,
+		Addr:              defaults.Addr,
+		OpsAddr:           defaults.OpsAddr,
+		Pool:              pgdb.DefaultPoolConfig(),
+		RequestTimeout:    DefaultRequestTimeout,
+		ShutdownTimeout:   DefaultShutdownTimeout,
+		DrainDelay:        DefaultDrainDelay,
+		LogLevel:          slog.LevelInfo,
+		LogFormat:         LogFormatText,
+		CacheFetchTimeout: defaults.CacheFetchTimeout,
 	}
 
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
@@ -140,9 +132,6 @@ func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
 		return BaseConfig{}, err
 	}
 	if cfg.DrainDelay, err = EnvDuration("DRAIN_DELAY", cfg.DrainDelay); err != nil {
-		return BaseConfig{}, err
-	}
-	if cfg.CacheMissConcurrency, err = EnvInt("CACHE_MISS_CONCURRENCY", cfg.CacheMissConcurrency); err != nil {
 		return BaseConfig{}, err
 	}
 	if cfg.CacheFetchTimeout, err = EnvDuration("CACHE_FETCH_TIMEOUT", cfg.CacheFetchTimeout); err != nil {
@@ -203,9 +192,6 @@ func validateBase(cfg BaseConfig) error {
 	}
 	if cfg.DrainDelay < 0 {
 		return errors.New("DRAIN_DELAY must not be negative")
-	}
-	if cfg.CacheMissConcurrency <= 0 {
-		return errors.New("CACHE_MISS_CONCURRENCY must be positive")
 	}
 	if cfg.CacheFetchTimeout <= 0 {
 		return errors.New("CACHE_FETCH_TIMEOUT must be positive")

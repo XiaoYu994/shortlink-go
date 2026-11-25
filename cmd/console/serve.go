@@ -67,9 +67,8 @@ func runServe(cliOpts serveCLIOptions) error {
 	*/
 	pgStore := postgres.NewStore(db)
 	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
-		MissConcurrency: cfg.CacheMissConcurrency,
-		FetchTimeout:    cfg.CacheFetchTimeout,
-		Logger:          logger,
+		FetchTimeout: cfg.CacheFetchTimeout,
+		Logger:       logger,
 	})
 
 	oidcClient, githubClient, err := initAuthProviders(cfg, logger)
@@ -86,6 +85,11 @@ func runServe(cliOpts serveCLIOptions) error {
 		webhooks      console.WebhookStore
 		webhookCipher *webhook.SecretCipher
 	)
+	/*
+		以下均为仅限浏览器会话用户（ActorUser）调用的组织自助与治理路由（ADR 0018/0021/0023）：
+		API Key 的 scope 白名单仅含 links/stats，且各 handler 均做 ActorUser 纵深防御。
+		未配置 OIDC 或 GitHub 时无法产生会话，不挂载这些路由以保持最小暴露面。
+	*/
 	if oidcClient != nil || githubClient != nil {
 		sessions = pgStore
 		members = pgStore

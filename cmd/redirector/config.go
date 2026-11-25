@@ -41,6 +41,8 @@ type RedirectorConfig struct {
 		只接受回环地址：剖析数据里有堆内容，端点也没有鉴权。见 ADR 0013。
 	*/
 	PprofAddr string
+	// CacheMissConcurrency 是跳转读路径普通缓存未命中的进程内回源并发上限（ADR 0008）。
+	CacheMissConcurrency int
 	// AccessLogSampleRate 是 redirector 正常 INFO 访问日志的采样率（[0, 1]，默认 1 全量；5xx 与慢请求全保）。
 	AccessLogSampleRate float64
 	// AccessLogSlowThreshold 是判定慢请求并升为 Warn 全量保留的耗时门槛（默认 200ms）。
@@ -55,6 +57,7 @@ func (cfg RedirectorConfig) LogValue() slog.Value {
 		slog.Bool("trust_proxy_headers", cfg.TrustProxyHeaders),
 		slog.Int("trusted_proxy_cidrs_count", len(cfg.TrustedProxyCIDRs)),
 		slog.String("pprof_addr", cfg.PprofAddr),
+		slog.Int("cache_miss_concurrency", cfg.CacheMissConcurrency),
 		slog.Float64("access_log_sample_rate", cfg.AccessLogSampleRate),
 		slog.Duration("access_log_slow_threshold", cfg.AccessLogSlowThreshold),
 	)
@@ -72,10 +75,9 @@ PPROF_ADDR 若设置必须是回环地址。不读取 OIDC_* 或 GITHUB_*。
 */
 func loadRedirectorConfig() (RedirectorConfig, error) {
 	base, err := config.LoadBaseConfig(config.BaseConfigDefaults{
-		Addr:                 config.EnvString("ADDR", defaultRedirectorAddr),
-		OpsAddr:              os.Getenv("OPS_ADDR"),
-		CacheMissConcurrency: cache.DefaultMissConcurrency,
-		CacheFetchTimeout:    cache.DefaultFetchTimeout,
+		Addr:              config.EnvString("ADDR", defaultRedirectorAddr),
+		OpsAddr:           os.Getenv("OPS_ADDR"),
+		CacheFetchTimeout: cache.DefaultFetchTimeout,
 	})
 	if err != nil {
 		return RedirectorConfig{}, err
@@ -85,6 +87,7 @@ func loadRedirectorConfig() (RedirectorConfig, error) {
 		BaseConfig:             base,
 		VisitorSalt:            os.Getenv("VISITOR_SALT"),
 		PprofAddr:              os.Getenv("PPROF_ADDR"),
+		CacheMissConcurrency:   cache.DefaultMissConcurrency,
 		AccessLogSampleRate:    defaultAccessLogSampleRate,
 		AccessLogSlowThreshold: defaultAccessLogSlowThreshold,
 	}
@@ -109,6 +112,12 @@ func loadRedirectorConfig() (RedirectorConfig, error) {
 	}
 	if cfg.PprofAddr != "" && !config.IsLoopbackAddr(cfg.PprofAddr) {
 		return RedirectorConfig{}, errors.New("PPROF_ADDR must be a loopback address such as 127.0.0.1:6060")
+	}
+	if cfg.CacheMissConcurrency, err = config.EnvInt("CACHE_MISS_CONCURRENCY", cfg.CacheMissConcurrency); err != nil {
+		return RedirectorConfig{}, err
+	}
+	if cfg.CacheMissConcurrency <= 0 {
+		return RedirectorConfig{}, errors.New("CACHE_MISS_CONCURRENCY must be positive")
 	}
 	if cfg.AccessLogSampleRate, err = config.EnvFloat("ACCESS_LOG_SAMPLE_RATE", cfg.AccessLogSampleRate); err != nil {
 		return RedirectorConfig{}, err

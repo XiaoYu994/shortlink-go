@@ -22,7 +22,6 @@ func (cfg BaseConfig) LogValue() slog.Value {
 		slog.Duration("drain_delay", cfg.DrainDelay),
 		slog.String("log_level", cfg.LogLevel.String()),
 		slog.String("log_format", cfg.LogFormat),
-		slog.Int("cache_miss_concurrency", cfg.CacheMissConcurrency),
 		slog.Duration("cache_fetch_timeout", cfg.CacheFetchTimeout),
 	)
 }

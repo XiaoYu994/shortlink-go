@@ -47,19 +47,19 @@ func baseRedirectorTestEnv() map[string]string {
 func defaultRedirectorConfig() RedirectorConfig {
 	return RedirectorConfig{
 		BaseConfig: config.BaseConfig{
-			Addr:                 defaultRedirectorAddr,
-			DatabaseURL:          "postgres://localhost/shortlink",
-			RedisURL:             "redis://localhost:6379/0",
-			Pool:                 pgdb.DefaultPoolConfig(),
-			RequestTimeout:       config.DefaultRequestTimeout,
-			ShutdownTimeout:      config.DefaultShutdownTimeout,
-			DrainDelay:           config.DefaultDrainDelay,
-			LogLevel:             slog.LevelInfo,
-			LogFormat:            config.LogFormatText,
-			CacheMissConcurrency: cache.DefaultMissConcurrency,
-			CacheFetchTimeout:    cache.DefaultFetchTimeout,
+			Addr:              defaultRedirectorAddr,
+			DatabaseURL:       "postgres://localhost/shortlink",
+			RedisURL:          "redis://localhost:6379/0",
+			Pool:              pgdb.DefaultPoolConfig(),
+			RequestTimeout:    config.DefaultRequestTimeout,
+			ShutdownTimeout:   config.DefaultShutdownTimeout,
+			DrainDelay:        config.DefaultDrainDelay,
+			LogLevel:          slog.LevelInfo,
+			LogFormat:         config.LogFormatText,
+			CacheFetchTimeout: cache.DefaultFetchTimeout,
 		},
 		VisitorSalt:            "test-salt",
+		CacheMissConcurrency:   cache.DefaultMissConcurrency,
 		AccessLogSampleRate:    defaultAccessLogSampleRate,
 		AccessLogSlowThreshold: defaultAccessLogSlowThreshold,
 	}
@@ -111,16 +111,16 @@ func TestLoadRedirectorConfig(t *testing.T) {
 						ConnMaxLifetime: 90 * time.Minute,
 						ConnMaxIdleTime: 5 * time.Minute,
 					},
-					RequestTimeout:       2 * time.Second,
-					ShutdownTimeout:      15 * time.Second,
-					DrainDelay:           3 * time.Second,
-					LogFormat:            config.LogFormatJSON,
-					CacheMissConcurrency: 4,
-					CacheFetchTimeout:    500 * time.Millisecond,
+					RequestTimeout:    2 * time.Second,
+					ShutdownTimeout:   15 * time.Second,
+					DrainDelay:        3 * time.Second,
+					LogFormat:         config.LogFormatJSON,
+					CacheFetchTimeout: 500 * time.Millisecond,
 				},
 				VisitorSalt:            "prod-salt",
 				TrustProxyHeaders:      true,
 				TrustedProxyCIDRs:      []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12")},
+				CacheMissConcurrency:   4,
 				AccessLogSampleRate:    0.1,
 				AccessLogSlowThreshold: 150 * time.Millisecond,
 			},
@@ -150,6 +150,8 @@ func TestLoadRedirectorConfig(t *testing.T) {
 		{name: "pprof on all interfaces", env: map[string]string{"PPROF_ADDR": ":6060"}, wantErr: "PPROF_ADDR"},
 		{name: "pprof on public address", env: map[string]string{"PPROF_ADDR": "0.0.0.0:6060"}, wantErr: "PPROF_ADDR"},
 		{name: "pprof without port", env: map[string]string{"PPROF_ADDR": "127.0.0.1"}, wantErr: "PPROF_ADDR"},
+		{name: "invalid cache miss concurrency", env: map[string]string{"CACHE_MISS_CONCURRENCY": "abc"}, wantErr: "CACHE_MISS_CONCURRENCY"},
+		{name: "cache miss concurrency not positive", env: map[string]string{"CACHE_MISS_CONCURRENCY": "0"}, wantErr: "CACHE_MISS_CONCURRENCY must be positive"},
 		{name: "invalid access log sample rate", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "abc"}, wantErr: "ACCESS_LOG_SAMPLE_RATE"},
 		{name: "negative access log sample rate", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "-0.1"}, wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1"},
 		{name: "access log sample rate above 1", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "1.5"}, wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1"},
@@ -190,6 +192,7 @@ func redirectorConfigEqual(a, b RedirectorConfig) bool {
 		a.TrustProxyHeaders == b.TrustProxyHeaders &&
 		slices.Equal(a.TrustedProxyCIDRs, b.TrustedProxyCIDRs) &&
 		a.PprofAddr == b.PprofAddr &&
+		a.CacheMissConcurrency == b.CacheMissConcurrency &&
 		a.AccessLogSampleRate == b.AccessLogSampleRate &&
 		a.AccessLogSlowThreshold == b.AccessLogSlowThreshold
 }

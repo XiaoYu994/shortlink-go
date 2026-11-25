@@ -119,9 +119,8 @@ func runWorker(cliOpts workerCLIOptions) error {
 		return startupPartErr
 	}
 	linkStore := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
-		MissConcurrency: cfg.CacheMissConcurrency,
-		FetchTimeout:    cfg.CacheFetchTimeout,
-		Logger:          logger,
+		FetchTimeout: cfg.CacheFetchTimeout,
+		Logger:       logger,
 	})
 
 	httpClient := risk.NewSafeHTTPClient(safehttp.ClientOptions{

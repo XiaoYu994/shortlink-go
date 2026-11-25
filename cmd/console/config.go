@@ -208,10 +208,9 @@ loadConsoleConfig 加载并校验管理进程 HTTP 模式配置。
 */
 func loadConsoleConfig() (ConsoleConfig, error) {
 	base, err := config.LoadBaseConfig(config.BaseConfigDefaults{
-		Addr:                 config.EnvString("CONSOLE_ADDR", defaultConsoleAddr),
-		OpsAddr:              os.Getenv("CONSOLE_OPS_ADDR"),
-		CacheMissConcurrency: cache.DefaultMissConcurrency,
-		CacheFetchTimeout:    cache.DefaultFetchTimeout,
+		Addr:              config.EnvString("CONSOLE_ADDR", defaultConsoleAddr),
+		OpsAddr:           os.Getenv("CONSOLE_OPS_ADDR"),
+		CacheFetchTimeout: cache.DefaultFetchTimeout,
 	})
 	if err != nil {
 		return ConsoleConfig{}, err
@@ -300,9 +299,8 @@ loadWorkerConfig 加载并校验后台任务进程（cmd/console worker）的配
 */
 func loadWorkerConfig() (WorkerConfig, error) {
 	base, err := config.LoadBaseConfig(config.BaseConfigDefaults{
-		Addr:                 os.Getenv("WORKER_ADDR"),
-		CacheMissConcurrency: cache.DefaultMissConcurrency,
-		CacheFetchTimeout:    cache.DefaultFetchTimeout,
+		Addr:              os.Getenv("WORKER_ADDR"),
+		CacheFetchTimeout: cache.DefaultFetchTimeout,
 	})
 	if err != nil {
 		return WorkerConfig{}, err
