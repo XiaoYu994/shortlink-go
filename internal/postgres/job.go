@@ -26,6 +26,9 @@ ON CONFLICT (kind, dedup_key) WHERE dedup_key IS NOT NULL AND status IN ('pendin
 DO NOTHING
 RETURNING id`
 
+	insertJobTxSQL = `INSERT INTO jobs (kind, tenant_id, payload)
+VALUES ($1, NULLIF($2::bigint, 0), $3::jsonb)`
+
 	/*
 		关闭单租户限并发（MaxPerTenant <= 0）时走极简快路径：直接按 idx_jobs_claimable (run_at, id)
 		有序扫描并加锁，复杂度 O(limit)。
@@ -476,4 +479,16 @@ func scanJob(scanner rowScanner) (job.Job, error) {
 	j.UpdatedAt = j.UpdatedAt.UTC()
 	j.FinishedAt = nullTimeUTC(finishedAt)
 	return j, nil
+}
+
+// insertJobTx 在当前事务内按 Go 结构体载荷入队一条异步任务，供控制面多步写事务复用。
+func insertJobTx(ctx context.Context, tx *sql.Tx, kind string, tenantID int64, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("enqueue job %s: marshal payload: %w", kind, err)
+	}
+	if _, err := tx.ExecContext(ctx, insertJobTxSQL, kind, tenantID, string(raw)); err != nil {
+		return fmt.Errorf("enqueue job %s: %w", kind, err)
+	}
+	return nil
 }

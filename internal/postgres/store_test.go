@@ -103,6 +103,9 @@ func TestStoreCreateAndGetByCode(t *testing.T) {
 	if l.CreatedAt.IsZero() {
 		t.Error("CreatedAt is zero")
 	}
+	if l.CreatedAt.Location() != time.UTC {
+		t.Errorf("CreatedAt location = %v, want UTC", l.CreatedAt.Location())
+	}
 
 	got, err := store.GetByCode(ctx, l.Code)
 	if err != nil {
@@ -178,6 +181,37 @@ func TestStoreCreateRetriesOnCollision(t *testing.T) {
 	}
 	if second.Code != "collis02" {
 		t.Errorf("second Code = %q, want %q", second.Code, "collis02")
+	}
+}
+
+func TestStoreCreateCollisionExhaustedRollsBackSideEffects(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := testAuditCtx(context.Background())
+
+	store.generate = func() (string, error) { return "samecode", nil }
+	first := mustLink(t, "https://example.com/first", tenantID)
+	if err := store.Create(ctx, first); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+
+	second := mustLink(t, "https://example.com/second", tenantID)
+	err := store.Create(ctx, second)
+	if !errors.Is(err, errCreateCodeCollision) {
+		t.Fatalf("second Create error = %v, want errCreateCodeCollision", err)
+	}
+
+	var usage, jobsCount, auditCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT link_usage FROM tenants WHERE id = $1`, tenantID).Scan(&usage); err != nil {
+		t.Fatalf("query usage: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM jobs WHERE tenant_id = $1`, tenantID).Scan(&jobsCount); err != nil {
+		t.Fatalf("query jobs: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM audit_logs WHERE tenant_id = $1`, tenantID).Scan(&auditCount); err != nil {
+		t.Fatalf("query audit_logs: %v", err)
+	}
+	if usage != 1 || jobsCount != 1 || auditCount != 1 {
+		t.Errorf("side effects after failed collisions: usage=%d jobs=%d audit=%d, want 1/1/1", usage, jobsCount, auditCount)
 	}
 }
 

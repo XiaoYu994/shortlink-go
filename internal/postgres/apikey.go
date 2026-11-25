@@ -28,59 +28,19 @@ FROM api_keys
 WHERE tenant_id = $1
 ORDER BY id`
 
-	revokeAPIKeySQL = `WITH target AS (
-    SELECT id, tenant_id, (revoked_at IS NOT NULL) AS already_revoked
-    FROM api_keys
-    WHERE id = $1
-    FOR UPDATE
-),
-revoked AS (
-    UPDATE api_keys k
-    SET revoked_at = now()
-    FROM target t
-    WHERE k.id = t.id AND NOT t.already_revoked
-    RETURNING k.id, k.tenant_id
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT r.tenant_id,
-           $2::text,
-           $3::bigint,
-           $5::text,
-           $6::text,
-           r.id::text,
-           $4::text,
-           '{}'::jsonb
-    FROM revoked r
-)
-SELECT t.already_revoked FROM target t`
+	lockAPIKeyForRevokeSQL = `SELECT tenant_id, (revoked_at IS NOT NULL)
+FROM api_keys
+WHERE id = $1
+FOR UPDATE`
 
-	revokeAPIKeyForTenantSQL = `WITH target AS (
-    SELECT id, tenant_id, (revoked_at IS NOT NULL) AS already_revoked
-    FROM api_keys
-    WHERE id = $1 AND tenant_id = $2
-    FOR UPDATE
-),
-revoked AS (
-    UPDATE api_keys k
-    SET revoked_at = now()
-    FROM target t
-    WHERE k.id = t.id AND NOT t.already_revoked
-    RETURNING k.id, k.tenant_id
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT r.tenant_id,
-           $3::text,
-           $4::bigint,
-           $6::text,
-           $7::text,
-           r.id::text,
-           $5::text,
-           '{}'::jsonb
-    FROM revoked r
-)
-SELECT t.already_revoked FROM target t`
+	lockAPIKeyForTenantRevokeSQL = `SELECT tenant_id, (revoked_at IS NOT NULL)
+FROM api_keys
+WHERE id = $1 AND tenant_id = $2
+FOR UPDATE`
+
+	markAPIKeyRevokedSQL = `UPDATE api_keys
+SET revoked_at = now()
+WHERE id = $1`
 
 	authenticateAPIKeySQL = `SELECT k.id,
        k.scopes,
@@ -450,23 +410,21 @@ func (s *Store) RevokeAPIKey(ctx context.Context, keyID int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
 
-	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("revoke api key: %w", err)
 	}
-	var alreadyRevoked bool
-	err = s.db.QueryRowContext(ctx, revokeAPIKeySQL,
-		keyID, actorKind, actorID, reqID,
-		string(audit.ActionAPIKeyRevoke), string(audit.TargetAPIKey)).Scan(&alreadyRevoked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrAPIKeyNotFound
+	defer func() { _ = tx.Rollback() }()
+
+	if err := revokeAPIKeyTx(ctx, tx, keyID, 0); err != nil {
+		return err
 	}
-	if err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("revoke api key: %w", err)
-	}
-	if alreadyRevoked {
-		return ErrAPIKeyRevoked
 	}
 	return nil
 }
@@ -482,27 +440,41 @@ func (s *Store) RevokeAPIKeyForTenant(ctx context.Context, tenantID, keyID int64
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
-	if err != nil {
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
 		return fmt.Errorf("revoke api key: %w", err)
 	}
 	return s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
-		var alreadyRevoked bool
-		err := tx.QueryRowContext(ctx, revokeAPIKeyForTenantSQL,
-			keyID, tenantID, actorKind, actorID, reqID,
-			string(audit.ActionAPIKeyRevoke), string(audit.TargetAPIKey)).Scan(&alreadyRevoked)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrAPIKeyNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("revoke api key: %w", err)
-		}
-		if alreadyRevoked {
-			return ErrAPIKeyRevoked
-		}
-		return nil
+		return revokeAPIKeyTx(ctx, tx, keyID, tenantID)
 	})
+}
+
+func revokeAPIKeyTx(ctx context.Context, tx *sql.Tx, keyID, tenantID int64) error {
+	var (
+		keyTenantID    int64
+		alreadyRevoked bool
+		err            error
+	)
+	if tenantID > 0 {
+		err = tx.QueryRowContext(ctx, lockAPIKeyForTenantRevokeSQL, keyID, tenantID).Scan(&keyTenantID, &alreadyRevoked)
+	} else {
+		err = tx.QueryRowContext(ctx, lockAPIKeyForRevokeSQL, keyID).Scan(&keyTenantID, &alreadyRevoked)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAPIKeyNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+	if alreadyRevoked {
+		return ErrAPIKeyRevoked
+	}
+	if _, err := tx.ExecContext(ctx, markAPIKeyRevokedSQL, keyID); err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+	if err := insertAuditLogTx(ctx, tx, keyTenantID, 0, audit.ActionAPIKeyRevoke, audit.TargetAPIKey, strconv.FormatInt(keyID, 10), nil); err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+	return nil
 }
 
 // ListOrgAPIKeys 给 HTTP 管理接口使用，返回 identity.APIKeyInfo 列表以保持 console 不依赖 postgres。

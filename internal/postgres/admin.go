@@ -74,387 +74,53 @@ FROM links l` + todayJoin + `
 WHERE l.code = $1 AND l.tenant_id = $2`
 
 	/*
-		用 CASE 而不是读-改-写：没传的字段保持原值，UPDATE 本身是原子的。
-		$3/$5/$7 是「有没有传这个字段」，$4/$6/$8 是新值；清空 expires_at 时 $6 是 NULL。
-		重复停用保留第一次的时间；启用把 disabled_at 清成 NULL。
-		WHERE 排除已封禁的行：被封禁的链接对租户只读，修改一律不落库。
-		只有本次修改了 url（$3 为真）且更新成功时，才在同一条多 CTE 语句里入队异步风控（ADR 0020）；
-		只改 expires_at 或 disabled 不入队。
-		RETURNING 只带 links 的列，clicks_today 在 CTE 外面补。
+		用 CASE 而不是读-改-写：没传的字段保持原值；$1/$3/$5 表示是否传了对应字段，$2/$4/$6 是新值。
+		清空 expires_at 时 $4 为 NULL；重复停用保留第一次的时间，启用把 disabled_at 清成 NULL。
+		调用方先在事务内 FOR UPDATE 校验归属与封禁状态，再执行单表更新并依次入队任务、扇出 Webhook 与写审计。
 	*/
-	updateLinkSQL = `WITH target AS (
-    SELECT ` + linkColumns + `, clicks, (banned_at IS NOT NULL) AS is_banned
-    FROM links
-    WHERE code = $1 AND tenant_id = $2
-    FOR UPDATE
-),
-updated AS (
-    UPDATE links l
-    SET url = CASE WHEN $3 THEN $4::text ELSE l.url END,
-        expires_at = CASE WHEN $5 THEN $6::timestamptz ELSE l.expires_at END,
-        disabled_at = CASE WHEN NOT $7 THEN l.disabled_at
-                           WHEN $8 THEN COALESCE(l.disabled_at, now())
-                           ELSE NULL END,
-        updated_at = now()
-    FROM target t
-    WHERE l.id = t.id AND NOT t.is_banned
-    RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.clicks, l.updated_at
-),
-event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-),
-enqueued AS (
-    INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT $13::text,
-           NULLIF(u.tenant_id, 0),
-           jsonb_build_object('link_id', u.id, 'code', u.code, 'url', u.url)
-    FROM updated u
-    WHERE $3
-),
-reconciled AS (
-    INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT $16::text,
-           NULLIF(u.tenant_id, 0),
-           jsonb_build_object('code', u.code)
-    FROM updated u
-),
-webhook_jobs AS (
-    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-    SELECT $17::text,
-           u.tenant_id,
-           jsonb_build_object(
-               'webhook_id', w.id,
-               'event_id', em.event_id,
-               'event', $18::text,
-               'occurred_at', u.updated_at,
-               'data', jsonb_strip_nulls(jsonb_build_object(
-                   'link_id', u.id,
-                   'code', u.code,
-                   'url', u.url,
-                   'expires_at', u.expires_at,
-                   'disabled_at', u.disabled_at,
-                   'changed_fields', $12::jsonb->'fields',
-                   'updated_at', u.updated_at
-               ))
-           ),
-           $19::int
-    FROM updated u
-    CROSS JOIN event_meta em
-    JOIN webhooks w
-      ON w.tenant_id = u.tenant_id
-     AND w.enabled = TRUE
-     AND $18::text = ANY(w.events)
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT u.tenant_id,
-           $9::text,
-           $10::bigint,
-           $14::text,
-           $15::text,
-           u.code,
-           $11::text,
-           $12::jsonb
-    FROM updated u
-)
-SELECT COALESCE(u.id, t.id),
-       COALESCE(u.code, t.code),
-       COALESCE(u.url, t.url),
-       CASE WHEN u.id IS NOT NULL THEN u.expires_at ELSE t.expires_at END,
-       COALESCE(u.created_at, t.created_at),
-       COALESCE(u.tenant_id, t.tenant_id),
-       CASE WHEN u.id IS NOT NULL THEN u.disabled_at ELSE t.disabled_at END,
-       COALESCE(u.banned_at, t.banned_at),
-       COALESCE(u.ban_reason, t.ban_reason),
-       COALESCE(u.ban_source, t.ban_source),
-       COALESCE(u.clicks, t.clicks),
-       COALESCE(d.clicks, 0),
-       t.is_banned
-FROM target t
-LEFT JOIN updated u ON u.id = t.id
-LEFT JOIN link_clicks_daily d ON d.link_id = u.id AND d.day = (now() AT TIME ZONE 'UTC')::date`
+	lockLinkForTenantUpdateSQL = `SELECT id, (banned_at IS NOT NULL)
+FROM links
+WHERE code = $1 AND tenant_id = $2
+FOR UPDATE`
 
-	/*
-		Ban 按短码操作，不带租户。COALESCE 让重复封禁保留第一次的时间、
-		原因和来源，命令可以放心重跑；仅当从非封禁变为封禁时写入 link.ban 审计事件。
-		RETURNING 要带完整状态，缓存层据此决定解封后写正缓存还是负缓存。
-	*/
-	banLinkSQL = `WITH prev AS (
-    SELECT id, (banned_at IS NULL) AS newly_banned
-    FROM links
-    WHERE code = $1
-    FOR UPDATE
-),
-updated AS (
-    UPDATE links l
-    SET banned_at = COALESCE(l.banned_at, now()),
-        ban_reason = COALESCE(l.ban_reason, $2::text),
-        ban_source = COALESCE(l.ban_source, $3::text),
-        updated_at = CASE WHEN l.banned_at IS NULL THEN now() ELSE l.updated_at END
-    FROM prev p
-    WHERE l.id = p.id
-    RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, p.newly_banned
-),
-event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT u.tenant_id,
-           $4::text,
-           $5::bigint,
-           $7::text,
-           $8::text,
-           u.code,
-           $6::text,
-           jsonb_build_object(
-               'link_id', u.id,
-               'url', u.url,
-               'reason', u.ban_reason,
-               'source', u.ban_source
-           )
-    FROM updated u
-    WHERE u.newly_banned
-),
-reconciled AS (
-    INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT $9::text,
-           NULLIF(u.tenant_id, 0),
-           jsonb_build_object('code', u.code)
-    FROM updated u
-),
-webhook_jobs AS (
-    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-    SELECT $10::text,
-           u.tenant_id,
-           jsonb_build_object(
-               'webhook_id', w.id,
-               'event_id', em.event_id,
-               'event', $11::text,
-               'occurred_at', u.banned_at,
-               'data', jsonb_build_object(
-                   'link_id', u.id,
-                   'code', u.code,
-                   'url', u.url,
-                   'banned_at', u.banned_at,
-                   'ban_reason', u.ban_reason,
-                   'ban_source', u.ban_source
-               )
-           ),
-           $12::int
-    FROM updated u
-    CROSS JOIN event_meta em
-    JOIN webhooks w
-      ON w.tenant_id = u.tenant_id
-     AND w.enabled = TRUE
-     AND $11::text = ANY(w.events)
-    WHERE u.newly_banned
-)
-SELECT ` + linkColumns + ` FROM updated`
+	updateLinkRowSQL = `UPDATE links
+SET url = CASE WHEN $1 THEN $2::text ELSE url END,
+    expires_at = CASE WHEN $3 THEN $4::timestamptz ELSE expires_at END,
+    disabled_at = CASE WHEN NOT $5 THEN disabled_at
+                       WHEN $6 THEN COALESCE(disabled_at, now())
+                       ELSE NULL END,
+    updated_at = now()
+WHERE id = $7
+RETURNING ` + linkColumns + `, clicks, updated_at`
 
-	/*
-		banLinkIfURLSQL 给异步风控使用：同一语句加 FOR UPDATE 锁并判断 URL 是否仍等于送审 URL（ADR 0020）。
-		不存在返回零行（ErrNotFound），URL 已变更返回 url_matched=false（ErrURLChanged），
-		消除先 UPDATE 再补查的并发窗口。
-	*/
-	banLinkIfURLSQL = `WITH target AS (
-    SELECT ` + linkColumns + `, (url = $4) AS url_matched, (banned_at IS NULL) AS newly_banned
-    FROM links
-    WHERE code = $1
-    FOR UPDATE
-),
-updated AS (
-    UPDATE links l
-    SET banned_at = COALESCE(l.banned_at, now()),
-        ban_reason = COALESCE(l.ban_reason, $2::text),
-        ban_source = COALESCE(l.ban_source, $3::text),
-        updated_at = CASE WHEN l.banned_at IS NULL THEN now() ELSE l.updated_at END
-    FROM target t
-    WHERE l.id = t.id AND t.url_matched
-    RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, t.newly_banned
-),
-event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT u.tenant_id,
-           $5::text,
-           $6::bigint,
-           $8::text,
-           $9::text,
-           u.code,
-           $7::text,
-           jsonb_build_object(
-               'link_id', u.id,
-               'url', u.url,
-               'reason', u.ban_reason,
-               'source', u.ban_source
-           )
-    FROM updated u
-    WHERE u.newly_banned
-),
-reconciled AS (
-    INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT $10::text,
-           NULLIF(u.tenant_id, 0),
-           jsonb_build_object('code', u.code)
-    FROM updated u
-),
-webhook_jobs AS (
-    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-    SELECT $11::text,
-           u.tenant_id,
-           jsonb_build_object(
-               'webhook_id', w.id,
-               'event_id', em.event_id,
-               'event', $12::text,
-               'occurred_at', u.banned_at,
-               'data', jsonb_build_object(
-                   'link_id', u.id,
-                   'code', u.code,
-                   'url', u.url,
-                   'banned_at', u.banned_at,
-                   'ban_reason', u.ban_reason,
-                   'ban_source', u.ban_source
-               )
-           ),
-           $13::int
-    FROM updated u
-    CROSS JOIN event_meta em
-    JOIN webhooks w
-      ON w.tenant_id = u.tenant_id
-     AND w.enabled = TRUE
-     AND $12::text = ANY(w.events)
-    WHERE u.newly_banned
-)
-SELECT COALESCE(u.id, t.id),
-       COALESCE(u.code, t.code),
-       COALESCE(u.url, t.url),
-       COALESCE(u.expires_at, t.expires_at),
-       COALESCE(u.created_at, t.created_at),
-       COALESCE(u.tenant_id, t.tenant_id),
-       COALESCE(u.disabled_at, t.disabled_at),
-       COALESCE(u.banned_at, t.banned_at),
-       COALESCE(u.ban_reason, t.ban_reason),
-       COALESCE(u.ban_source, t.ban_source),
-       t.url_matched
-FROM target t
-LEFT JOIN updated u ON u.id = t.id`
+	selectTodayLinkClicksSQL = `SELECT COALESCE((
+    SELECT clicks
+    FROM link_clicks_daily
+    WHERE link_id = $1
+      AND day = (now() AT TIME ZONE 'UTC')::date
+), 0)`
 
-	// Unban 把三个封禁字段一起清空。没被封禁的链接解封是空操作，不重复写入审计日志。
-	unbanLinkSQL = `WITH prev AS (
-    SELECT id, (banned_at IS NOT NULL) AS was_banned, ban_reason, ban_source
-    FROM links
-    WHERE code = $1
-    FOR UPDATE
-),
-updated AS (
-    UPDATE links l
-    SET banned_at = NULL,
-        ban_reason = NULL,
-        ban_source = NULL,
-        updated_at = CASE WHEN l.banned_at IS NOT NULL THEN now() ELSE l.updated_at END
-    FROM prev p
-    WHERE l.id = p.id
-    RETURNING l.id, l.code, l.url, l.expires_at, l.created_at, l.tenant_id,
-              l.disabled_at, l.banned_at, l.ban_reason, l.ban_source, l.updated_at,
-              p.was_banned, p.ban_reason AS previous_reason, p.ban_source AS previous_source
-),
-event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT u.tenant_id,
-           $2::text,
-           $3::bigint,
-           $5::text,
-           $6::text,
-           u.code,
-           $4::text,
-           jsonb_strip_nulls(jsonb_build_object(
-               'link_id', u.id,
-               'url', u.url,
-               'previous_reason', u.previous_reason,
-               'previous_source', u.previous_source
-           ))
-    FROM updated u
-    WHERE u.was_banned
-),
-reconciled AS (
-    INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT $7::text,
-           NULLIF(u.tenant_id, 0),
-           jsonb_build_object('code', u.code)
-    FROM updated u
-),
-webhook_jobs AS (
-    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-    SELECT $8::text,
-           u.tenant_id,
-           jsonb_build_object(
-               'webhook_id', w.id,
-               'event_id', em.event_id,
-               'event', $9::text,
-               'occurred_at', u.updated_at,
-               'data', jsonb_strip_nulls(jsonb_build_object(
-                   'link_id', u.id,
-                   'code', u.code,
-                   'url', u.url,
-                   'expires_at', u.expires_at,
-                   'disabled_at', u.disabled_at,
-                   'previous_reason', u.previous_reason,
-                   'previous_source', u.previous_source,
-                   'unbanned_at', u.updated_at
-               ))
-           ),
-           $10::int
-    FROM updated u
-    CROSS JOIN event_meta em
-    JOIN webhooks w
-      ON w.tenant_id = u.tenant_id
-     AND w.enabled = TRUE
-     AND $9::text = ANY(w.events)
-    WHERE u.was_banned
-)
-SELECT ` + linkColumns + ` FROM updated`
+	// Ban/Unban 按短码操作，不带租户；先 FOR UPDATE 锁主行再决定是否更新与写副作用。
+	lockLinkByCodeForUpdateSQL = `SELECT ` + linkColumns + `
+FROM links
+WHERE code = $1
+FOR UPDATE`
 
-	enqueueDeleteJobsSQL = `INSERT INTO jobs (kind, tenant_id, payload)
-VALUES ($1, NULLIF($2::bigint, 0), jsonb_build_object('code', $3::text)),
-       ($4, NULLIF($2::bigint, 0), jsonb_build_object('link_id', $5::bigint))`
+	banLinkRowSQL = `UPDATE links
+SET banned_at = now(),
+    ban_reason = $1,
+    ban_source = $2,
+    updated_at = now()
+WHERE id = $3
+RETURNING ` + linkColumns
 
-	enqueueDeleteWebhooksSQL = `WITH event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-),
-ts AS (
-    SELECT now() AS occurred_at
-)
-INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-SELECT $1::text,
-       w.tenant_id,
-       jsonb_build_object(
-           'webhook_id', w.id,
-           'event_id', em.event_id,
-           'event', $2::text,
-           'occurred_at', ts.occurred_at,
-           'data', jsonb_build_object(
-               'link_id', $4::bigint,
-               'code', $5::text,
-               'url', $6::text,
-               'deleted_at', ts.occurred_at
-           )
-       ),
-       $7::int
-FROM event_meta em
-CROSS JOIN ts
-JOIN webhooks w
-  ON w.tenant_id = $3::bigint
- AND w.enabled = TRUE
- AND $2::text = ANY(w.events)`
+	unbanLinkRowSQL = `UPDATE links
+SET banned_at = NULL,
+    ban_reason = NULL,
+    ban_source = NULL,
+    updated_at = now()
+WHERE id = $1
+RETURNING ` + linkColumns + `, updated_at`
 
 	/*
 		按完整主键元组分批删除统计行，严禁使用 ctid：
@@ -732,6 +398,51 @@ func scanAdminLinks(rows *sql.Rows, capHint int) ([]link.AdminLink, error) {
 	return result, nil
 }
 
+type cacheReconcilePayload struct {
+	Code string `json:"code"`
+}
+
+type linkPurgeStatsPayload struct {
+	LinkID int64 `json:"link_id"`
+}
+
+type linkUpdatedWebhookData struct {
+	LinkID        int64      `json:"link_id"`
+	Code          string     `json:"code"`
+	URL           string     `json:"url"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	DisabledAt    *time.Time `json:"disabled_at,omitempty"`
+	ChangedFields []string   `json:"changed_fields"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type linkDeletedWebhookData struct {
+	LinkID    int64     `json:"link_id"`
+	Code      string    `json:"code"`
+	URL       string    `json:"url"`
+	DeletedAt time.Time `json:"deleted_at"`
+}
+
+type linkBannedWebhookData struct {
+	LinkID    int64          `json:"link_id"`
+	Code      string         `json:"code"`
+	URL       string         `json:"url"`
+	BannedAt  time.Time      `json:"banned_at"`
+	BanReason link.BanReason `json:"ban_reason"`
+	BanSource link.BanSource `json:"ban_source"`
+}
+
+type linkUnbannedWebhookData struct {
+	LinkID         int64          `json:"link_id"`
+	Code           string         `json:"code"`
+	URL            string         `json:"url"`
+	ExpiresAt      *time.Time     `json:"expires_at,omitempty"`
+	DisabledAt     *time.Time     `json:"disabled_at,omitempty"`
+	PreviousReason link.BanReason `json:"previous_reason,omitempty"`
+	PreviousSource link.BanSource `json:"previous_source,omitempty"`
+	UnbannedAt     time.Time      `json:"unbanned_at"`
+}
+
 /*
 Update 修改 URL、expires_at 和/或停用状态，返回修改后的链接。
 链接不存在、已删除或属于其他租户都返回 link.ErrNotFound；已封禁返回 link.ErrBanned，
@@ -777,12 +488,7 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 		auditMeta["disabled"] = disabledValue
 	}
 	auditMeta["fields"] = metaFields
-	metaJSON, err := marshalAuditMetadata(auditMeta)
-	if err != nil {
-		return nil, fmt.Errorf("update link: marshal audit metadata: %w", err)
-	}
-	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
-	if err != nil {
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
 		return nil, fmt.Errorf("update link: %w", err)
 	}
 	if tenantID <= 0 {
@@ -790,23 +496,61 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 	}
 
 	var got link.AdminLink
-	err = s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, updateLinkSQL,
-			code, tenantID, hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue,
-			actorKind, actorID, reqID, string(metaJSON),
-			job.KindLinkRiskScan, string(audit.ActionLinkUpdate), string(audit.TargetLink),
-			job.KindCacheReconcile,
-			job.KindWebhookDeliver, string(webhook.EventLinkUpdated), webhook.DefaultMaxAttempts)
-		var isBanned bool
-		base, scanErr := scanLink(row, &got.Clicks, &got.ClicksToday, &isBanned)
-		if errors.Is(scanErr, sql.ErrNoRows) {
+	err := s.withTenantTx(ctx, tenantID, nil, func(tx *sql.Tx) error {
+		var (
+			id       int64
+			isBanned bool
+		)
+		err := tx.QueryRowContext(ctx, lockLinkForTenantUpdateSQL, code, tenantID).Scan(&id, &isBanned)
+		if errors.Is(err, sql.ErrNoRows) {
 			return link.ErrNotFound
 		}
-		if scanErr != nil {
-			return fmt.Errorf("update link: %w", scanErr)
+		if err != nil {
+			return fmt.Errorf("update link: %w", err)
 		}
 		if isBanned {
 			return link.ErrBanned
+		}
+
+		var updatedAt time.Time
+		base, err := scanLink(tx.QueryRowContext(ctx, updateLinkRowSQL,
+			hasURL, newURL, hasExpires, newExpiry, hasDisabled, disabledValue, id,
+		), &got.Clicks, &updatedAt)
+		if err != nil {
+			return fmt.Errorf("update link: %w", err)
+		}
+		updatedAt = updatedAt.UTC()
+
+		if err := tx.QueryRowContext(ctx, selectTodayLinkClicksSQL, id).Scan(&got.ClicksToday); err != nil {
+			return fmt.Errorf("update link: read today clicks: %w", err)
+		}
+		if hasURL {
+			if err := insertJobTx(ctx, tx, job.KindLinkRiskScan, tenantID, linkRiskScanPayload{
+				LinkID: base.ID,
+				Code:   base.Code,
+				URL:    base.URL,
+			}); err != nil {
+				return fmt.Errorf("update link: %w", err)
+			}
+		}
+		if err := insertJobTx(ctx, tx, job.KindCacheReconcile, tenantID, cacheReconcilePayload{
+			Code: base.Code,
+		}); err != nil {
+			return fmt.Errorf("update link: %w", err)
+		}
+		if err := enqueueWebhookEventTx(ctx, tx, tenantID, webhook.EventLinkUpdated, updatedAt, linkUpdatedWebhookData{
+			LinkID:        base.ID,
+			Code:          base.Code,
+			URL:           base.URL,
+			ExpiresAt:     base.ExpiresAt,
+			DisabledAt:    base.DisabledAt,
+			ChangedFields: metaFields,
+			UpdatedAt:     updatedAt,
+		}); err != nil {
+			return fmt.Errorf("update link: %w", err)
+		}
+		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkUpdate, audit.TargetLink, base.Code, auditMeta); err != nil {
+			return fmt.Errorf("update link: %w", err)
 		}
 		got.Link = *base
 		return nil
@@ -849,16 +593,29 @@ func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
 			return link.ErrBanned
 		}
 
-		if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE id = $1`, id); err != nil {
+		var deletedAt time.Time
+		if err := tx.QueryRowContext(ctx, `DELETE FROM links WHERE id = $1 RETURNING now()`, id).Scan(&deletedAt); err != nil {
 			return fmt.Errorf("delete link: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, enqueueDeleteJobsSQL,
-			job.KindCacheReconcile, tenantID, code, job.KindLinkPurgeStats, id); err != nil {
-			return fmt.Errorf("delete link: enqueue jobs: %w", err)
+		deletedAt = deletedAt.UTC()
+
+		if err := insertJobTx(ctx, tx, job.KindCacheReconcile, tenantID, cacheReconcilePayload{
+			Code: code,
+		}); err != nil {
+			return fmt.Errorf("delete link: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, enqueueDeleteWebhooksSQL,
-			job.KindWebhookDeliver, string(webhook.EventLinkDeleted), tenantID, id, code, urlStr, webhook.DefaultMaxAttempts); err != nil {
-			return fmt.Errorf("delete link: enqueue webhooks: %w", err)
+		if err := insertJobTx(ctx, tx, job.KindLinkPurgeStats, tenantID, linkPurgeStatsPayload{
+			LinkID: id,
+		}); err != nil {
+			return fmt.Errorf("delete link: %w", err)
+		}
+		if err := enqueueWebhookEventTx(ctx, tx, tenantID, webhook.EventLinkDeleted, deletedAt, linkDeletedWebhookData{
+			LinkID:    id,
+			Code:      code,
+			URL:       urlStr,
+			DeletedAt: deletedAt,
+		}); err != nil {
+			return fmt.Errorf("delete link: %w", err)
 		}
 		if err := insertAuditLogTx(ctx, tx, tenantID, 0, audit.ActionLinkDelete, audit.TargetLink, code, map[string]any{
 			"link_id": id,
@@ -924,39 +681,64 @@ func (s *Store) ban(ctx context.Context, code, expectedURL string, reason link.B
 	if !source.Valid() {
 		return nil, fmt.Errorf("ban link: invalid source %q", source)
 	}
-
-	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
-	if err != nil {
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
 		return nil, fmt.Errorf("ban link: %w", err)
 	}
 
-	if expectedURL == "" {
-		got, err := scanLink(s.db.QueryRowContext(ctx, banLinkSQL,
-			code, string(reason), string(source), actorKind, actorID, reqID,
-			string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile,
-			job.KindWebhookDeliver, string(webhook.EventLinkBanned), webhook.DefaultMaxAttempts))
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, link.ErrNotFound
-		}
-		if err != nil {
-			return nil, fmt.Errorf("ban link: %w", err)
-		}
-		return got, nil
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ban link: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }()
 
-	var urlMatched bool
-	got, err := scanLink(s.db.QueryRowContext(ctx, banLinkIfURLSQL,
-		code, string(reason), string(source), expectedURL, actorKind, actorID, reqID,
-		string(audit.ActionLinkBan), string(audit.TargetLink), job.KindCacheReconcile,
-		job.KindWebhookDeliver, string(webhook.EventLinkBanned), webhook.DefaultMaxAttempts), &urlMatched)
+	existing, err := scanLink(tx.QueryRowContext(ctx, lockLinkByCodeForUpdateSQL, code))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ban link: %w", err)
 	}
-	if !urlMatched {
+	if expectedURL != "" && existing.URL != expectedURL {
 		return nil, link.ErrURLChanged
+	}
+
+	got := existing
+	newlyBanned := existing.Ban == nil
+	if newlyBanned {
+		got, err = scanLink(tx.QueryRowContext(ctx, banLinkRowSQL, string(reason), string(source), existing.ID))
+		if err != nil {
+			return nil, fmt.Errorf("ban link: %w", err)
+		}
+	}
+
+	if err := insertJobTx(ctx, tx, job.KindCacheReconcile, got.TenantID, cacheReconcilePayload{
+		Code: got.Code,
+	}); err != nil {
+		return nil, fmt.Errorf("ban link: %w", err)
+	}
+	if newlyBanned {
+		if err := insertAuditLogTx(ctx, tx, got.TenantID, 0, audit.ActionLinkBan, audit.TargetLink, got.Code, map[string]any{
+			"link_id": got.ID,
+			"url":     got.URL,
+			"reason":  string(got.Ban.Reason),
+			"source":  string(got.Ban.Source),
+		}); err != nil {
+			return nil, fmt.Errorf("ban link: %w", err)
+		}
+		if err := enqueueWebhookEventTx(ctx, tx, got.TenantID, webhook.EventLinkBanned, got.Ban.At, linkBannedWebhookData{
+			LinkID:    got.ID,
+			Code:      got.Code,
+			URL:       got.URL,
+			BannedAt:  got.Ban.At,
+			BanReason: got.Ban.Reason,
+			BanSource: got.Ban.Source,
+		}); err != nil {
+			return nil, fmt.Errorf("ban link: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("ban link: %w", err)
 	}
 	return got, nil
 }
@@ -967,18 +749,76 @@ Unban 按短码解封，把三个封禁字段一起清空，不要求租户 ID�
 解封后链接可能仍然停用或过期，能不能跳转由调用方看 Servable。
 */
 func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
-	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
+		return nil, fmt.Errorf("unban link: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("unban link: %w", err)
 	}
-	got, err := scanLink(s.db.QueryRowContext(ctx, unbanLinkSQL,
-		code, actorKind, actorID, reqID, string(audit.ActionLinkUnban), string(audit.TargetLink),
-		job.KindCacheReconcile,
-		job.KindWebhookDeliver, string(webhook.EventLinkUnbanned), webhook.DefaultMaxAttempts))
+	defer func() { _ = tx.Rollback() }()
+
+	existing, err := scanLink(tx.QueryRowContext(ctx, lockLinkByCodeForUpdateSQL, code))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, link.ErrNotFound
 	}
 	if err != nil {
+		return nil, fmt.Errorf("unban link: %w", err)
+	}
+
+	got := existing
+	var (
+		wasBanned  bool
+		prevReason link.BanReason
+		prevSource link.BanSource
+		unbannedAt time.Time
+	)
+	if existing.Ban != nil {
+		wasBanned = true
+		prevReason = existing.Ban.Reason
+		prevSource = existing.Ban.Source
+		got, err = scanLink(tx.QueryRowContext(ctx, unbanLinkRowSQL, existing.ID), &unbannedAt)
+		if err != nil {
+			return nil, fmt.Errorf("unban link: %w", err)
+		}
+		unbannedAt = unbannedAt.UTC()
+	}
+
+	if err := insertJobTx(ctx, tx, job.KindCacheReconcile, got.TenantID, cacheReconcilePayload{
+		Code: got.Code,
+	}); err != nil {
+		return nil, fmt.Errorf("unban link: %w", err)
+	}
+	if wasBanned {
+		auditMeta := map[string]any{
+			"link_id": got.ID,
+			"url":     got.URL,
+		}
+		if prevReason != "" {
+			auditMeta["previous_reason"] = string(prevReason)
+		}
+		if prevSource != "" {
+			auditMeta["previous_source"] = string(prevSource)
+		}
+		if err := insertAuditLogTx(ctx, tx, got.TenantID, 0, audit.ActionLinkUnban, audit.TargetLink, got.Code, auditMeta); err != nil {
+			return nil, fmt.Errorf("unban link: %w", err)
+		}
+		if err := enqueueWebhookEventTx(ctx, tx, got.TenantID, webhook.EventLinkUnbanned, unbannedAt, linkUnbannedWebhookData{
+			LinkID:         got.ID,
+			Code:           got.Code,
+			URL:            got.URL,
+			ExpiresAt:      got.ExpiresAt,
+			DisabledAt:     got.DisabledAt,
+			PreviousReason: prevReason,
+			PreviousSource: prevSource,
+			UnbannedAt:     unbannedAt,
+		}); err != nil {
+			return nil, fmt.Errorf("unban link: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("unban link: %w", err)
 	}
 	return got, nil

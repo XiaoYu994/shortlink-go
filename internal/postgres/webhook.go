@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -58,22 +60,25 @@ RETURNING ` + webhookColumns
 
 	webhookExistsForTenantSQL = `SELECT EXISTS (SELECT 1 FROM webhooks WHERE id = $1 AND tenant_id = $2)`
 
-	insertWebhookTestJobSQL = `WITH event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-)
-INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-SELECT $1::text,
-       $2::bigint,
-       jsonb_build_object(
-           'webhook_id', $3::bigint,
-           'event_id', em.event_id,
-           'event', $4::text,
-           'occurred_at', now(),
-           'data', jsonb_build_object('webhook_id', $3::bigint, 'ping', true)
-       ),
-       1
-FROM event_meta em
+	insertWebhookTestJobSQL = `INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+VALUES ($1, $2, $3::jsonb, 1)
 RETURNING id`
+
+	enqueueWebhookEventSQL = `INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+SELECT $1,
+       w.tenant_id,
+       jsonb_build_object(
+           'webhook_id', w.id,
+           'event_id', $2::text,
+           'event', $3::text,
+           'occurred_at', $4::timestamptz,
+           'data', $5::jsonb
+       ),
+       $6
+FROM webhooks w
+WHERE w.tenant_id = $7
+  AND w.enabled = TRUE
+  AND $3::text = ANY(w.events)`
 
 	deliveryColumns = `id, tenant_id, webhook_id, job_id, delivery_id, event, attempt, status,
        http_status, duration_ms, error_message, response_snippet, created_at`
@@ -414,9 +419,34 @@ func (s *Store) EnqueueWebhookTest(ctx context.Context, tenantID, webhookID int6
 			return webhook.ErrNotFound
 		}
 
+		eventID, err := newWebhookEventID()
+		if err != nil {
+			return fmt.Errorf("enqueue webhook test: %w", err)
+		}
+		dataJSON, err := json.Marshal(struct {
+			WebhookID int64 `json:"webhook_id"`
+			Ping      bool  `json:"ping"`
+		}{
+			WebhookID: webhookID,
+			Ping:      true,
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue webhook test: marshal data: %w", err)
+		}
+		payloadJSON, err := json.Marshal(webhook.DeliverPayload{
+			WebhookID:  webhookID,
+			EventID:    eventID,
+			Event:      webhook.EventPing,
+			OccurredAt: time.Now().UTC(),
+			Data:       dataJSON,
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue webhook test: marshal payload: %w", err)
+		}
+
 		var jobID int64
 		if err := tx.QueryRowContext(ctx, insertWebhookTestJobSQL,
-			job.KindWebhookDeliver, tenantID, webhookID, string(webhook.EventPing),
+			job.KindWebhookDeliver, tenantID, string(payloadJSON),
 		).Scan(&jobID); err != nil {
 			return fmt.Errorf("enqueue webhook test: insert job: %w", err)
 		}
@@ -437,6 +467,45 @@ func (s *Store) EnqueueWebhookTest(ctx context.Context, tenantID, webhookID int6
 		return webhook.TestEnqueueResult{}, err
 	}
 	return out, nil
+}
+
+func newWebhookEventID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate webhook event id: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("evt_%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+/*
+enqueueWebhookEventTx 在当前事务内为租户所有启用且订阅该事件的 Webhook 扇出入队投递任务。
+单次事件的所有订阅共享同一个 event_id，业务数据由 Go 结构体序列化后传入，避免在 SQL 中多层手拼 JSON。
+*/
+func enqueueWebhookEventTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	tenantID int64,
+	event webhook.EventType,
+	occurredAt time.Time,
+	data any,
+) error {
+	eventID, err := newWebhookEventID()
+	if err != nil {
+		return err
+	}
+	dataJSON, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("enqueue webhook %s: marshal data: %w", event, err)
+	}
+	if _, err := tx.ExecContext(ctx, enqueueWebhookEventSQL,
+		job.KindWebhookDeliver, eventID, string(event), occurredAt.UTC(), string(dataJSON),
+		webhook.DefaultMaxAttempts, tenantID,
+	); err != nil {
+		return fmt.Errorf("enqueue webhook %s: %w", event, err)
+	}
+	return nil
 }
 
 // ListWebhookDeliveries 按 id 倒序游标分页返回单条订阅的投递尝试记录。

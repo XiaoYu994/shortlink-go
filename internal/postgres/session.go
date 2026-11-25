@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"shortlink/internal/audit"
@@ -44,43 +45,26 @@ RETURNING id, email, name, created_at`
 	insertUserIdentitySQL = `INSERT INTO user_identities (user_id, issuer, subject, email, email_verified)
 VALUES ($1, $2, $3, $4, $5)`
 
-	// 按 id 排序加行锁避免多邀请并发兑现死锁；已是组织成员时 ON CONFLICT 保留原角色，同时关闭待兑现邀请并写入审计。
-	redeemInvitationsSQL = `WITH locked AS (
-    SELECT i.id
-    FROM invitations i
-    WHERE i.email = $2
-      AND i.accepted_at IS NULL
-      AND i.revoked_at IS NULL
-      AND i.superseded_at IS NULL
-      AND (i.expires_at IS NULL OR i.expires_at > now())
-      AND EXISTS (SELECT 1 FROM tenants t WHERE t.id = i.tenant_id)
-    ORDER BY i.id
-    FOR UPDATE OF i
-),
-redeemed AS (
-    UPDATE invitations i
-    SET accepted_at = now(),
-        accepted_by = $1
-    FROM locked l
-    WHERE i.id = l.id
-    RETURNING i.id, i.tenant_id, i.email, i.role
-),
-inserted_memberships AS (
-    INSERT INTO memberships (user_id, tenant_id, role)
-    SELECT $1, r.tenant_id, r.role
-    FROM redeemed r
-    ON CONFLICT (user_id, tenant_id) DO NOTHING
-)
-INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-SELECT r.tenant_id,
-       $4::text,
-       $1,
-       $5::text,
-       $6::text,
-       r.id::text,
-       $3::text,
-       jsonb_build_object('email', r.email, 'role', r.role)
-FROM redeemed r`
+	// 按 id 排序加行锁避免多邀请并发兑现死锁；随后逐条标记已兑现、写入成员关系并复用 insertAuditLogTx。
+	lockRedeemableInvitationsSQL = `SELECT i.id, i.tenant_id, i.email, i.role
+FROM invitations i
+WHERE i.email = $1
+  AND i.accepted_at IS NULL
+  AND i.revoked_at IS NULL
+  AND i.superseded_at IS NULL
+  AND (i.expires_at IS NULL OR i.expires_at > now())
+  AND EXISTS (SELECT 1 FROM tenants t WHERE t.id = i.tenant_id)
+ORDER BY i.id
+FOR UPDATE OF i`
+
+	markInvitationAcceptedSQL = `UPDATE invitations
+SET accepted_at = now(),
+    accepted_by = $1
+WHERE id = $2`
+
+	insertRedeemedMembershipSQL = `INSERT INTO memberships (user_id, tenant_id, role)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, tenant_id) DO NOTHING`
 
 	authenticateSessionForOrgSQL = `SELECT u.id,
        t.id, t.external_id, t.rate_limit_per_second,
@@ -275,16 +259,64 @@ func insertExternalUserTx(ctx context.Context, tx *sql.Tx, id identity.ExternalI
 	return user, nil
 }
 
+type redeemableInvitation struct {
+	id       int64
+	tenantID int64
+	email    string
+	role     string
+}
+
+func lockRedeemableInvitationsTx(ctx context.Context, tx *sql.Tx, email string) ([]redeemableInvitation, error) {
+	rows, err := tx.QueryContext(ctx, lockRedeemableInvitationsSQL, email)
+	if err != nil {
+		return nil, fmt.Errorf("create session for identity: lock invitations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var invitations []redeemableInvitation
+	for rows.Next() {
+		var inv redeemableInvitation
+		if err := rows.Scan(&inv.id, &inv.tenantID, &inv.email, &inv.role); err != nil {
+			return nil, fmt.Errorf("create session for identity: scan invitation: %w", err)
+		}
+		invitations = append(invitations, inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("create session for identity: iterate invitations: %w", err)
+	}
+	return invitations, nil
+}
+
 func redeemInvitationsTx(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
 	_, _, reqID, err := requireAuditMetaOrUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("create session for identity: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, redeemInvitationsSQL,
-		userID, email, reqID,
-		string(audit.ActorUser), string(audit.ActionInvitationRedeem), string(audit.TargetInvitation),
-	); err != nil {
-		return fmt.Errorf("create session for identity: redeem invitations: %w", err)
+
+	invitations, err := lockRedeemableInvitationsTx(ctx, tx, email)
+	if err != nil {
+		return err
+	}
+	if len(invitations) == 0 {
+		return nil
+	}
+
+	// 登录回调入参时未知 userID（常为 SystemMeta）；兑现审计绑定已落库的真实用户与原 request_id。
+	redeemAuditCtx := audit.WithMeta(ctx, audit.UserMeta(userID, reqID))
+	for _, inv := range invitations {
+		if _, err := tx.ExecContext(ctx, markInvitationAcceptedSQL, userID, inv.id); err != nil {
+			return fmt.Errorf("create session for identity: accept invitation: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, insertRedeemedMembershipSQL, userID, inv.tenantID, inv.role); err != nil {
+			return fmt.Errorf("create session for identity: insert membership: %w", err)
+		}
+		if err := insertAuditLogTx(
+			redeemAuditCtx, tx, inv.tenantID, userID,
+			audit.ActionInvitationRedeem, audit.TargetInvitation, strconv.FormatInt(inv.id, 10),
+			map[string]any{"email": inv.email, "role": inv.role},
+		); err != nil {
+			return fmt.Errorf("create session for identity: %w", err)
+		}
 	}
 	return nil
 }

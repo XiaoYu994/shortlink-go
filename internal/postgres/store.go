@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"shortlink/internal/audit"
 	"shortlink/internal/idgen"
@@ -43,90 +44,49 @@ const (
     THEN 0 ELSE link_usage END`
 
 	/*
-		占本月配额、插入链接与入队异步风控任务在同一条多 CTE 语句里完成，三条动作一起提交或一起回滚（ADR 0020、ADR 0022）。
-		quota 把「本月已创建数」和它所属的月份一起更新：月份过期时先按 0 算再加一；
-		EXISTS (SELECT 1 FROM quota) 靠它的 RETURNING 判断是否拿到了配额，
-		数据修改 CTE 的改动只有 RETURNING 能看到。
-		租户不存在时 quota 为空，不再绕过配额静默写入孤儿链接，由 Create 补查后返回 ErrTenantNotFound（守住 ADR 0010 应用层完整性）。
-		语句失败（例如短码冲突）时配额更新和风控入队随语句一起回滚，重试不会重复计数也不留孤儿任务。
+		claimLinkQuotaSQL 在租户事务内原子占一个本月配额，并同步推进用量月份。
+		租户不存在或本月配额已满时返回 0 行，由 checkCreateQuotaTx 区分原因，
+		守住 ADR 0010 的应用层完整性。
 	*/
-	insertLinkSQL = `WITH quota AS (
-    UPDATE tenants
-    SET link_usage = (` + effectiveUsageSQL + `) + 1,
-        link_usage_month = GREATEST(link_usage_month, ` + currentMonthSQL + `)
-    WHERE id = $4
-      AND (` + effectiveUsageSQL + `) < link_quota
-    RETURNING 1
-),
-inserted AS (
-    INSERT INTO links (code, url, expires_at, tenant_id)
-    SELECT $1, $2, $3, $4
-    WHERE EXISTS (SELECT 1 FROM quota)
-    RETURNING id, code, url, expires_at, created_at, tenant_id
-),
-event_meta AS (
-    SELECT 'evt_' || gen_random_uuid()::text AS event_id
-),
-enqueued AS (
-    INSERT INTO jobs (kind, tenant_id, payload)
-    SELECT $8::text,
-           i.tenant_id,
-           jsonb_build_object('link_id', i.id, 'code', i.code, 'url', i.url)
-    FROM inserted i
-),
-webhook_jobs AS (
-    INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-    SELECT $11::text,
-           i.tenant_id,
-           jsonb_build_object(
-               'webhook_id', w.id,
-               'event_id', em.event_id,
-               'event', $12::text,
-               'occurred_at', i.created_at,
-               'data', jsonb_strip_nulls(jsonb_build_object(
-                   'link_id', i.id,
-                   'code', i.code,
-                   'url', i.url,
-                   'expires_at', i.expires_at,
-                   'created_at', i.created_at
-               ))
-           ),
-           $13::int
-    FROM inserted i
-    CROSS JOIN event_meta em
-    JOIN webhooks w
-      ON w.tenant_id = i.tenant_id
-     AND w.enabled = TRUE
-     AND $12::text = ANY(w.events)
-),
-audited AS (
-    INSERT INTO audit_logs (tenant_id, actor_kind, actor_id, action, target_type, target_id, request_id, metadata)
-    SELECT i.tenant_id,
-           $5::text,
-           $6::bigint,
-           $9::text,
-           $10::text,
-           i.code,
-           $7::text,
-           jsonb_strip_nulls(jsonb_build_object(
-               'link_id', i.id,
-               'url', i.url,
-               'expires_at', i.expires_at
-           ))
-    FROM inserted i
-)
-SELECT id, created_at FROM inserted`
+	claimLinkQuotaSQL = `UPDATE tenants
+SET link_usage = (` + effectiveUsageSQL + `) + 1,
+    link_usage_month = GREATEST(link_usage_month, ` + currentMonthSQL + `)
+WHERE id = $1
+  AND (` + effectiveUsageSQL + `) < link_quota`
 
-	// quotaExceededSQL 只在插入没有返回行时执行，也用有效已用量区分配额不足和租户不存在。
+	insertLinkRowSQL = `INSERT INTO links (code, url, expires_at, tenant_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id, created_at`
+
+	// quotaExceededSQL 只在扣配额返回 0 行时执行，用同一有效已用量表达式区分配额不足与租户不存在。
 	quotaExceededSQL = `SELECT (` + effectiveUsageSQL + `) >= link_quota FROM tenants WHERE id = $1`
 
 	/*
-		maxCodeAttempts 是短码冲突时的最大重试次数。
+		maxCodeAttempts 是短码冲突或跨月竞态时的最大重试次数。
 		8 位 Base62 约有 2.18e14 种组合；已有 100 万条链接时，单次碰撞概率约为 4.6e-9，
 		连续 5 次都碰撞的概率约为 2e-42，可以忽略。
 	*/
 	maxCodeAttempts = 5
 )
+
+var (
+	errCreateCodeCollision = errors.New("code collision")
+	errCreateQuotaRaced    = errors.New("quota check raced")
+)
+
+type linkRiskScanPayload struct {
+	LinkID int64  `json:"link_id"`
+	Code   string `json:"code"`
+	URL    string `json:"url"`
+}
+
+type linkCreatedWebhookData struct {
+	LinkID    int64      `json:"link_id"`
+	Code      string     `json:"code"`
+	URL       string     `json:"url"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
 
 // PoolConfig 是数据库连接池参数，别名自 pgdb 保持向后兼容。
 type PoolConfig = pgdb.PoolConfig
@@ -166,9 +126,10 @@ func NewStore(db *sql.DB) *Store {
 }
 
 /*
-Create 生成随机短码，在同一语句里占用本月配额并插入链接，成功后回填 ID、Code 和 CreatedAt。
+Create 生成随机短码，在同一个租户事务内依次完成占本月配额、插入链接、入队异步风控、
+扇出 Webhook 与写审计日志，成功后回填 ID、Code 和 UTC CreatedAt。
 租户不存在返回 ErrTenantNotFound；本月配额不足返回 link.ErrQuotaExceeded，不写链接也不增加用量。
-删除链接不返还配额。短码冲突时重新生成，最多重试 maxCodeAttempts 次；冲突的语句会连同用量一起回滚。
+删除链接不返还配额。短码冲突或跨月竞态时整事务回滚后重试，最多重试 maxCodeAttempts 次。
 */
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if l.TenantID <= 0 {
@@ -177,10 +138,11 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	actorKind, actorID, reqID, err := requireAuditMeta(ctx)
-	if err != nil {
+	if _, _, _, err := requireAuditMeta(ctx); err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
+
+	var lastRetryErr error
 	for range maxCodeAttempts {
 		code, err := s.generate()
 		if err != nil {
@@ -188,58 +150,113 @@ func (s *Store) Create(ctx context.Context, l *link.Link) error {
 		}
 
 		var (
-			noRows    bool
-			exceeded  bool
-			exists    bool
 			createdID int64
-			createdAt = l.CreatedAt
+			createdAt time.Time
 		)
 		err = s.withTenantTx(ctx, l.TenantID, nil, func(tx *sql.Tx) error {
-			scanErr := tx.QueryRowContext(ctx, insertLinkSQL,
-				code, l.URL, l.ExpiresAt, l.TenantID, actorKind, actorID, reqID,
-				job.KindLinkRiskScan, string(audit.ActionLinkCreate), string(audit.TargetLink),
-				job.KindWebhookDeliver, string(webhook.EventLinkCreated), webhook.DefaultMaxAttempts,
-			).Scan(&createdID, &createdAt)
-			if scanErr == nil {
-				return nil
+			if err := claimLinkQuotaTx(ctx, tx, l.TenantID); err != nil {
+				return err
 			}
-			if errors.Is(scanErr, sql.ErrNoRows) {
-				noRows = true
-				var checkErr error
-				exceeded, exists, checkErr = checkCreateQuotaTx(ctx, tx, l.TenantID)
-				return checkErr
+			id, at, err := insertLinkRowTx(ctx, tx, code, l)
+			if err != nil {
+				return err
 			}
-			return scanErr
+			if err := insertJobTx(ctx, tx, job.KindLinkRiskScan, l.TenantID, linkRiskScanPayload{
+				LinkID: id,
+				Code:   code,
+				URL:    l.URL,
+			}); err != nil {
+				return fmt.Errorf("insert link: %w", err)
+			}
+			var expiresAtUTC *time.Time
+			if l.ExpiresAt != nil {
+				t := l.ExpiresAt.UTC()
+				expiresAtUTC = &t
+			}
+			if err := enqueueWebhookEventTx(ctx, tx, l.TenantID, webhook.EventLinkCreated, at, linkCreatedWebhookData{
+				LinkID:    id,
+				Code:      code,
+				URL:       l.URL,
+				ExpiresAt: expiresAtUTC,
+				CreatedAt: at,
+			}); err != nil {
+				return fmt.Errorf("insert link: %w", err)
+			}
+			auditMeta := map[string]any{
+				"link_id": id,
+				"url":     l.URL,
+			}
+			if expiresAtUTC != nil {
+				auditMeta["expires_at"] = expiresAtUTC.Format(time.RFC3339Nano)
+			}
+			if err := insertAuditLogTx(ctx, tx, l.TenantID, 0, audit.ActionLinkCreate, audit.TargetLink, code, auditMeta); err != nil {
+				return fmt.Errorf("insert link: %w", err)
+			}
+			createdID = id
+			createdAt = at
+			return nil
 		})
-		if err == nil && !noRows {
+		if err == nil {
 			l.ID = createdID
 			l.CreatedAt = createdAt
 			l.Code = code
 			return nil
 		}
-		if err == nil && noRows {
-			if !exists {
-				return ErrTenantNotFound
-			}
-			if exceeded {
-				return link.ErrQuotaExceeded
-			}
-			/*
-				插入没有返回行，复查时又没满：两条语句之间配额被调高，或者正好跨月。
-				重新走一遍即可，换一个短码没有副作用。
-			*/
+		if errors.Is(err, errCreateCodeCollision) || errors.Is(err, errCreateQuotaRaced) {
+			lastRetryErr = err
 			continue
 		}
-		if isUniqueConstraintViolation(err, "links_code_key") {
-			continue
-		}
-		return fmt.Errorf("insert link: %w", err)
+		return err
 	}
-	return fmt.Errorf("insert link: code collision after %d attempts", maxCodeAttempts)
+	return fmt.Errorf("insert link: %w after %d attempts", lastRetryErr, maxCodeAttempts)
+}
+
+func claimLinkQuotaTx(ctx context.Context, tx *sql.Tx, tenantID int64) error {
+	res, err := tx.ExecContext(ctx, claimLinkQuotaSQL, tenantID)
+	if err != nil {
+		return fmt.Errorf("insert link: claim quota: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("insert link: claim quota rows: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	exceeded, exists, err := checkCreateQuotaTx(ctx, tx, tenantID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrTenantNotFound
+	}
+	if exceeded {
+		return link.ErrQuotaExceeded
+	}
+	/*
+		扣配额返回 0 行但补查时未满：两条语句之间配额被调高，或正好跨月。
+		交由外层回滚并重试，区分于短码碰撞。
+	*/
+	return errCreateQuotaRaced
+}
+
+func insertLinkRowTx(ctx context.Context, tx *sql.Tx, code string, l *link.Link) (int64, time.Time, error) {
+	var (
+		createdID int64
+		createdAt time.Time
+	)
+	err := tx.QueryRowContext(ctx, insertLinkRowSQL, code, l.URL, l.ExpiresAt, l.TenantID).Scan(&createdID, &createdAt)
+	if err != nil {
+		if isUniqueConstraintViolation(err, "links_code_key") {
+			return 0, time.Time{}, errCreateCodeCollision
+		}
+		return 0, time.Time{}, fmt.Errorf("insert link: %w", err)
+	}
+	return createdID, createdAt.UTC(), nil
 }
 
 /*
-checkCreateQuotaTx 用和创建语句相同的「有效已用量」区分租户不存在与本月配额已满。
+checkCreateQuotaTx 用和扣配额语句相同的「有效已用量」区分租户不存在与本月配额已满。
 */
 func checkCreateQuotaTx(ctx context.Context, tx *sql.Tx, tenantID int64) (exceeded, exists bool, err error) {
 	err = tx.QueryRowContext(ctx, quotaExceededSQL, tenantID).Scan(&exceeded)
