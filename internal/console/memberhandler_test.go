@@ -91,7 +91,7 @@ func newMemberTestServer(role identity.Role, members MemberStore, sessions Sessi
 		registry:       newTestRegistry(),
 		keys:           allowKey{},
 		sessions:       sessions,
-		members:        members,
+		modules:        []Module{NewMembersModule(members)},
 		authorizer:     identity.NewMapAuthorizer(),
 	})
 }
@@ -218,7 +218,7 @@ func TestMemberRoutesAuthAndPermissionMatrix(t *testing.T) {
 				registry:       newTestRegistry(),
 				keys:           allowKey{},
 				sessions:       sessions,
-				members:        members,
+				modules:        []Module{NewMembersModule(members)},
 				authorizer:     &stubAuthorizer{allow: true},
 			})
 

@@ -22,7 +22,7 @@ func TestLogout(t *testing.T) {
 	t.Run("revokes session and clears cookie", func(t *testing.T) {
 		sessions := &stubSessionStore{}
 		reg := newTestRegistry()
-		srv, _ := newOIDCTestServerWithRegistry(t, "https://console.example.com/api/v1/auth/callback", sessions, reg)
+		srv, _ := newOIDCTestServerWithRegistry(t, "https://console.example.com/api/v1/auth/oidc/callback", sessions, reg)
 		handler := srv.Routes()
 
 		req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
@@ -55,7 +55,7 @@ func TestLogout(t *testing.T) {
 	t.Run("missing or malformed cookie is idempotent 204 without db call", func(t *testing.T) {
 		for _, val := range []string{"", "bad-token"} {
 			sessions := &stubSessionStore{}
-			srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+			srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 			req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
 			if val != "" {
 				req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: val})
@@ -80,7 +80,7 @@ func TestLogout(t *testing.T) {
 			{k: "Origin", v: "https://evil.example"},
 		} {
 			sessions := &stubSessionStore{}
-			srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+			srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 			req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
 			req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
 			req.Header.Set(hdr.k, hdr.v)
@@ -100,7 +100,7 @@ func TestLogout(t *testing.T) {
 
 	t.Run("duplicate session cookies return 401 without revoking or clearing", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "sls_" + strings.Repeat("ab", 32)})
@@ -121,7 +121,7 @@ func TestLogout(t *testing.T) {
 		sessions := &stubSessionStore{
 			revokeFn: func(context.Context, string) error { return errors.New("db down") },
 		}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		req := httptest.NewRequest(http.MethodPost, authLogoutPath, nil)
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
 		rec := httptest.NewRecorder()
@@ -135,7 +135,7 @@ func TestLogout(t *testing.T) {
 	})
 
 	t.Run("GET logout returns 405", func(t *testing.T) {
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", &stubSessionStore{})
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", &stubSessionStore{})
 		rec := httptest.NewRecorder()
 		srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authLogoutPath, nil))
 		if rec.Code != http.StatusMethodNotAllowed {
@@ -165,7 +165,7 @@ func TestMe(t *testing.T) {
 			},
 		}
 		reg := newTestRegistry()
-		srv, _ := newOIDCTestServerWithRegistry(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions, reg)
+		srv, _ := newOIDCTestServerWithRegistry(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions, reg)
 		req := httptest.NewRequest(http.MethodGet, mePath, nil)
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
 		req.Header.Set(orgIDHeader, "not-an-org")
@@ -202,7 +202,7 @@ func TestMe(t *testing.T) {
 				}, nil
 			},
 		}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		req := httptest.NewRequest(http.MethodGet, mePath, nil)
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
 		rec := httptest.NewRecorder()
@@ -221,7 +221,7 @@ func TestMe(t *testing.T) {
 				return identity.SessionInfo{}, identity.ErrUnauthenticated
 			},
 		}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		cases := []struct {
@@ -286,7 +286,7 @@ func TestMe(t *testing.T) {
 				return identity.SessionInfo{}, errors.New("db down")
 			},
 		}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		req := httptest.NewRequest(http.MethodGet, mePath, nil)
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: validToken})
 		rec := httptest.NewRecorder()

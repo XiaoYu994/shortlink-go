@@ -1,6 +1,7 @@
 package console
 
 import (
+	"log/slog"
 	"net/http"
 
 	"shortlink/internal/httpx"
@@ -29,7 +30,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminStoreError(w, r, "get link", err, code)
 		return
 	}
-	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, newLinkResponse(*got))
+	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, newLinkResponse(*got, s.hasModule(ModuleAnalytics)))
 }
 
 /*
@@ -37,15 +38,19 @@ validLinkCode 取出路径里的短码并校验格式。
 管理接口对非法短码也按 404 处理，避免无意义的数据库查询。
 */
 func (s *Server) validLinkCode(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return validLinkCode(s.logger, w, r)
+}
+
+func validLinkCode(logger *slog.Logger, w http.ResponseWriter, r *http.Request) (string, bool) {
 	code := r.PathValue("code")
 	if !idgen.ValidCode(code) {
-		s.writeLinkNotFound(r, w)
+		writeLinkNotFound(logger, r, w)
 		return "", false
 	}
 	return code, true
 }
 
 // writeLinkNotFound 统一管理接口找不到或无权访问时的 404 正文，不区分不存在、已下线和其他租户。
-func (s *Server) writeLinkNotFound(r *http.Request, w http.ResponseWriter) {
-	httpx.WriteError(s.logger, r.Context(), w, http.StatusNotFound, "link not found")
+func writeLinkNotFound(logger *slog.Logger, r *http.Request, w http.ResponseWriter) {
+	httpx.WriteError(logger, r.Context(), w, http.StatusNotFound, "link not found")
 }

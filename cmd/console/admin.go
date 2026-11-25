@@ -31,15 +31,15 @@ const usageText = `用法:
   console link ban --code CODE --reason REASON
   console link unban --code CODE
 
-serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL 和 REDIS_URL。
-worker 启动后台任务引擎（异步 URL 风控、租约回收与过期会话/已完成任务清理），需要 DATABASE_URL 和 REDIS_URL。
+serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL，REDIS_URL 可选（留空时直连数据库）。
+worker 启动后台任务引擎（异步 URL 风控、租约回收与过期会话/已完成任务清理），需要 DATABASE_URL，REDIS_URL 可选。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；--key-name 为密钥可选备注名；
 --scope 省略表示拥有全部密钥权限（links:read、links:write、stats:read），
 可重复传入或用逗号分隔。
 --name 会新建租户；已有租户用 --tenant。密钥、租户和成员命令只读 DATABASE_URL，不连接 Redis。
 member invite 预先登记组织邀请，--role 取 owner、admin、member、viewer；
 用户使用已验证的同一邮箱通过 OIDC 登录时自动兑现。
-link ban/unban 封禁和解封短链，需要 DATABASE_URL 和 REDIS_URL，先写数据库再写缓存；
+link ban/unban 封禁和解封短链，需要 DATABASE_URL，REDIS_URL 可选（配置时先写数据库再写缓存）；
 --reason 取 phishing、malware、adult、gambling、drugs、spam、other。
 tenant show 看本月用量、配额和限流；set 至少给一个选项。--link-quota 是每个 UTC
 自然月最多能创建的链接数，0 表示不能创建；--rate-limit 是管理 API 每秒请求数，

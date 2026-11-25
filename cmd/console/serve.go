@@ -43,15 +43,6 @@ func runServe(cliOpts serveCLIOptions) error {
 	defer func() { _ = db.Close() }()
 	logger.Info("connected to postgres")
 
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	rdb, err := cache.Open(ctx, cfg.RedisURL)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("connect redis: %w", err)
-	}
-	defer func() { _ = rdb.Close() }()
-	logger.Info("connected to redis")
-
 	// 每个进程各自建 Registry，/metrics 只反映这个进程的指标。
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
@@ -60,59 +51,81 @@ func runServe(cliOpts serveCLIOptions) error {
 		collectors.NewDBStatsCollector(db, "shortlink"),
 	)
 
+	storeFeatures := cfg.StoreFeatures()
+
 	/*
-		创建必须走 cache.Store：成功后写穿正缓存，盖掉 redirector 可能已经写入的负缓存。
-		否则新短码会在负缓存 TTL 内继续 404。
+		配置 REDIS_URL 时创建必须走 cache.Store：成功后写穿正缓存，盖掉 redirector 可能已经写入的负缓存。
+		REDIS_URL 为空时跳过缓存层直接经 storemetrics 访问 PostgreSQL（ADR 0029）。
 		console 不跳转，不启动 ClickRecorder。
 	*/
-	pgStore := postgres.NewStore(db)
-	store := cache.New(storemetrics.New(pgStore, registry), rdb, registry, cache.Options{
-		FetchTimeout: cfg.CacheFetchTimeout,
-		Logger:       logger,
-	})
+	pgStore := newConfiguredPostgresStore(db, storeFeatures)
+	metricsStore := storemetrics.New(pgStore, registry)
+	var store console.Store = metricsStore
+	if cfg.RedisURL != "" {
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		rdb, err := cache.Open(ctx, cfg.RedisURL)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("connect redis: %w", err)
+		}
+		defer func() { _ = rdb.Close() }()
+		logger.Info("connected to redis")
 
-	oidcClient, githubClient, err := initAuthProviders(cfg, logger)
+		store = cache.New(metricsStore, rdb, registry, cache.Options{
+			FetchTimeout: cfg.CacheFetchTimeout,
+			Logger:       logger,
+		})
+	} else {
+		logger.Info("redis cache disabled: REDIS_URL is not set")
+	}
+
+	authMethods, err := initAuthMethods(cfg, logger)
 	if err != nil {
 		return err
 	}
+	if err := console.ValidateAuthMethods(authMethods); err != nil {
+		return fmt.Errorf("validate auth methods: %w", err)
+	}
 	var (
-		sessions      console.SessionStore
-		members       console.MemberStore
-		orgs          console.OrgStore
-		invitations   console.InvitationStore
-		apiKeys       console.APIKeyStore
-		auditLogs     console.AuditLogStore
-		webhooks      console.WebhookStore
-		webhookCipher *webhook.SecretCipher
+		sessions console.SessionStore
+		modules  []console.Module
 	)
+	if cfg.Features.Analytics {
+		modules = append(modules, console.NewStatsModule(store))
+	}
 	/*
-		以下均为仅限浏览器会话用户（ActorUser）调用的组织自助与治理路由（ADR 0018/0021/0023）：
+		以下均为仅限浏览器会话用户（ActorUser）调用的组织自助与治理模块（ADR 0018/0021/0023/0029）：
 		API Key 的 scope 白名单仅含 links/stats，且各 handler 均做 ActorUser 纵深防御。
-		未配置 OIDC 或 GitHub 时无法产生会话，不挂载这些路由以保持最小暴露面。
+		未配置任何用户登录方式时无法产生会话，不挂载这些模块以保持最小暴露面。
 	*/
-	if oidcClient != nil || githubClient != nil {
+	if len(authMethods) > 0 {
 		sessions = pgStore
-		members = pgStore
-		orgs = pgStore
-		invitations = pgStore
-		apiKeys = pgStore
-		auditLogs = pgStore
+		modules = append(modules,
+			console.NewOrgsModule(pgStore, pgStore),
+			console.NewMembersModule(pgStore),
+			console.NewInvitationsModule(pgStore),
+			console.NewAPIKeysModule(pgStore),
+			console.NewAuditModule(pgStore),
+		)
 	}
 	if cfg.WebhookSecretKey != "" && sessions != nil {
 		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
 		if err != nil {
 			return fmt.Errorf("parse WEBHOOK_SECRET_KEY: %w", err)
 		}
-		webhookCipher, err = webhook.NewSecretCipher(key)
+		webhookCipher, err := webhook.NewSecretCipher(key)
 		if err != nil {
 			return fmt.Errorf("init webhook cipher: %w", err)
 		}
-		webhooks = pgStore
+		modules = append(modules, console.NewWebhooksModule(pgStore, webhookCipher, safehttp.URLValidationOptions{
+			AllowedPorts:     cfg.WebhookAllowedPorts,
+			AllowedHostPorts: cliOpts.allowTestHosts,
+		}))
 		logger.Info("webhooks api enabled")
 	} else if cfg.WebhookSecretKey == "" {
 		logger.Info("webhooks api disabled: WEBHOOK_SECRET_KEY is not set")
 	} else {
-		logger.Info("webhooks api disabled: OIDC or GitHub session auth is required")
+		logger.Info("webhooks api disabled: at least one user auth method is required")
 	}
 	if cfg.WebDistDir != "" {
 		info, err := os.Stat(cfg.WebDistDir)
@@ -122,24 +135,31 @@ func runServe(cliOpts serveCLIOptions) error {
 		logger.Info("serving web console static files", "dir", cfg.WebDistDir)
 	}
 
+	enabledFeatures, disabledFeatures := storeFeatures.enabledDisabled()
+	if cfg.WebDistDir != "" {
+		enabledFeatures = append(enabledFeatures, "web")
+	} else {
+		disabledFeatures = append(disabledFeatures, "web")
+	}
+	enabledAuthMethods := make([]string, 0, len(authMethods))
+	for _, m := range authMethods {
+		enabledAuthMethods = append(enabledAuthMethods, m.Descriptor().ID)
+	}
+	logger.Info("console features configured",
+		"enabled_features", enabledFeatures,
+		"disabled_features", disabledFeatures,
+		"enabled_auth_methods", enabledAuthMethods,
+	)
+
 	// 鉴权、会话和成员管理都直接用 pgStore，缓存不参与身份与成员校验。
 	srv := console.New(logger, store, cfg.RequestTimeout, registry, console.Options{
-		Keys:          pgStore,
-		Authorizer:    identity.NewMapAuthorizer(),
-		OIDC:          oidcClient,
-		GitHub:        githubClient,
-		Sessions:      sessions,
-		Members:       members,
-		Orgs:          orgs,
-		Invitations:   invitations,
-		APIKeys:       apiKeys,
-		AuditLogs:     auditLogs,
-		Webhooks:      webhooks,
-		WebhookCipher: webhookCipher,
-		WebhookURLOpts: safehttp.URLValidationOptions{
-			AllowedPorts:     cfg.WebhookAllowedPorts,
-			AllowedHostPorts: cliOpts.allowTestHosts,
-		},
+		Keys:              pgStore,
+		Authorizer:        identity.NewMapAuthorizer(),
+		Sessions:          sessions,
+		AuthMethods:       authMethods,
+		Modules:           modules,
+		RiskScanEnabled:   cfg.Features.RiskScan,
+		EmailEnabled:      cfg.EmailEnabled,
 		WebDistDir:        cfg.WebDistDir,
 		PublicBaseURL:     cfg.PublicBaseURL,
 		TrustProxyHeaders: cfg.TrustProxyHeaders,
@@ -179,14 +199,10 @@ func runServe(cliOpts serveCLIOptions) error {
 }
 
 /*
-initAuthProviders 按配置初始化可选的 OIDC 与 GitHub 登录提供方。
-返回值保持接口类型，只在启用时赋值，避免把带类型的 nil 指针放进 console.Options。
+initAuthMethods 按配置初始化已启用的登录方式插件（OIDC / GitHub / 未来手机号 OTP 等，ADR 0029）。
 */
-func initAuthProviders(cfg ConsoleConfig, logger *slog.Logger) (console.OIDCClient, console.GitHubClient, error) {
-	var (
-		oidcClient   console.OIDCClient
-		githubClient console.GitHubClient
-	)
+func initAuthMethods(cfg ConsoleConfig, logger *slog.Logger) ([]console.AuthMethod, error) {
+	var methods []console.AuthMethod
 	if cfg.OIDC.Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		provider, err := oauth.NewOIDCProvider(ctx, oauth.OIDCConfig{
@@ -197,10 +213,14 @@ func initAuthProviders(cfg ConsoleConfig, logger *slog.Logger) (console.OIDCClie
 		})
 		cancel()
 		if err != nil {
-			return nil, nil, fmt.Errorf("init oidc provider: %w", err)
+			return nil, fmt.Errorf("init oidc provider: %w", err)
 		}
-		oidcClient = provider
-		logger.Info("initialized oidc provider", "issuer", cfg.OIDC.Issuer)
+		m, err := console.NewOAuthAuthMethod("oidc", provider)
+		if err != nil {
+			return nil, fmt.Errorf("init oidc auth method: %w", err)
+		}
+		methods = append(methods, m)
+		logger.Info("initialized oidc auth method", "issuer", cfg.OIDC.Issuer)
 	}
 	if cfg.GitHub.Enabled() {
 		provider, err := oauth.NewGitHubProvider(oauth.GitHubConfig{
@@ -209,10 +229,14 @@ func initAuthProviders(cfg ConsoleConfig, logger *slog.Logger) (console.OIDCClie
 			RedirectURL:  cfg.GitHub.RedirectURL,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("init github provider: %w", err)
+			return nil, fmt.Errorf("init github provider: %w", err)
 		}
-		githubClient = provider
-		logger.Info("initialized github oauth provider")
+		m, err := console.NewOAuthAuthMethod("github", provider)
+		if err != nil {
+			return nil, fmt.Errorf("init github auth method: %w", err)
+		}
+		methods = append(methods, m)
+		logger.Info("initialized github auth method")
 	}
-	return oidcClient, githubClient, nil
+	return methods, nil
 }

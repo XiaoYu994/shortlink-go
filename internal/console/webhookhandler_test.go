@@ -127,13 +127,13 @@ func TestWebhookRoutesRBACValidationAndLifecycle(t *testing.T) {
 		h := srv.Routes()
 
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
-		var prov authProvidersResponse
-		if err := json.Unmarshal(rec.Body.Bytes(), &prov); err != nil {
-			t.Fatalf("decode providers: %v", err)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/capabilities", nil))
+		var caps capabilitiesResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil {
+			t.Fatalf("decode capabilities: %v", err)
 		}
-		if prov.Webhooks {
-			t.Fatal("expected providers.Webhooks=false when webhook handler is nil")
+		if caps.Features.Webhooks {
+			t.Fatal("expected capabilities.Features.Webhooks=false when webhooks module is absent")
 		}
 
 		rec2 := httptest.NewRecorder()
@@ -159,11 +159,10 @@ func TestWebhookRoutesRBACValidationAndLifecycle(t *testing.T) {
 
 	makeServer := func(role identity.Role) http.Handler {
 		srv := New(selfServiceLogger(), &stubStore{}, 2*time.Second, prometheus.NewRegistry(), Options{
-			Authorizer:    identity.NewMapAuthorizer(),
-			Keys:          selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
-			Sessions:      &selfServiceSessionStore{userID: 7, role: role, orgID: 1},
-			Webhooks:      whStore,
-			WebhookCipher: cipher,
+			Authorizer: identity.NewMapAuthorizer(),
+			Keys:       selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
+			Sessions:   &selfServiceSessionStore{userID: 7, role: role, orgID: 1},
+			Modules:    []Module{NewWebhooksModule(whStore, cipher, safehttp.URLValidationOptions{})},
 		})
 		return srv.Routes()
 	}
@@ -258,11 +257,13 @@ func TestWebhookRoutesRBACValidationAndLifecycle(t *testing.T) {
 
 	// devtest 允许配置的回环测试端口能创建成功。
 	srvDev := New(selfServiceLogger(), &stubStore{}, 2*time.Second, prometheus.NewRegistry(), Options{
-		Authorizer:     identity.NewMapAuthorizer(),
-		Sessions:       &selfServiceSessionStore{userID: 7, role: identity.RoleAdmin, orgID: 1},
-		Webhooks:       whStore,
-		WebhookCipher:  cipher,
-		WebhookURLOpts: safehttp.URLValidationOptions{AllowedHostPorts: []string{"127.0.0.1:18090"}},
+		Authorizer: identity.NewMapAuthorizer(),
+		Sessions:   &selfServiceSessionStore{userID: 7, role: identity.RoleAdmin, orgID: 1},
+		Modules: []Module{NewWebhooksModule(
+			whStore,
+			cipher,
+			safehttp.URLValidationOptions{AllowedHostPorts: []string{"127.0.0.1:18090"}},
+		)},
 	})
 	recDev := httptest.NewRecorder()
 	reqDev := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks", strings.NewReader(`{"url":"http://127.0.0.1:18090/hook","events":["link.created"]}`))

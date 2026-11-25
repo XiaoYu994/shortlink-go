@@ -78,6 +78,8 @@ func baseConsoleTestEnv() map[string]string {
 		"SMTP_FROM":                         "",
 		"SMTP_TLS_MODE":                     "",
 		"SMTP_TIMEOUT":                      "",
+		"FEATURE_ANALYTICS":                 "",
+		"FEATURE_RISK_SCAN":                 "",
 	}
 }
 
@@ -100,6 +102,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 	base := baseConsoleTestEnv()
 	defaults := ConsoleConfig{
 		BaseConfig:  defaultBaseConfig(defaultConsoleAddr),
+		Features:    config.FeatureFlags{Analytics: true, RiskScan: true},
 		IPRateLimit: defaultConsoleIPRateLimit,
 		IPRateBurst: defaultConsoleIPRateBurst,
 	}
@@ -202,7 +205,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 				"OIDC_ISSUER":        "http://127.0.0.1:5556/dex",
 				"OIDC_CLIENT_ID":     "shortlink-console",
 				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/callback",
+				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 			},
 			want: func() ConsoleConfig {
 				c := defaults
@@ -210,7 +213,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 					Issuer:       "http://127.0.0.1:5556/dex",
 					ClientID:     "shortlink-console",
 					ClientSecret: "shortlink-console-secret",
-					RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+					RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 				}
 				return c
 			}(),
@@ -229,7 +232,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 				"OIDC_ISSUER":        "ftp://127.0.0.1:5556/dex",
 				"OIDC_CLIENT_ID":     "shortlink-console",
 				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/callback",
+				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 			},
 			wantErr: "OIDC_ISSUER",
 		},
@@ -239,7 +242,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 				"OIDC_ISSUER":        "http://127.0.0.1:5556/dex?foo=1",
 				"OIDC_CLIENT_ID":     "shortlink-console",
 				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/callback",
+				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 			},
 			wantErr: "OIDC_ISSUER",
 		},
@@ -249,7 +252,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 				"OIDC_ISSUER":        "http://127.0.0.1:5556/dex",
 				"OIDC_CLIENT_ID":     "shortlink-console",
 				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "/api/v1/auth/callback",
+				"OIDC_REDIRECT_URL":  "/api/v1/auth/oidc/callback",
 			},
 			wantErr: "OIDC_REDIRECT_URL",
 		},
@@ -284,6 +287,28 @@ func TestLoadConsoleConfig(t *testing.T) {
 			},
 			wantErr: "GITHUB_REDIRECT_URL",
 		},
+		{
+			name: "minimal single-pg mode with feature flags disabled",
+			env: map[string]string{
+				"REDIS_URL":         "",
+				"FEATURE_ANALYTICS": "false",
+				"FEATURE_RISK_SCAN": "false",
+				"SMTP_HOST":         "smtp.example.com",
+				"SMTP_FROM":         "noreply@example.com",
+			},
+			want: func() ConsoleConfig {
+				c := defaults
+				c.RedisURL = ""
+				c.Features = config.FeatureFlags{Analytics: false, RiskScan: false}
+				c.EmailEnabled = true
+				return c
+			}(),
+		},
+		{
+			name:    "smtp host without smtp from rejected",
+			env:     map[string]string{"SMTP_HOST": "smtp.example.com"},
+			wantErr: "SMTP_FROM is required",
+		},
 	}
 
 	for _, tt := range tests {
@@ -312,6 +337,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 
 	defaults := WorkerConfig{
 		BaseConfig:                    defaultBaseConfig(""),
+		Features:                      config.FeatureFlags{Analytics: true, RiskScan: true},
 		Concurrency:                   job.DefaultConcurrency,
 		MaxPerTenant:                  job.DefaultMaxPerTenant,
 		PollInterval:                  job.DefaultPollInterval,
@@ -378,6 +404,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 			},
 			want: WorkerConfig{
 				BaseConfig:                    defaultBaseConfig("127.0.0.1:8082"),
+				Features:                      config.FeatureFlags{Analytics: true, RiskScan: true},
 				Concurrency:                   16,
 				MaxPerTenant:                  2,
 				PollInterval:                  100 * time.Millisecond,
@@ -512,6 +539,20 @@ func TestLoadWorkerConfig(t *testing.T) {
 			env:     map[string]string{"WORKER_AUDIT_RETENTION_DAYS": "-5"},
 			wantErr: "WORKER_AUDIT_RETENTION_DAYS must be positive",
 		},
+		{
+			name: "minimal worker mode without redis and with features disabled",
+			env: map[string]string{
+				"REDIS_URL":         "",
+				"FEATURE_ANALYTICS": "false",
+				"FEATURE_RISK_SCAN": "false",
+			},
+			want: func() WorkerConfig {
+				c := defaults
+				c.RedisURL = ""
+				c.Features = config.FeatureFlags{Analytics: false, RiskScan: false}
+				return c
+			}(),
+		},
 	}
 
 	for _, tt := range tests {
@@ -540,6 +581,8 @@ func TestLoadWorkerConfig(t *testing.T) {
 
 func consoleConfigEqual(a, b ConsoleConfig) bool {
 	return a.BaseConfig == b.BaseConfig &&
+		a.Features == b.Features &&
+		a.EmailEnabled == b.EmailEnabled &&
 		a.OIDC == b.OIDC &&
 		a.GitHub == b.GitHub &&
 		a.WebDistDir == b.WebDistDir &&
@@ -554,6 +597,7 @@ func consoleConfigEqual(a, b ConsoleConfig) bool {
 
 func workerConfigEqual(a, b WorkerConfig) bool {
 	return a.BaseConfig == b.BaseConfig &&
+		a.Features == b.Features &&
 		a.Concurrency == b.Concurrency &&
 		a.MaxPerTenant == b.MaxPerTenant &&
 		a.PollInterval == b.PollInterval &&
@@ -589,7 +633,7 @@ func TestConsoleConfigRedaction(t *testing.T) {
 		Issuer:       "https://dex.example.com",
 		ClientID:     "shortlink-console",
 		ClientSecret: "oidc-top-secret",
-		RedirectURL:  "https://console.example.com/api/v1/auth/callback",
+		RedirectURL:  "https://console.example.com/api/v1/auth/oidc/callback",
 	}
 	ghCfg := GitHubConfig{
 		ClientID:     "gh-client",

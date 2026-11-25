@@ -52,6 +52,9 @@ func TestNewGitHubProviderValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGitHubProvider valid defaults: %v", err)
 	}
+	if p.RequiresNonce() {
+		t.Error("RequiresNonce() = true for GitHubProvider, want false")
+	}
 	if p.SecureCookies() {
 		t.Error("SecureCookies() = true for http redirect, want false")
 	}
@@ -98,7 +101,7 @@ func TestGitHubProviderHappyPathAndEmailRules(t *testing.T) {
 			},
 		})
 		flow := mustOAuthFlow(t)
-		authURL := httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier)
+		authURL := httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier, "")
 		parsed, err := url.Parse(authURL)
 		if err != nil {
 			t.Fatalf("parse AuthCodeURL: %v", err)
@@ -116,7 +119,7 @@ func TestGitHubProviderHappyPathAndEmailRules(t *testing.T) {
 			t.Fatalf("LastAuthorize = %+v (ok=%v), want PKCE S256", req, ok)
 		}
 
-		got, err := httpProvider.ExchangeAndFetchUser(context.Background(), code, flow.CodeVerifier)
+		got, err := httpProvider.Exchange(context.Background(), code, flow.CodeVerifier, "")
 		if err != nil {
 			t.Fatalf("ExchangeAndFetchUser: %v", err)
 		}
@@ -140,8 +143,8 @@ func TestGitHubProviderHappyPathAndEmailRules(t *testing.T) {
 			Emails: []fakegithub.Email{{Email: "u@example.com", Primary: true, Verified: true}},
 		})
 		flow := mustOAuthFlow(t)
-		code, _ := authorizeAtFake(t, httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier))
-		got, err := httpProvider.ExchangeAndFetchUser(context.Background(), code, flow.CodeVerifier)
+		code, _ := authorizeAtFake(t, httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier, ""))
+		got, err := httpProvider.Exchange(context.Background(), code, flow.CodeVerifier, "")
 		if err != nil {
 			t.Fatalf("ExchangeAndFetchUser: %v", err)
 		}
@@ -160,8 +163,8 @@ func TestGitHubProviderHappyPathAndEmailRules(t *testing.T) {
 			},
 		})
 		flow := mustOAuthFlow(t)
-		code, _ := authorizeAtFake(t, httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier))
-		got, err := httpProvider.ExchangeAndFetchUser(context.Background(), code, flow.CodeVerifier)
+		code, _ := authorizeAtFake(t, httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier, ""))
+		got, err := httpProvider.Exchange(context.Background(), code, flow.CodeVerifier, "")
 		if err != nil {
 			t.Fatalf("ExchangeAndFetchUser: %v", err)
 		}
@@ -179,8 +182,8 @@ func TestGitHubProviderHappyPathAndEmailRules(t *testing.T) {
 			},
 		})
 		flow := mustOAuthFlow(t)
-		code, _ := authorizeAtFake(t, httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier))
-		got, err := httpProvider.ExchangeAndFetchUser(context.Background(), code, flow.CodeVerifier)
+		code, _ := authorizeAtFake(t, httpProvider.AuthCodeURL(flow.State, flow.CodeVerifier, ""))
+		got, err := httpProvider.Exchange(context.Background(), code, flow.CodeVerifier, "")
 		if err != nil {
 			t.Fatalf("ExchangeAndFetchUser: %v", err)
 		}
@@ -221,8 +224,8 @@ func TestGitHubProviderClassifiesErrors(t *testing.T) {
 				t.Cleanup(func() { fake.SetTamper(fakegithub.Tamper{}) })
 
 				flow := mustOAuthFlow(t)
-				code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier))
-				_, err := provider.ExchangeAndFetchUser(context.Background(), code, flow.CodeVerifier)
+				code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, ""))
+				_, err := provider.Exchange(context.Background(), code, flow.CodeVerifier, "")
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tc.wantErr)
 				}
@@ -235,8 +238,8 @@ func TestGitHubProviderClassifiesErrors(t *testing.T) {
 		provider := newTestGitHubProvider(t, fake, "http://127.0.0.1:8081/api/v1/auth/github/callback", "wrong-secret")
 
 		flow := mustOAuthFlow(t)
-		code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier))
-		_, err := provider.ExchangeAndFetchUser(context.Background(), code, flow.CodeVerifier)
+		code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, ""))
+		_, err := provider.Exchange(context.Background(), code, flow.CodeVerifier, "")
 		if !errors.Is(err, identity.ErrProviderUnavailable) {
 			t.Fatalf("err = %v, want ErrProviderUnavailable", err)
 		}
@@ -247,8 +250,8 @@ func TestGitHubProviderClassifiesErrors(t *testing.T) {
 		provider := newTestGitHubProvider(t, fake, "http://127.0.0.1:8081/api/v1/auth/github/callback", "gh-secret")
 
 		flow := mustOAuthFlow(t)
-		code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier))
-		_, err := provider.ExchangeAndFetchUser(context.Background(), code, "wrong-verifier-value-that-does-not-match")
+		code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, ""))
+		_, err := provider.Exchange(context.Background(), code, "wrong-verifier-value-that-does-not-match", "")
 		if !errors.Is(err, identity.ErrAuthFailed) {
 			t.Fatalf("err = %v, want ErrAuthFailed", err)
 		}
@@ -258,12 +261,12 @@ func TestGitHubProviderClassifiesErrors(t *testing.T) {
 		fake := fakegithub.Start(t, "gh-client", "gh-secret")
 		provider := newTestGitHubProvider(t, fake, "http://127.0.0.1:8081/api/v1/auth/github/callback", "gh-secret")
 
-		if _, err := provider.ExchangeAndFetchUser(context.Background(), "", "v"); !errors.Is(err, identity.ErrAuthFailed) {
+		if _, err := provider.Exchange(context.Background(), "", "v", ""); !errors.Is(err, identity.ErrAuthFailed) {
 			t.Fatalf("empty code err = %v, want ErrAuthFailed", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := provider.ExchangeAndFetchUser(ctx, "c", "v"); !errors.Is(err, context.Canceled) {
+		if _, err := provider.Exchange(ctx, "c", "v", ""); !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled ctx err = %v, want context.Canceled", err)
 		}
 	})

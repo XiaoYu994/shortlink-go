@@ -15,7 +15,7 @@ import (
 const (
 	testClientID     = "shortlink-console"
 	testClientSecret = "shortlink+secret/with=special"
-	testRedirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
+	testRedirectURL  = "http://127.0.0.1:8081/api/v1/auth/oidc/callback"
 )
 
 type profileClaims struct {

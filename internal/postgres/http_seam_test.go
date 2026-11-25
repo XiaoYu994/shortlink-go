@@ -208,6 +208,7 @@ func newConsoleHandler(store *Store) http.Handler {
 	srv := console.New(logger, store, 5*time.Second, prometheus.NewRegistry(), console.Options{
 		Keys:       store,
 		Authorizer: identity.NewMapAuthorizer(),
+		Modules:    []console.Module{console.NewStatsModule(store)},
 	})
 	return srv.Routes()
 }

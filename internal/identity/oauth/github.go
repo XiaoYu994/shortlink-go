@@ -156,17 +156,22 @@ func (p *GitHubProvider) FlowCookieKey() []byte {
 	return bytes.Clone(p.flowCookieKey)
 }
 
-// AuthCodeURL 构造带 state 和 PKCE S256 challenge 的 GitHub 授权跳转地址（纯 OAuth 2.0，不传 nonce）。
-func (p *GitHubProvider) AuthCodeURL(state, codeVerifier string) string {
+// RequiresNonce 报告 GitHub 纯 OAuth 2.0 流程不签发 ID Token，不需要 nonce。
+func (p *GitHubProvider) RequiresNonce() bool {
+	return false
+}
+
+// AuthCodeURL 构造带 state 和 PKCE S256 challenge 的 GitHub 授权跳转地址（纯 OAuth 2.0，忽略 nonce）。
+func (p *GitHubProvider) AuthCodeURL(state, codeVerifier, _ string) string {
 	return p.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(codeVerifier))
 }
 
 /*
-ExchangeAndFetchUser 用授权码和 PKCE code_verifier 向 GitHub 换取 access_token，
+Exchange 用授权码和 PKCE code_verifier 向 GitHub 换取 access_token，
 再在线请求 /user 与 /user/emails 构造规范化的 ExternalIdentity（Subject 取不可变的十进制数字用户 ID）。
 access_token 只在本次请求里使用，不持久化也不写入日志。
 */
-func (p *GitHubProvider) ExchangeAndFetchUser(ctx context.Context, code, codeVerifier string) (identity.ExternalIdentity, error) {
+func (p *GitHubProvider) Exchange(ctx context.Context, code, codeVerifier, _ string) (identity.ExternalIdentity, error) {
 	if code == "" || codeVerifier == "" {
 		return identity.ExternalIdentity{}, fmt.Errorf("%w: code and code_verifier are required", identity.ErrAuthFailed)
 	}

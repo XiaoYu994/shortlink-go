@@ -37,13 +37,13 @@ staticClients:
     secret: shortlink-console-secret
     redirectURIs:
       # 本机直接跑 make run-console（默认 CONSOLE_ADDR=:8081）
-      - "http://127.0.0.1:8081/api/v1/auth/callback"
-      - "http://localhost:8081/api/v1/auth/callback"
+      - "http://127.0.0.1:8081/api/v1/auth/oidc/callback"
+      - "http://localhost:8081/api/v1/auth/oidc/callback"
       # 宿主机 nginx 入口（docker compose --profile edge up -d nginx，deploy/nginx.conf）
-      - "http://127.0.0.1:8088/api/v1/auth/callback"
-      - "http://localhost:8088/api/v1/auth/callback"
+      - "http://127.0.0.1:8088/api/v1/auth/oidc/callback"
+      - "http://localhost:8088/api/v1/auth/oidc/callback"
       # 本机前端 Vite 开发服务器（make web-dev，端口 5173）
-      - "http://127.0.0.1:5173/api/v1/auth/callback"
-      - "http://localhost:5173/api/v1/auth/callback"
+      - "http://127.0.0.1:5173/api/v1/auth/oidc/callback"
+      - "http://localhost:5173/api/v1/auth/oidc/callback"
       # 冒烟测试 scripts/smoke.sh 默认管理端口（SMOKE_CONSOLE_ADDR=127.0.0.1:18081）
-      - "http://127.0.0.1:18081/api/v1/auth/callback"
+      - "http://127.0.0.1:18081/api/v1/auth/oidc/callback"

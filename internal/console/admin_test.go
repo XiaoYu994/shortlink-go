@@ -71,7 +71,7 @@ func newAdminTestServer(admin *stubAdmin) *Server {
 		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		store:          memorystore.New(),
 		admin:          admin,
-		stats:          admin,
+		modules:        []Module{NewStatsModule(admin)},
 		requestTimeout: 5 * time.Second,
 		registry:       newTestRegistry(),
 		keys:           allowKey{},
@@ -121,7 +121,9 @@ func TestListLinks(t *testing.T) {
 	if len(resp.Items) != 2 {
 		t.Fatalf("items = %d, want 2", len(resp.Items))
 	}
-	if resp.Items[0].Clicks != 9 || resp.Items[0].ClicksToday != 2 || resp.Items[0].CreatedAt.IsZero() {
+	if resp.Items[0].Clicks == nil || *resp.Items[0].Clicks != 9 ||
+		resp.Items[0].ClicksToday == nil || *resp.Items[0].ClicksToday != 2 ||
+		resp.Items[0].CreatedAt.IsZero() {
 		t.Errorf("first item = %+v, want counts", resp.Items[0])
 	}
 	if got, want := resp.NextCursor, "7:2"; got != want {
@@ -196,7 +198,10 @@ func TestGetLink(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Code != "AbC123xy" || resp.Clicks != 12 || resp.ClicksToday != 3 || resp.ExpiresAt == nil {
+	if resp.Code != "AbC123xy" ||
+		resp.Clicks == nil || *resp.Clicks != 12 ||
+		resp.ClicksToday == nil || *resp.ClicksToday != 3 ||
+		resp.ExpiresAt == nil {
 		t.Errorf("response = %+v, want full admin link", resp)
 	}
 

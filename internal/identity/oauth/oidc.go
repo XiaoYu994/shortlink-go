@@ -156,6 +156,11 @@ func (p *OIDCProvider) FlowCookieKey() []byte {
 	return bytes.Clone(p.flowCookieKey)
 }
 
+// RequiresNonce 报告该提供方需要生成并校验 OIDC ID Token nonce。
+func (p *OIDCProvider) RequiresNonce() bool {
+	return true
+}
+
 // AuthCodeURL 构造带 state、PKCE S256 challenge 和 nonce 的授权跳转地址。
 func (p *OIDCProvider) AuthCodeURL(state, codeVerifier, nonce string) string {
 	return p.oauth.AuthCodeURL(
@@ -166,11 +171,11 @@ func (p *OIDCProvider) AuthCodeURL(state, codeVerifier, nonce string) string {
 }
 
 /*
-ExchangeAndVerify 用授权码和 PKCE code_verifier 向令牌端点换取令牌，
+Exchange 用授权码和 PKCE code_verifier 向令牌端点换取令牌，
 再校验 ID Token 的签名、iss、aud、exp 和 expectedNonce，返回规范化后的 ExternalIdentity。
 ID Token 只在这里消费一次，不持久化（ADR 0018）。
 */
-func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (identity.ExternalIdentity, error) {
+func (p *OIDCProvider) Exchange(ctx context.Context, code, codeVerifier, expectedNonce string) (identity.ExternalIdentity, error) {
 	if code == "" || codeVerifier == "" || expectedNonce == "" {
 		return identity.ExternalIdentity{}, fmt.Errorf("%w: code, code_verifier, and nonce are required", identity.ErrAuthFailed)
 	}

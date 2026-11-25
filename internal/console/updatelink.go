@@ -62,7 +62,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		没有读权限的密钥也能看到目标地址和点击数。
 	*/
 	if s.authz != nil && s.authz.Can(p, identity.PermLinksRead) {
-		httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, newLinkResponse(*updated))
+		httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, newLinkResponse(*updated, s.hasModule(ModuleAnalytics)))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

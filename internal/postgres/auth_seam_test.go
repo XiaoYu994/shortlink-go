@@ -488,7 +488,7 @@ func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeo
 	const (
 		clientID     = "shortlink-console"
 		clientSecret = "shortlink-console-secret"
-		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/callback"
+		redirectURL  = "http://127.0.0.1:8081/api/v1/auth/oidc/callback"
 	)
 	fake := fakeoidc.Start(t, clientID, clientSecret)
 	provider, err := oauth.NewOIDCProvider(ctx, oauth.OIDCConfig{
@@ -501,21 +501,28 @@ func newOIDCSeamHandler(t *testing.T, ctx context.Context, store *Store) (*fakeo
 	if err != nil {
 		t.Fatalf("NewOIDCProvider: %v", err)
 	}
+	oidcMethod, err := console.NewOAuthAuthMethod("oidc", provider)
+	if err != nil {
+		t.Fatalf("NewOAuthAuthMethod(oidc): %v", err)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := console.New(logger, store, 5*time.Second, prometheus.NewRegistry(), console.Options{
-		Keys:       store,
-		Authorizer: identity.NewMapAuthorizer(),
-		OIDC:       provider,
-		Sessions:   store,
-		Members:    store,
+		Keys:        store,
+		Authorizer:  identity.NewMapAuthorizer(),
+		AuthMethods: []console.AuthMethod{oidcMethod},
+		Sessions:    store,
+		Modules: []console.Module{
+			console.NewMembersModule(store),
+			console.NewStatsModule(store),
+		},
 	})
 	return fake, srv.Routes()
 }
 
 func loginViaFakeOIDC(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
 	t.Helper()
-	return loginViaProvider(t, handler, "/api/v1/auth/login", console.OIDCFlowCookieName)
+	return loginViaProvider(t, handler, "/api/v1/auth/oidc/login", console.OIDCFlowCookieName)
 }
 
 func loginViaFakeGitHub(t *testing.T, handler http.Handler) (*http.Cookie, int64, string) {
@@ -596,7 +603,7 @@ func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
 		Issuer:       fakeOIDC.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "shortlink-console-secret",
-		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 		HTTPClient:   fakeOIDC.Client(),
 	})
 	if err != nil {
@@ -616,15 +623,25 @@ func TestHTTPGitHubLoginIsolationAndInvitationRedemption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGitHubProvider: %v", err)
 	}
+	oidcMethod, err := console.NewOAuthAuthMethod("oidc", oidcProvider)
+	if err != nil {
+		t.Fatalf("NewOAuthAuthMethod(oidc): %v", err)
+	}
+	ghMethod, err := console.NewOAuthAuthMethod("github", ghProvider)
+	if err != nil {
+		t.Fatalf("NewOAuthAuthMethod(github): %v", err)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := console.New(logger, store, 5*time.Second, prometheus.NewRegistry(), console.Options{
-		Keys:       store,
-		Authorizer: identity.NewMapAuthorizer(),
-		OIDC:       oidcProvider,
-		GitHub:     ghProvider,
-		Sessions:   store,
-		Members:    store,
+		Keys:        store,
+		Authorizer:  identity.NewMapAuthorizer(),
+		AuthMethods: []console.AuthMethod{oidcMethod, ghMethod},
+		Sessions:    store,
+		Modules: []console.Module{
+			console.NewMembersModule(store),
+			console.NewStatsModule(store),
+		},
 	}).Routes()
 
 	// 1. OIDC 与 GitHub 同一邮箱登录，各自建独立用户。

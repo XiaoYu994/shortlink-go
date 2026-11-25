@@ -110,7 +110,7 @@ func TestAuditLogsHandlerPermissionsValidationAndPagination(t *testing.T) {
 			Keys:       selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
 			Authorizer: authz,
 			Sessions:   &selfServiceSessionStore{userID: 7, role: role, orgID: 1},
-			AuditLogs:  auditStore,
+			Modules:    []Module{NewAuditModule(auditStore)},
 		}).Routes()
 	}
 
@@ -209,11 +209,12 @@ func TestAuditMetaPropagationInMiddlewareAndOrgCreate(t *testing.T) {
 		},
 	}
 
+	sess := &selfServiceSessionStore{userID: 7, role: identity.RoleOwner, orgID: 1}
 	h := New(selfServiceLogger(), capture, 2*time.Second, prometheus.NewRegistry(), Options{
 		Keys:       selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
 		Authorizer: identity.NewMapAuthorizer(),
-		Sessions:   &selfServiceSessionStore{userID: 7, role: identity.RoleOwner, orgID: 1},
-		Orgs:       orgs,
+		Sessions:   sess,
+		Modules:    []Module{NewOrgsModule(sess, orgs)},
 	}).Routes()
 
 	// 会话创建短链：ActorUser + ActorID=7 + 服务端签发 RequestID（忽略伪造 X-Request-ID）。

@@ -1,6 +1,7 @@
 package console
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -8,6 +9,18 @@ import (
 	"shortlink/internal/httpx"
 	"shortlink/internal/link"
 )
+
+type statsHandler struct {
+	logger *slog.Logger
+	stats  LinkStatsStore
+}
+
+func newStatsHandler(logger *slog.Logger, stats LinkStatsStore) *statsHandler {
+	return &statsHandler{
+		logger: logger,
+		stats:  stats,
+	}
+}
 
 const (
 	// defaultStatsDays 是默认范围：to - 7 天，两端所在整日都计入。
@@ -66,31 +79,31 @@ handleStats 返回一条链接的日趋势、Top 来源、设备、客户端和�
 from 为 to - 7 天。要求 from < to，跨度不超过 90 天。
 过期链接可以看，已删除或其他租户的链接返回 404。
 */
-func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	if httpx.IsClientGone(s.logger, r) {
+func (h *statsHandler) handleStats(w http.ResponseWriter, r *http.Request) {
+	if httpx.IsClientGone(h.logger, r) {
 		return
 	}
-	p, ok := principalOrInternalError(s.logger, w, r)
+	p, ok := principalOrInternalError(h.logger, w, r)
 	if !ok {
 		return
 	}
-	code, ok := s.validLinkCode(w, r)
+	code, ok := validLinkCode(h.logger, w, r)
 	if !ok {
 		return
 	}
 
 	from, to, err := parseStatsRange(r, time.Now().UTC())
 	if err != nil {
-		httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, err.Error())
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	stats, err := s.stats.Stats(r.Context(), p.Tenant.ID, code, from, to)
+	stats, err := h.stats.Stats(r.Context(), p.Tenant.ID, code, from, to)
 	if err != nil {
-		s.handleAdminStoreError(w, r, "link stats", err, code)
+		handleAdminStoreError(h.logger, w, r, "link stats", err, code)
 		return
 	}
-	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusOK, newLinkStatsResponse(stats))
+	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, newLinkStatsResponse(stats))
 }
 
 /*

@@ -116,9 +116,10 @@ type selfServiceOIDC struct{}
 func (selfServiceOIDC) AuthCodeURL(state, _, _ string) string {
 	return "https://idp.example/auth?state=" + state
 }
-func (selfServiceOIDC) ExchangeAndVerify(context.Context, string, string, string) (identity.ExternalIdentity, error) {
+func (selfServiceOIDC) Exchange(context.Context, string, string, string) (identity.ExternalIdentity, error) {
 	return identity.ExternalIdentity{Issuer: "https://idp.example", Subject: "sub-1", Email: "alice@example.com", EmailVerified: true}, nil
 }
+func (selfServiceOIDC) RequiresNonce() bool   { return true }
 func (selfServiceOIDC) SecureCookies() bool   { return false }
 func (selfServiceOIDC) FlowCookieKey() []byte { return []byte("0123456789abcdef0123456789abcdef") }
 
@@ -135,34 +136,41 @@ func (a selfServiceAPIKeyAuth) Authenticate(context.Context, string) (identity.P
 	}, nil
 }
 
-func TestAuthProvidersAndReturnTo(t *testing.T) {
+func TestCapabilitiesAndReturnTo(t *testing.T) {
 	sess := &selfServiceSessionStore{userID: 7, role: identity.RoleOwner, orgID: 1}
 	srv := New(selfServiceLogger(), &stubStore{}, 2*time.Second, prometheus.NewRegistry(), Options{
-		Authorizer:    identity.NewMapAuthorizer(),
-		OIDC:          selfServiceOIDC{},
-		Sessions:      sess,
-		PublicBaseURL: "https://s.example.com",
+		Authorizer:      identity.NewMapAuthorizer(),
+		AuthMethods:     []AuthMethod{mustOAuthMethod(t, "oidc", selfServiceOIDC{})},
+		Sessions:        sess,
+		RiskScanEnabled: true,
+		EmailEnabled:    false,
+		PublicBaseURL:   "https://s.example.com",
 	})
 	h := srv.Routes()
 
-	// 1. /api/v1/auth/providers 反映启用的提供方与公开短链基地址。
+	// 1. /api/v1/capabilities 反映启用的登录方式、特性状态与公开短链基地址。
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/capabilities", nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /providers = %d, want 200", rec.Code)
+		t.Fatalf("GET /capabilities = %d, want 200", rec.Code)
 	}
-	var prov authProvidersResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &prov); err != nil {
-		t.Fatalf("decode providers: %v", err)
+	var caps capabilitiesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
 	}
-	if !prov.OIDC || prov.GitHub || prov.PublicBaseURL != "https://s.example.com" {
-		t.Fatalf("providers = %+v, want {OIDC:true GitHub:false PublicBaseURL:https://s.example.com}", prov)
+	if len(caps.AuthMethods) != 1 ||
+		caps.AuthMethods[0].ID != "oidc" ||
+		caps.AuthMethods[0].Kind != AuthFlowRedirect ||
+		caps.AuthMethods[0].LoginURL != "/api/v1/auth/oidc/login" ||
+		caps.Features.Analytics || caps.Features.Webhooks || !caps.Features.RiskScan || caps.Features.Email ||
+		caps.PublicBaseURL != "https://s.example.com" {
+		t.Fatalf("capabilities = %+v", caps)
 	}
 
 	// 2. 非法 return_to（含路径穿越）返回 400。
 	for _, bad := range []string{"https://evil.com", "//evil.com", `/\evil`, "/api/v1/me", "/r/abc12345", "/x/../api/v1/me", "/./r/abc"} {
 		rec = httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login?return_to="+bad, nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/oidc/login?return_to="+bad, nil))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("return_to=%q status = %d, want 400", bad, rec.Code)
 		}
@@ -170,7 +178,7 @@ func TestAuthProvidersAndReturnTo(t *testing.T) {
 
 	// 3. 合法 return_to=/links 经由签名 flow cookie 传递，回调返回 302 Location: /links。
 	loginRec := httptest.NewRecorder()
-	h.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login?return_to=/links", nil))
+	h.ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/oidc/login?return_to=/links", nil))
 	if loginRec.Code != http.StatusFound {
 		t.Fatalf("login status = %d, want 302", loginRec.Code)
 	}
@@ -186,7 +194,7 @@ func TestAuthProvidersAndReturnTo(t *testing.T) {
 		t.Fatal("missing flow cookie")
 	}
 
-	cbReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/callback?state="+state+"&code=ok", nil)
+	cbReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/oidc/callback?state="+state+"&code=ok", nil)
 	cbReq.AddCookie(flowCookie)
 	cbRec := httptest.NewRecorder()
 	h.ServeHTTP(cbRec, cbReq)
@@ -215,7 +223,7 @@ func TestCreateOrgHandler(t *testing.T) {
 		Keys:       selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
 		Authorizer: identity.NewMapAuthorizer(),
 		Sessions:   sess,
-		Orgs:       orgs,
+		Modules:    []Module{NewOrgsModule(sess, orgs)},
 	})
 	h := srv.Routes()
 	sessionTok, _, _ := identity.SessionToken.Generate()
@@ -310,11 +318,13 @@ func TestInvitationsAndAPIKeysPermissions(t *testing.T) {
 
 	makeHandler := func(role identity.Role) http.Handler {
 		return New(selfServiceLogger(), &stubStore{}, 2*time.Second, prometheus.NewRegistry(), Options{
-			Keys:        selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
-			Authorizer:  identity.NewMapAuthorizer(),
-			Sessions:    &selfServiceSessionStore{userID: 7, role: role, orgID: 1},
-			Invitations: invStore,
-			APIKeys:     keyStore,
+			Keys:       selfServiceAPIKeyAuth{scopes: identity.AllAPIKeyScopes()},
+			Authorizer: identity.NewMapAuthorizer(),
+			Sessions:   &selfServiceSessionStore{userID: 7, role: role, orgID: 1},
+			Modules: []Module{
+				NewInvitationsModule(invStore),
+				NewAPIKeysModule(keyStore),
+			},
 		}).Routes()
 	}
 

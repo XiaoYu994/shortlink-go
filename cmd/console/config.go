@@ -35,6 +35,8 @@ const (
 type ConsoleConfig struct {
 	config.BaseConfig
 
+	Features            config.FeatureFlags
+	EmailEnabled        bool
 	OIDC                OIDCConfig
 	GitHub              GitHubConfig
 	WebDistDir          string
@@ -46,6 +48,17 @@ type ConsoleConfig struct {
 	// IPRateLimit 与 IPRateBurst 控制管理 API 鉴权前按源 IP 限流（0 表示关闭）。
 	IPRateLimit int
 	IPRateBurst int
+}
+
+// StoreFeatures 推导管理进程写路径需要挂载的事务钩子特性集。
+func (cfg ConsoleConfig) StoreFeatures() StoreFeatures {
+	return StoreFeatures{
+		Cache:     cfg.RedisURL != "",
+		Analytics: cfg.Features.Analytics,
+		RiskScan:  cfg.Features.RiskScan,
+		Webhooks:  cfg.WebhookSecretKey != "",
+		Email:     cfg.EmailEnabled,
+	}
 }
 
 // OIDCConfig 存放标准 OIDC 身份提供方的接入参数。
@@ -106,6 +119,8 @@ func (c GitHubConfig) String() string {
 func (cfg ConsoleConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
+		slog.Any("features", cfg.Features.LogValue()),
+		slog.Bool("email_enabled", cfg.EmailEnabled),
 		slog.Any("oidc", cfg.OIDC.LogValue()),
 		slog.Any("github", cfg.GitHub.LogValue()),
 		slog.String("web_dist_dir", cfg.WebDistDir),
@@ -131,6 +146,7 @@ Addr 来自 WORKER_ADDR，默认空表示不开启运维 HTTP 端口；设置后
 type WorkerConfig struct {
 	config.BaseConfig
 
+	Features                      config.FeatureFlags
 	Concurrency                   int
 	MaxPerTenant                  int
 	PollInterval                  time.Duration
@@ -161,10 +177,22 @@ type WorkerConfig struct {
 	SMTP                          mailer.SMTPConfig
 }
 
+// StoreFeatures 推导后台任务进程写路径（如风控 BanIfURL）需要挂载的事务钩子特性集。
+func (cfg WorkerConfig) StoreFeatures() StoreFeatures {
+	return StoreFeatures{
+		Cache:     cfg.RedisURL != "",
+		Analytics: cfg.Features.Analytics,
+		RiskScan:  cfg.Features.RiskScan,
+		Webhooks:  cfg.WebhookSecretKey != "",
+		Email:     cfg.SMTP.Enabled(),
+	}
+}
+
 // LogValue 掩码基础连接串、Webhook 主密钥和 SMTP 密码，保留非敏感调度与风控参数。
 func (cfg WorkerConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
+		slog.Any("features", cfg.Features.LogValue()),
 		slog.Int("concurrency", cfg.Concurrency),
 		slog.Int("max_per_tenant", cfg.MaxPerTenant),
 		slog.Duration("poll_interval", cfg.PollInterval),
@@ -215,9 +243,19 @@ func loadConsoleConfig() (ConsoleConfig, error) {
 	if err != nil {
 		return ConsoleConfig{}, err
 	}
+	features, err := config.LoadFeatureFlags()
+	if err != nil {
+		return ConsoleConfig{}, err
+	}
+	emailEnabled, err := loadEmailEnabledFromEnv()
+	if err != nil {
+		return ConsoleConfig{}, err
+	}
 
 	cfg := ConsoleConfig{
-		BaseConfig: base,
+		BaseConfig:   base,
+		Features:     features,
+		EmailEnabled: emailEnabled,
 		OIDC: OIDCConfig{
 			Issuer:       os.Getenv("OIDC_ISSUER"),
 			ClientID:     os.Getenv("OIDC_CLIENT_ID"),
@@ -305,9 +343,14 @@ func loadWorkerConfig() (WorkerConfig, error) {
 	if err != nil {
 		return WorkerConfig{}, err
 	}
+	features, err := config.LoadFeatureFlags()
+	if err != nil {
+		return WorkerConfig{}, err
+	}
 
 	cfg := WorkerConfig{
 		BaseConfig:                    base,
+		Features:                      features,
 		Concurrency:                   job.DefaultConcurrency,
 		MaxPerTenant:                  job.DefaultMaxPerTenant,
 		PollInterval:                  job.DefaultPollInterval,

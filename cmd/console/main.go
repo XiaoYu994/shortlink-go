@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -129,27 +130,41 @@ func openStore(ctx context.Context) (adminStore, io.Closer, error) {
 	if dsn == "" {
 		return nil, nil, errors.New("DATABASE_URL is required")
 	}
+	features, err := loadAdminCLIStoreFeatures()
+	if err != nil {
+		return nil, nil, err
+	}
 	db, err := postgres.Open(ctx, dsn, postgres.DefaultPoolConfig())
 	if err != nil {
 		return nil, nil, err
 	}
-	return postgres.NewStore(db), db, nil
+	return newConfiguredPostgresStore(db, features), db, nil
 }
 
 /*
-openLinkStore 给 link 命令打开 PostgreSQL 和 Redis。
-先建 Redis 客户端、再连数据库：REDIS_URL 缺失或格式不对属于配置错误，
-要在写库之前报出来。客户端不 Ping，Redis 不可用时封禁照样先落库，
-连接失败留到第一次写缓存时暴露，由 cache.Store 返回 cache.ErrNotUpdated。
-
-CLI 进程没有 /metrics，指标注册到一个临时 Registry 即可，也不套 storemetrics。
+openLinkStore 给 link 命令打开 PostgreSQL 与可选 Redis（ADR 0029）。
+配置 REDIS_URL 时先建 Redis 客户端、再连数据库：格式错误要在写库之前报出来；
+客户端不 Ping，Redis 不可用时封禁照样先落库，连接失败留到第一次写缓存时由 cache.Store 报告 cache.ErrNotUpdated。
+REDIS_URL 留空时跳过缓存层，直接写库返回。
 */
 func openLinkStore(ctx context.Context) (linkStore, io.Closer, error) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return nil, nil, errors.New("DATABASE_URL is required")
 	}
-	rdb, err := cache.NewClient(os.Getenv("REDIS_URL"))
+	features, err := loadLinkCLIStoreFeatures()
+	if err != nil {
+		return nil, nil, err
+	}
+	redisURL := strings.TrimSpace(os.Getenv("REDIS_URL"))
+	if redisURL == "" {
+		db, err := postgres.Open(ctx, dsn, postgres.DefaultPoolConfig())
+		if err != nil {
+			return nil, nil, err
+		}
+		return newConfiguredPostgresStore(db, features), db, nil
+	}
+	rdb, err := cache.NewClient(redisURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -158,7 +173,7 @@ func openLinkStore(ctx context.Context) (linkStore, io.Closer, error) {
 		_ = rdb.Close()
 		return nil, nil, err
 	}
-	store := cache.New(postgres.NewStore(db), rdb, prometheus.NewRegistry(), cache.Options{
+	store := cache.New(newConfiguredPostgresStore(db, features), rdb, prometheus.NewRegistry(), cache.Options{
 		// 复查读库失败要留一条日志；标准错误和命令结果分开。
 		Logger: logx.NewFallback(os.Stderr, "console-cli"),
 	})

@@ -51,11 +51,14 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "secret+value",
-		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 		HTTPClient:   fake.Client(),
 	})
 	if err != nil {
 		t.Fatalf("NewOIDCProvider http: %v", err)
+	}
+	if !httpProvider.RequiresNonce() {
+		t.Error("RequiresNonce() = false for OIDCProvider, want true")
 	}
 	if httpProvider.SecureCookies() {
 		t.Error("SecureCookies() = true for http redirect url, want false")
@@ -65,7 +68,7 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "secret+value",
-		RedirectURL:  "https://console.example.com/api/v1/auth/callback",
+		RedirectURL:  "https://console.example.com/api/v1/auth/oidc/callback",
 		HTTPClient:   fake.Client(),
 	})
 	if err != nil {
@@ -85,7 +88,7 @@ func TestOIDCProviderHappyPathAndSecureCookies(t *testing.T) {
 		t.Fatalf("state = %q, want %q", gotState, flow.State)
 	}
 
-	got, err := httpProvider.ExchangeAndVerify(context.Background(), code, flow.CodeVerifier, flow.Nonce)
+	got, err := httpProvider.Exchange(context.Background(), code, flow.CodeVerifier, flow.Nonce)
 	if err != nil {
 		t.Fatalf("ExchangeAndVerify: %v", err)
 	}
@@ -107,7 +110,7 @@ func TestOIDCProviderRejectsTamperedResponses(t *testing.T) {
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "shortlink-console-secret",
-		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 		HTTPClient:   fake.Client(),
 	})
 	if err != nil {
@@ -137,7 +140,7 @@ func TestOIDCProviderRejectsTamperedResponses(t *testing.T) {
 				t.Fatalf("NewOIDCFlow: %v", err)
 			}
 			code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, flow.Nonce))
-			_, err = provider.ExchangeAndVerify(context.Background(), code, flow.CodeVerifier, flow.Nonce)
+			_, err = provider.Exchange(context.Background(), code, flow.CodeVerifier, flow.Nonce)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -154,7 +157,7 @@ func TestOIDCProviderWrongClientSecretReturnsUnavailable(t *testing.T) {
 		Issuer:       fake.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: "wrong-secret",
-		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 		HTTPClient:   fake.Client(),
 	})
 	if err != nil {
@@ -165,7 +168,7 @@ func TestOIDCProviderWrongClientSecretReturnsUnavailable(t *testing.T) {
 		t.Fatalf("NewOIDCFlow: %v", err)
 	}
 	code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, flow.Nonce))
-	_, err = provider.ExchangeAndVerify(context.Background(), code, flow.CodeVerifier, flow.Nonce)
+	_, err = provider.Exchange(context.Background(), code, flow.CodeVerifier, flow.Nonce)
 	if !errors.Is(err, identity.ErrProviderUnavailable) {
 		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
 	}
@@ -188,7 +191,7 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 				Issuer:       fake.URL(),
 				ClientID:     "shortlink-console",
 				ClientSecret: "shortlink-console-secret",
-				RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+				RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 				HTTPClient:   fake.Client(),
 			})
 			if err != nil {
@@ -200,7 +203,7 @@ func TestOIDCProviderClassifiesProviderOutages(t *testing.T) {
 				t.Fatalf("NewOIDCFlow: %v", err)
 			}
 			code, _ := authorizeAtFake(t, provider.AuthCodeURL(flow.State, flow.CodeVerifier, flow.Nonce))
-			_, err = provider.ExchangeAndVerify(context.Background(), code, flow.CodeVerifier, flow.Nonce)
+			_, err = provider.Exchange(context.Background(), code, flow.CodeVerifier, flow.Nonce)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -216,7 +219,7 @@ func TestOIDCConfigRedactsSecret(t *testing.T) {
 		Issuer:       "https://dex.example.com",
 		ClientID:     "shortlink-console",
 		ClientSecret: "oidc-secret-value",
-		RedirectURL:  "https://console.example.com/api/v1/auth/callback",
+		RedirectURL:  "https://console.example.com/api/v1/auth/oidc/callback",
 	}
 	var buf bytes.Buffer
 	slog.New(slog.NewJSONHandler(&buf, nil)).Info("oidc", "cfg", cfg)

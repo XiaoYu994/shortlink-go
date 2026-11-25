@@ -66,7 +66,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", redirectPrefix+l.Code)
-	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusCreated, newCreatedLinkResponse(l))
+	httpx.WriteJSON(s.logger, r.Context(), w, http.StatusCreated, newCreatedLinkResponse(l, s.hasModule(ModuleAnalytics)))
 }
 
 // decodeCreateRequest 按严格模式解码创建短链请求，未知字段（例如拼错的 expire_at）会被拒绝。

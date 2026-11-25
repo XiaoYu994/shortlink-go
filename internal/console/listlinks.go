@@ -38,7 +38,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts, err := parseListOptions(r, p.Tenant.ID)
+	analyticsEnabled := s.hasModule(ModuleAnalytics)
+	opts, err := parseListOptions(r, p.Tenant.ID, analyticsEnabled)
 	if err != nil {
 		httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, err.Error())
 		return
@@ -58,7 +59,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		items = items[:pageLimit]
 	}
 	for _, item := range items {
-		resp.Items = append(resp.Items, newLinkResponse(item))
+		resp.Items = append(resp.Items, newLinkResponse(item, analyticsEnabled))
 	}
 	if hasNext {
 		resp.NextCursor = encodeListCursor(opts.Sort, items[len(items)-1])
@@ -67,7 +68,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseListOptions 解析 limit、sort、status、q 和 cursor；Limit 已经加一，用来判断有没有下一页。
-func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, error) {
+func parseListOptions(r *http.Request, tenantID int64, analyticsEnabled bool) (link.ListOptions, error) {
 	query := r.URL.Query()
 
 	pageLimit := defaultListLimit
@@ -82,7 +83,12 @@ func parseListOptions(r *http.Request, tenantID int64) (link.ListOptions, error)
 	sort := link.SortID
 	if raw := query.Get("sort"); raw != "" {
 		switch link.Sort(raw) {
-		case link.SortID, link.SortClicks, link.SortClicksToday:
+		case link.SortID:
+			sort = link.SortID
+		case link.SortClicks, link.SortClicksToday:
+			if !analyticsEnabled {
+				return link.ListOptions{}, badRequestError("analytics is disabled")
+			}
 			sort = link.Sort(raw)
 		default:
 			return link.ListOptions{}, badRequestError("invalid sort")

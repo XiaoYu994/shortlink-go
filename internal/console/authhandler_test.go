@@ -90,6 +90,22 @@ func (s *stubSessionStore) RevokeSession(ctx context.Context, token string) erro
 	return nil
 }
 
+const (
+	oidcLoginPath      = "/api/v1/auth/oidc/login"
+	oidcCallbackPath   = "/api/v1/auth/oidc/callback"
+	githubLoginPath    = "/api/v1/auth/github/login"
+	githubCallbackPath = "/api/v1/auth/github/callback"
+)
+
+func mustOAuthMethod(t *testing.T, id string, client OAuthClient) *OAuthAuthMethod {
+	t.Helper()
+	m, err := NewOAuthAuthMethod(id, client)
+	if err != nil {
+		t.Fatalf("NewOAuthAuthMethod(%q): %v", id, err)
+	}
+	return m
+}
+
 func newOIDCTestServer(t *testing.T, redirectURL string, sessions SessionStore) (*Server, *fakeoidc.Server) {
 	t.Helper()
 	return newOIDCTestServerWithRegistry(t, redirectURL, sessions, newTestRegistry())
@@ -120,7 +136,7 @@ func newOIDCTestServerWithRegistry(t *testing.T, redirectURL string, sessions Se
 		keys:           allowKey{},
 		sessions:       sessions,
 		authorizer:     identity.NewMapAuthorizer(),
-		oidc:           provider,
+		authMethods:    []AuthMethod{mustOAuthMethod(t, "oidc", provider)},
 		sessionMgr:     sessions,
 		sessionTTL:     24 * time.Hour,
 	})
@@ -159,7 +175,7 @@ func newGitHubTestServerWithRegistry(t *testing.T, redirectURL string, sessions 
 		keys:           allowKey{},
 		sessions:       sessions,
 		authorizer:     identity.NewMapAuthorizer(),
-		github:         provider,
+		authMethods:    []AuthMethod{mustOAuthMethod(t, "github", provider)},
 		sessionMgr:     sessions,
 		sessionTTL:     24 * time.Hour,
 	})
@@ -175,7 +191,7 @@ func newDualAuthTestServer(t *testing.T, sessions SessionStore) (*Server, *fakeo
 		Issuer:       fakeOIDC.URL(),
 		ClientID:     "shortlink-console",
 		ClientSecret: sharedSecret,
-		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/callback",
+		RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 		HTTPClient:   fakeOIDC.Client(),
 	})
 	if err != nil {
@@ -202,10 +218,12 @@ func newDualAuthTestServer(t *testing.T, sessions SessionStore) (*Server, *fakeo
 		keys:           allowKey{},
 		sessions:       sessions,
 		authorizer:     identity.NewMapAuthorizer(),
-		oidc:           oidcProvider,
-		github:         ghProvider,
-		sessionMgr:     sessions,
-		sessionTTL:     24 * time.Hour,
+		authMethods: []AuthMethod{
+			mustOAuthMethod(t, "oidc", oidcProvider),
+			mustOAuthMethod(t, "github", ghProvider),
+		},
+		sessionMgr: sessions,
+		sessionTTL: 24 * time.Hour,
 	})
 	return srv, fakeOIDC, fakeGH
 }
@@ -271,8 +289,8 @@ func TestOIDCLoginRedirectAndFlowCookie(t *testing.T) {
 		redirectURL string
 		wantSecure  bool
 	}{
-		{name: "http local", redirectURL: "http://127.0.0.1:8081/api/v1/auth/callback", wantSecure: false},
-		{name: "https prod", redirectURL: "https://console.example.com/api/v1/auth/callback", wantSecure: true},
+		{name: "http local", redirectURL: "http://127.0.0.1:8081/api/v1/auth/oidc/callback", wantSecure: false},
+		{name: "https prod", redirectURL: "https://console.example.com/api/v1/auth/oidc/callback", wantSecure: true},
 	}
 
 	for _, tt := range tests {
@@ -334,7 +352,7 @@ func TestOIDCLoginRedirectAndFlowCookie(t *testing.T) {
 
 func TestOIDCCallbackSuccessCreatesSessionAndClearsFlowCookie(t *testing.T) {
 	sessions := &stubSessionStore{}
-	const redirectURL = "https://console.example.com/api/v1/auth/callback"
+	const redirectURL = "https://console.example.com/api/v1/auth/oidc/callback"
 	reg := newTestRegistry()
 	srv, fake := newOIDCTestServerWithRegistry(t, redirectURL, sessions, reg)
 	handler := srv.Routes()
@@ -436,7 +454,7 @@ func TestOIDCCallbackRejectsTamperedAndInvalidFlows(t *testing.T) {
 	for _, tt := range tamperTests {
 		t.Run(tt.name, func(t *testing.T) {
 			sessions := &stubSessionStore{}
-			srv, fake := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+			srv, fake := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 			fake.SetTamper(tt.tamper)
 			handler := srv.Routes()
 
@@ -477,7 +495,7 @@ func TestOIDCCallbackRejectsTamperedAndInvalidFlows(t *testing.T) {
 func TestOIDCCallbackEdgeCases(t *testing.T) {
 	t.Run("missing flow cookie returns 400", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		rec := httptest.NewRecorder()
 		srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, oidcCallbackPath+"?code=abc&state=xyz", nil))
 		if rec.Code != http.StatusBadRequest {
@@ -493,7 +511,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("malformed flow cookie returns 400", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		req := httptest.NewRequest(http.MethodGet, oidcCallbackPath+"?code=abc&state=xyz", nil)
 		req.AddCookie(&http.Cookie{Name: OIDCFlowCookieName, Value: "not-valid-base64!!!"})
 		rec := httptest.NewRecorder()
@@ -508,9 +526,10 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("expired flow cookie returns 400", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
+		method := srv.auth.methods[0].(*OAuthAuthMethod)
 		now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
-		srv.auth.now = func() time.Time { return now }
+		method.now = func() time.Time { return now }
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -519,7 +538,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 		callbackURL := runAuthorizeAtFake(t, loginRec.Header().Get("Location"))
 
 		// 刚好到 10 分钟过期界限。
-		srv.auth.now = func() time.Time { return now.Add(flowCookieTTL) }
+		method.now = func() time.Time { return now.Add(flowCookieTTL) }
 		cbReq := httptest.NewRequest(http.MethodGet, callbackURL.RequestURI(), nil)
 		cbReq.AddCookie(flowCookie)
 		cbRec := httptest.NewRecorder()
@@ -534,7 +553,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("provider error parameter returns 401", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -557,7 +576,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("missing code returns 400", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -580,7 +599,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("HEAD on callback returns 405 without consuming session", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -611,7 +630,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("replaying same callback fails with 401", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -641,7 +660,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 	})
 
 	t.Run("nil session creator fails closed with 500", func(t *testing.T) {
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", nil)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", nil)
 		rec := httptest.NewRecorder()
 		srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, oidcCallbackPath+"?code=abc&state=xyz", nil))
 		if rec.Code != http.StatusInternalServerError {
@@ -651,7 +670,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("session store error returns 500 without cookie", func(t *testing.T) {
 		sessions := &stubSessionStore{err: errors.New("db down")}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -673,7 +692,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("state mismatch does not burn the in-progress login", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -703,7 +722,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("forged flow cookie is rejected and does not replace the real one", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, _ := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
@@ -735,7 +754,7 @@ func TestOIDCCallbackEdgeCases(t *testing.T) {
 
 	t.Run("jwks failure returns 502", func(t *testing.T) {
 		sessions := &stubSessionStore{}
-		srv, fake := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/callback", sessions)
+		srv, fake := newOIDCTestServer(t, "http://127.0.0.1:8081/api/v1/auth/oidc/callback", sessions)
 		handler := srv.Routes()
 
 		loginRec := httptest.NewRecorder()
