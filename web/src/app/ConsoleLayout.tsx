@@ -26,7 +26,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { useLogout } from '@/features/auth/api';
+import { useLogout, useWebhooksEnabled } from '@/features/auth/api';
 import {
   canManageAPIKeys,
   canManageWebhooks,
@@ -52,6 +52,7 @@ export function ConsoleLayout() {
   const [createOrgOpen, setCreateOrgOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  const webhooksEnabled = useWebhooksEnabled();
   const keysLocked = !canManageAPIKeys(org.role);
   const webhooksLocked = !canManageWebhooks(org.role);
   const auditLocked = !canReadAuditLogs(org.role);
@@ -59,7 +60,16 @@ export function ConsoleLayout() {
     { to: routes.orgLinks(org.id), label: '短链管理', icon: Link2, locked: false },
     { to: routes.orgMembers(org.id), label: '成员与邀请', icon: Users, locked: false },
     { to: routes.orgAPIKeys(org.id), label: 'API Keys', icon: KeyRound, locked: keysLocked },
-    { to: routes.orgWebhooks(org.id), label: 'Webhooks', icon: Webhook, locked: webhooksLocked },
+    ...(webhooksEnabled
+      ? [
+          {
+            to: routes.orgWebhooks(org.id),
+            label: 'Webhooks',
+            icon: Webhook,
+            locked: webhooksLocked,
+          },
+        ]
+      : []),
     { to: routes.orgAuditLogs(org.id), label: '审计日志', icon: ScrollText, locked: auditLocked },
   ];
 

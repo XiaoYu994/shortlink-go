@@ -15,8 +15,16 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { getErrorMessage } from '@/lib/api-client';
 import { ENDPOINTS } from '@/lib/endpoints';
 import { useDocumentTitle } from '@/lib/use-document-title';
-import { useAuthProviders, useMe } from './api';
+import { useCapabilities, useMe } from './api';
 import { sanitizeReturnTo } from './return-to';
+
+const REDIRECT_METHOD_META: Record<
+  string,
+  { label: string; icon: typeof ShieldCheck; primary?: boolean }
+> = {
+  oidc: { label: '使用 OIDC 单点登录（Dex / SSO）', icon: ShieldCheck, primary: true },
+  github: { label: '使用 GitHub 账号登录', icon: Github },
+};
 
 export function LoginPage() {
   useDocumentTitle('登录');
@@ -24,14 +32,17 @@ export function LoginPage() {
   const returnTo = sanitizeReturnTo(searchParams.get('return_to'));
 
   const meQuery = useMe();
-  const providersQuery = useAuthProviders();
+  const capabilitiesQuery = useCapabilities();
 
   if (meQuery.data) {
     return <Navigate to={returnTo} replace />;
   }
 
-  const providers = providersQuery.data;
-  const hasAnyProvider = Boolean(providers && (providers.oidc || providers.github));
+  const capabilities = capabilitiesQuery.data;
+  const redirectMethods = (capabilities?.auth_methods ?? []).filter(
+    (m): m is typeof m & { login_url: string } => m.kind === 'redirect' && Boolean(m.login_url),
+  );
+  const hasAnyMethod = redirectMethods.length > 0;
 
   return (
     <div className="grid min-h-screen bg-white lg:grid-cols-2">
@@ -154,47 +165,51 @@ export function LoginPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-2.5">
-              {providersQuery.isPending && (
+              {capabilitiesQuery.isPending && (
                 <div className="space-y-2.5">
                   <Skeleton className="h-10 w-full" />
                   <Skeleton className="h-10 w-full" />
                 </div>
               )}
 
-              {providersQuery.isError && (
+              {capabilitiesQuery.isError && (
                 <ErrorAlert
                   compact
-                  message={`无法获取登录方式：${getErrorMessage(providersQuery.error)}`}
+                  message={`无法获取登录方式：${getErrorMessage(capabilitiesQuery.error)}`}
                 />
               )}
 
-              {providers && !hasAnyProvider && (
+              {capabilities && !hasAnyMethod && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-900">
-                  当前 <code className="font-mono text-xs">console</code> 未启用 OIDC 或 GitHub
-                  登录。请在服务端配置 <code className="font-mono text-xs">OIDC_*</code> 或{' '}
+                  当前 <code className="font-mono text-xs">console</code>{' '}
+                  未启用任何浏览器登录方式。请在服务端配置{' '}
+                  <code className="font-mono text-xs">OIDC_*</code> 或{' '}
                   <code className="font-mono text-xs">GITHUB_*</code> 后重启。
                 </div>
               )}
 
-              {providers?.oidc && (
-                <a
-                  href={ENDPOINTS.auth.oidcLogin(returnTo)}
-                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white shadow-xs transition-colors hover:bg-zinc-800"
-                >
-                  <ShieldCheck className="size-4" />
-                  使用 OIDC 单点登录（Dex / SSO）
-                </a>
-              )}
-
-              {providers?.github && (
-                <a
-                  href={ENDPOINTS.auth.githubLogin(returnTo)}
-                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 text-sm font-medium text-zinc-900 shadow-2xs transition-colors hover:bg-zinc-50"
-                >
-                  <Github className="size-4" />
-                  使用 GitHub 账号登录
-                </a>
-              )}
+              {redirectMethods.map((method, index) => {
+                const meta = REDIRECT_METHOD_META[method.id] ?? {
+                  label: `使用 ${method.id.toUpperCase()} 登录`,
+                  icon: KeyRound,
+                };
+                const Icon = meta.icon;
+                const isPrimary = meta.primary ?? index === 0;
+                return (
+                  <a
+                    key={method.id}
+                    href={ENDPOINTS.auth.redirectLogin(method.login_url, returnTo)}
+                    className={
+                      isPrimary
+                        ? 'inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white shadow-xs transition-colors hover:bg-zinc-800'
+                        : 'inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 text-sm font-medium text-zinc-900 shadow-2xs transition-colors hover:bg-zinc-50'
+                    }
+                  >
+                    <Icon className="size-4" />
+                    {meta.label}
+                  </a>
+                );
+              })}
             </CardContent>
           </Card>
 

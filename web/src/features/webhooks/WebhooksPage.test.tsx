@@ -11,8 +11,11 @@ describe('WebhooksPage', () => {
 
   it('blocks member role without firing /api/v1/webhooks request', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      if (String(input) === '/api/v1/auth/providers') {
-        return jsonResponse({ oidc: true, github: false, webhooks: true });
+      if (String(input) === '/api/v1/capabilities') {
+        return jsonResponse({
+          auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+          features: { analytics: true, webhooks: true, risk_scan: true, email: false },
+        });
       }
       throw new Error(`unexpected fetch: ${String(input)}`);
     });
@@ -24,9 +27,12 @@ describe('WebhooksPage', () => {
   });
 
   it('shows disabled notice when server does not enable webhooks', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      if (String(input) === '/api/v1/auth/providers') {
-        return jsonResponse({ oidc: true, github: false, webhooks: false });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === '/api/v1/capabilities') {
+        return jsonResponse({
+          auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+          features: { analytics: true, webhooks: false, risk_scan: true, email: false },
+        });
       }
       throw new Error(`unexpected fetch: ${String(input)}`);
     });
@@ -34,6 +40,37 @@ describe('WebhooksPage', () => {
     renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'owner' });
 
     expect(await screen.findByText('服务端尚未启用 Webhook 功能')).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalledWith('/api/v1/webhooks', expect.anything());
+  });
+
+  it('shows retryable error alert instead of infinite skeleton when capabilities fails', async () => {
+    const user = userEvent.setup();
+    let failCapabilities = true;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/capabilities') {
+        if (failCapabilities) {
+          return jsonResponse({ error: 'service unavailable' }, 503);
+        }
+        return jsonResponse({
+          auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+          features: { analytics: true, webhooks: true, risk_scan: true, email: false },
+        });
+      }
+      if (url === '/api/v1/webhooks') {
+        return jsonResponse({ items: [] });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'owner' });
+
+    expect(await screen.findByText(/无法获取服务端功能配置/)).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalledWith('/api/v1/webhooks', expect.anything());
+
+    failCapabilities = false;
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('还没有 Webhook 订阅')).toBeInTheDocument();
   });
 
   it('creates webhook, reveals secret once, triggers test ping, and inspects deliveries', async () => {
@@ -43,8 +80,11 @@ describe('WebhooksPage', () => {
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url === '/api/v1/auth/providers') {
-        return jsonResponse({ oidc: true, github: false, webhooks: true });
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse({
+          auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+          features: { analytics: true, webhooks: true, risk_scan: true, email: false },
+        });
       }
       if (url === '/api/v1/webhooks' && init?.method === 'POST') {
         created = true;

@@ -4,6 +4,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { jsonResponse, renderWithOrg } from '@/test/test-utils';
 import { LinksPage } from './LinksPage';
 
+function capabilitiesPayload(overrides?: { analytics?: boolean; public_base_url?: string }) {
+  return {
+    auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+    features: {
+      analytics: overrides?.analytics ?? true,
+      webhooks: true,
+      risk_scan: true,
+      email: false,
+    },
+    ...(overrides?.public_base_url ? { public_base_url: overrides.public_base_url } : {}),
+  };
+}
+
 describe('LinksPage', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -13,12 +26,8 @@ describe('LinksPage', () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
-      if (url === '/api/v1/auth/providers') {
-        return jsonResponse({
-          oidc: true,
-          github: false,
-          public_base_url: 'https://s.example.com',
-        });
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse(capabilitiesPayload({ public_base_url: 'https://s.example.com' }));
       }
       if (url.startsWith('/api/v1/links')) {
         return jsonResponse({
@@ -70,8 +79,8 @@ describe('LinksPage', () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
-      if (url === '/api/v1/auth/providers') {
-        return jsonResponse({ oidc: true, github: false });
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse(capabilitiesPayload());
       }
       return jsonResponse({
         items: [
@@ -103,12 +112,8 @@ describe('LinksPage', () => {
     let created = false;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url === '/api/v1/auth/providers') {
-        return jsonResponse({
-          oidc: true,
-          github: false,
-          public_base_url: 'http://127.0.0.1:8080',
-        });
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse(capabilitiesPayload({ public_base_url: 'http://127.0.0.1:8080' }));
       }
       if (url === '/api/v1/links' && init?.method === 'POST') {
         created = true;
@@ -175,8 +180,8 @@ describe('LinksPage', () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
-      if (url === '/api/v1/auth/providers') {
-        return jsonResponse({ oidc: true, github: false });
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse(capabilitiesPayload());
       }
       if (url.includes('cursor=p2')) {
         return jsonResponse({
@@ -231,8 +236,8 @@ describe('LinksPage', () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
-      if (url === '/api/v1/auth/providers') {
-        return jsonResponse({ oidc: true, github: false });
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse(capabilitiesPayload());
       }
       if (url.includes('q=missing')) {
         return jsonResponse({ items: [] });
@@ -319,5 +324,40 @@ describe('LinksPage', () => {
       );
     });
     expect(await screen.findByText('/r/Actv1234')).toBeInTheDocument();
+  });
+
+  it('hides clicks summary, click sort options, click badge, and stats menu when analytics is disabled', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse(capabilitiesPayload({ analytics: false }));
+      }
+      return jsonResponse({
+        items: [
+          {
+            code: 'Lite1234',
+            url: 'https://example.com/lite',
+            status: 'active',
+            created_at: '2026-11-23T08:00:00Z',
+          },
+        ],
+      });
+    });
+
+    renderWithOrg(<LinksPage />, { orgId: 1, role: 'owner' });
+
+    expect(await screen.findByText('/r/Lite1234')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('累计点击')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('次点击')).not.toBeInTheDocument();
+    const sortSelect = screen.getByLabelText('排序方式');
+    expect(sortSelect.querySelector('option[value="clicks"]')).toBeNull();
+    expect(sortSelect.querySelector('option[value="clicks_today"]')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '操作 Lite1234' }));
+    expect(await screen.findByRole('menuitem', { name: /查看二维码/ })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /查看点击统计/ })).not.toBeInTheDocument();
   });
 });

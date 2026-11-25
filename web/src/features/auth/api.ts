@@ -4,10 +4,24 @@ import { ENDPOINTS } from '@/lib/endpoints';
 
 export type Role = 'owner' | 'admin' | 'member' | 'viewer';
 
-export interface AuthProviders {
-  oidc: boolean;
-  github: boolean;
-  webhooks?: boolean;
+export type AuthFlowKind = 'redirect' | 'phone_otp' | (string & {});
+
+export interface AuthMethodDescriptor {
+  id: string;
+  kind: AuthFlowKind;
+  login_url?: string;
+}
+
+export interface FeatureCapabilities {
+  analytics: boolean;
+  webhooks: boolean;
+  risk_scan: boolean;
+  email: boolean;
+}
+
+export interface Capabilities {
+  auth_methods: AuthMethodDescriptor[];
+  features: FeatureCapabilities;
   public_base_url?: string;
 }
 
@@ -32,12 +46,12 @@ export interface MeResponse {
 }
 
 export const authKeys = {
-  providers: ['auth', 'providers'] as const,
+  capabilities: ['capabilities'] as const,
   me: ['auth', 'me'] as const,
 };
 
-export function fetchProviders(signal?: AbortSignal): Promise<AuthProviders> {
-  return apiRequest<AuthProviders>(ENDPOINTS.auth.providers, {
+export function fetchCapabilities(signal?: AbortSignal): Promise<Capabilities> {
+  return apiRequest<Capabilities>(ENDPOINTS.capabilities, {
     signal,
     skipAuthRedirect: true,
   });
@@ -57,24 +71,30 @@ export function postLogout(): Promise<void> {
   });
 }
 
-export function useAuthProviders() {
+export function useCapabilities() {
   return useQuery({
-    queryKey: authKeys.providers,
-    queryFn: ({ signal }) => fetchProviders(signal),
+    queryKey: authKeys.capabilities,
+    queryFn: ({ signal }) => fetchCapabilities(signal),
     staleTime: 5 * 60_000,
   });
 }
 
 // 读取后端配置的公开短链跳转域名；未配置或加载中时返回 undefined（调用方自动回退当前 origin）。
 export function usePublicBaseUrl(): string | undefined {
-  const { data } = useAuthProviders();
+  const { data } = useCapabilities();
   return data?.public_base_url;
 }
 
 // 报告后端是否启用了 Webhook 管理（配置了 WEBHOOK_SECRET_KEY）。
 export function useWebhooksEnabled(): boolean {
-  const { data } = useAuthProviders();
-  return Boolean(data?.webhooks);
+  const { data } = useCapabilities();
+  return Boolean(data?.features.webhooks);
+}
+
+// 报告后端是否启用了点击统计（FEATURE_ANALYTICS，默认 true）。
+export function useAnalyticsEnabled(): boolean {
+  const { data } = useCapabilities();
+  return data ? data.features.analytics : true;
 }
 
 export function useMe() {

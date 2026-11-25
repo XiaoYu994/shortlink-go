@@ -9,14 +9,12 @@ export const API_V1_PREFIX = '/api/v1' as const;
 const v1 = (path: string) => `${API_V1_PREFIX}${path}`;
 
 export const ENDPOINTS = {
+  capabilities: v1('/capabilities'),
   auth: {
-    providers: v1('/auth/providers'),
     me: v1('/me'),
     logout: v1('/auth/logout'),
-    oidcLogin: (returnTo: string) =>
-      `${v1('/auth/login')}?return_to=${encodeURIComponent(returnTo)}`,
-    githubLogin: (returnTo: string) =>
-      `${v1('/auth/github/login')}?return_to=${encodeURIComponent(returnTo)}`,
+    redirectLogin: (loginUrl: string, returnTo: string) =>
+      `${loginUrl}?return_to=${encodeURIComponent(returnTo)}`,
   },
   orgs: {
     listCreate: v1('/orgs'),

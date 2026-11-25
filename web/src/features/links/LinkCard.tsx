@@ -43,6 +43,7 @@ interface LinkCardProps {
   orgId: number;
   link: AdminLink;
   publicBaseUrl?: string;
+  analyticsEnabled?: boolean;
   view: LinksViewMode;
   writable: boolean;
   mutating?: boolean;
@@ -56,6 +57,7 @@ export function LinkCard({
   orgId,
   link,
   publicBaseUrl,
+  analyticsEnabled = true,
   view,
   writable,
   mutating = false,
@@ -154,20 +156,22 @@ export function LinkCard({
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
-        <Link
-          to={statsPath}
-          title={`累计 ${formatNumber(link.clicks)} 次点击，今日 ${formatNumber(link.clicks_today)} 次`}
-          className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-zinc-200/90 bg-zinc-50/70 px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-indigo-200 hover:bg-indigo-50/70 hover:text-brand"
-        >
-          <MousePointerClick className="size-3.5 text-zinc-400" />
-          <span className="font-mono tabular-nums">{formatCompactNumber(link.clicks)}</span>
-          <span className="hidden text-zinc-500 sm:inline">次点击</span>
-          {link.clicks_today > 0 && (
-            <span className="rounded bg-emerald-100/80 px-1 py-0.5 font-mono text-[10px] font-semibold text-emerald-700 tabular-nums">
-              +{formatCompactNumber(link.clicks_today)}
-            </span>
-          )}
-        </Link>
+        {analyticsEnabled && link.clicks !== undefined && (
+          <Link
+            to={statsPath}
+            title={`累计 ${formatNumber(link.clicks)} 次点击，今日 ${formatNumber(link.clicks_today ?? 0)} 次`}
+            className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-zinc-200/90 bg-zinc-50/70 px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-indigo-200 hover:bg-indigo-50/70 hover:text-brand"
+          >
+            <MousePointerClick className="size-3.5 text-zinc-400" />
+            <span className="font-mono tabular-nums">{formatCompactNumber(link.clicks)}</span>
+            <span className="hidden text-zinc-500 sm:inline">次点击</span>
+            {(link.clicks_today ?? 0) > 0 && (
+              <span className="rounded bg-emerald-100/80 px-1 py-0.5 font-mono text-[10px] font-semibold text-emerald-700 tabular-nums">
+                +{formatCompactNumber(link.clicks_today ?? 0)}
+              </span>
+            )}
+          </Link>
+        )}
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -180,10 +184,12 @@ export function LinkCard({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
-            <DropdownMenuItem onSelect={() => navigate(statsPath)}>
-              <BarChart3 className="size-4 text-zinc-500" />
-              查看点击统计
-            </DropdownMenuItem>
+            {analyticsEnabled && (
+              <DropdownMenuItem onSelect={() => navigate(statsPath)}>
+                <BarChart3 className="size-4 text-zinc-500" />
+                查看点击统计
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem onSelect={() => void handleMenuCopy()}>
               <Copy className="size-4 text-zinc-500" />
               复制完整短链

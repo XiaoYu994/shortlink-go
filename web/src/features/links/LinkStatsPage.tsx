@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   ArrowLeft,
+  BarChart3,
   Bot,
   Compass,
   ExternalLink,
@@ -20,6 +21,7 @@ import { Link, useParams } from 'react-router';
 import { useCurrentOrg } from '@/app/org-context';
 import { routes } from '@/app/routes';
 import { CopyButton } from '@/components/CopyButton';
+import { EmptyState } from '@/components/EmptyState';
 import { ErrorAlert } from '@/components/ErrorAlert';
 import { MonogramAvatar } from '@/components/MonogramAvatar';
 import { QRCodeDialog } from '@/components/QRCodeDialog';
@@ -27,7 +29,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Skeleton } from '@/components/ui/skeleton';
-import { usePublicBaseUrl } from '@/features/auth/api';
+import { useCapabilities } from '@/features/auth/api';
 import { getErrorMessage } from '@/lib/api-client';
 import { extractHost, formatDateTime, formatNumber } from '@/lib/format';
 import { buildShortUrl, formatShortLabel } from '@/lib/short-url';
@@ -55,7 +57,11 @@ const CLIENT_ICONS = {
 export function LinkStatsPage() {
   const { org } = useCurrentOrg();
   const { code = '' } = useParams();
-  const publicBaseUrl = usePublicBaseUrl();
+  const capabilitiesQuery = useCapabilities();
+  const publicBaseUrl = capabilitiesQuery.data?.public_base_url;
+  const analyticsEnabled = capabilitiesQuery.isSuccess && capabilitiesQuery.data.features.analytics;
+  const analyticsDisabledByServer =
+    capabilitiesQuery.isSuccess && !capabilitiesQuery.data.features.analytics;
   const [days, setDays] = useState<7 | 30>(7);
   const [dimTab, setDimTab] = useState<'devices' | 'clients'>('devices');
   const [qrOpen, setQrOpen] = useState(false);
@@ -63,7 +69,7 @@ export function LinkStatsPage() {
   useDocumentTitle(`/r/${code} 统计 · ${org.name}`);
 
   const detailQuery = useLinkDetail(org.id, code);
-  const statsQuery = useLinkStats(org.id, code, days);
+  const statsQuery = useLinkStats(org.id, code, days, analyticsEnabled);
 
   const fullShortUrl = buildShortUrl(code, publicBaseUrl);
   const shortLabel = formatShortLabel(code, publicBaseUrl);
@@ -128,177 +134,196 @@ export function LinkStatsPage() {
             </div>
           </div>
 
-          <SegmentedControl<7 | 30>
-            ariaLabel="统计时间窗口"
-            size="md"
-            className="shrink-0"
-            value={days}
-            onChange={setDays}
-            options={[
-              { value: 7, label: '近 7 天' },
-              { value: 30, label: '近 30 天' },
-            ]}
-          />
+          {!analyticsDisabledByServer && !capabilitiesQuery.isError && (
+            <SegmentedControl<7 | 30>
+              ariaLabel="统计时间窗口"
+              size="md"
+              className="shrink-0"
+              value={days}
+              onChange={setDays}
+              options={[
+                { value: 7, label: '近 7 天' },
+                { value: 30, label: '近 30 天' },
+              ]}
+            />
+          )}
         </div>
       </div>
 
-      {statsQuery.isError && (
+      {capabilitiesQuery.isError ? (
         <ErrorAlert
-          message={`加载统计失败：${getErrorMessage(statsQuery.error)}`}
-          onRetry={() => void statsQuery.refetch()}
+          message={`无法获取服务端功能配置：${getErrorMessage(capabilitiesQuery.error)}`}
+          onRetry={() => void capabilitiesQuery.refetch()}
         />
-      )}
-
-      {statsQuery.isPending ? (
-        <div className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Skeleton className="h-24 rounded-xl" />
-            <Skeleton className="h-24 rounded-xl" />
-            <Skeleton className="h-24 rounded-xl" />
-          </div>
-          <Skeleton className="h-72 rounded-xl" />
-        </div>
-      ) : statsQuery.data ? (
+      ) : analyticsDisabledByServer ? (
+        <EmptyState
+          icon={BarChart3}
+          title="服务端尚未启用点击统计功能"
+          description="请管理员在服务端设置 FEATURE_ANALYTICS=true（并为 redirector 配置 VISITOR_SALT）后重启服务。"
+        />
+      ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Card>
-              <CardHeader className="flex-row items-center justify-between pb-1">
-                <CardDescription className="text-xs font-medium">历史总点击</CardDescription>
-                <span className="flex size-7 items-center justify-center rounded-lg bg-indigo-50 text-brand">
-                  <MousePointerClick className="size-3.5" />
-                </span>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-bold tabular-nums text-zinc-950">
-                  {formatNumber(statsQuery.data.total_clicks)}
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="flex-row items-center justify-between pb-1">
-                <CardDescription className="text-xs font-medium">近 {days} 天点击</CardDescription>
-                <span className="flex size-7 items-center justify-center rounded-lg bg-sky-50 text-sky-600">
-                  <TrendingUp className="size-3.5" />
-                </span>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-bold tabular-nums text-zinc-950">
-                  {formatNumber(statsQuery.data.range_clicks)}
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="flex-row items-center justify-between pb-1">
-                <CardDescription className="flex items-center gap-1 text-xs font-medium">
-                  近 {days} 天访客（日去重累计）
-                  <span
-                    title="按每个自然日（UTC）独立去重后相加，不记录原始 IP；同一访客跨天访问会分别计入。"
-                    className="inline-flex text-zinc-400 cursor-help"
-                  >
-                    <Info className="size-3.5" />
-                  </span>
-                </CardDescription>
-                <span className="flex size-7 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
-                  <Users className="size-3.5" />
-                </span>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-bold tabular-nums text-zinc-950">
-                  {formatNumber(statsQuery.data.unique_visitors)}
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+          {statsQuery.isError && (
+            <ErrorAlert
+              message={`加载统计失败：${getErrorMessage(statsQuery.error)}`}
+              onRetry={() => void statsQuery.refetch()}
+            />
+          )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>访问趋势</CardTitle>
-              <CardDescription>
-                鼠标移到曲线上可查看每天的点击数与访客数（点击约 1 秒内异步更新）。
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <AreaTrendChart
-                shortUrl={fullShortUrl}
-                clicks={statsQuery.data.clicks}
-                visitors={statsQuery.data.daily_visitors}
-              />
-            </CardContent>
-          </Card>
+          {statsQuery.isPending ? (
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Skeleton className="h-24 rounded-xl" />
+                <Skeleton className="h-24 rounded-xl" />
+                <Skeleton className="h-24 rounded-xl" />
+              </div>
+              <Skeleton className="h-72 rounded-xl" />
+            </div>
+          ) : statsQuery.data ? (
+            <>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Card>
+                  <CardHeader className="flex-row items-center justify-between pb-1">
+                    <CardDescription className="text-xs font-medium">历史总点击</CardDescription>
+                    <span className="flex size-7 items-center justify-center rounded-lg bg-indigo-50 text-brand">
+                      <MousePointerClick className="size-3.5" />
+                    </span>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="font-mono text-2xl font-bold tabular-nums text-zinc-950">
+                      {formatNumber(statsQuery.data.total_clicks)}
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="flex-row items-center justify-between pb-1">
+                    <CardDescription className="text-xs font-medium">
+                      近 {days} 天点击
+                    </CardDescription>
+                    <span className="flex size-7 items-center justify-center rounded-lg bg-sky-50 text-sky-600">
+                      <TrendingUp className="size-3.5" />
+                    </span>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="font-mono text-2xl font-bold tabular-nums text-zinc-950">
+                      {formatNumber(statsQuery.data.range_clicks)}
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="flex-row items-center justify-between pb-1">
+                    <CardDescription className="flex items-center gap-1 text-xs font-medium">
+                      近 {days} 天访客（日去重累计）
+                      <span
+                        title="按每个自然日（UTC）独立去重后相加，不记录原始 IP；同一访客跨天访问会分别计入。"
+                        className="inline-flex text-zinc-400 cursor-help"
+                      >
+                        <Info className="size-3.5" />
+                      </span>
+                    </CardDescription>
+                    <span className="flex size-7 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+                      <Users className="size-3.5" />
+                    </span>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="font-mono text-2xl font-bold tabular-nums text-zinc-950">
+                      {formatNumber(statsQuery.data.unique_visitors)}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>主要来源网站</CardTitle>
-                <CardDescription>
-                  按点击量降序展示前 10 个引流来源（直接访问记为 direct）。
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <BreakdownBarList
-                  tone="indigo"
-                  emptyText="该时间范围内暂无来源记录。"
-                  items={statsQuery.data.referrers.map((r) => ({
-                    key: r.referrer,
-                    label: r.referrer,
-                    count: r.clicks,
-                    icon: Globe,
-                  }))}
-                />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex-row items-center justify-between gap-2">
-                <div>
-                  <CardTitle>访问环境分布</CardTitle>
-                  <CardDescription>按终端设备或客户端类型拆分。</CardDescription>
-                </div>
-                <SegmentedControl<'devices' | 'clients'>
-                  ariaLabel="切换访问环境维度"
-                  value={dimTab}
-                  onChange={setDimTab}
-                  options={[
-                    { value: 'devices', label: '设备' },
-                    { value: 'clients', label: '客户端' },
-                  ]}
-                />
-              </CardHeader>
-              <CardContent>
-                {dimTab === 'devices' ? (
-                  <BreakdownBarList
-                    tone="sky"
-                    emptyText="该时间范围内暂无设备分布数据。"
-                    items={statsQuery.data.devices
-                      .slice()
-                      .sort((a, b) => b.clicks - a.clicks)
-                      .map((d) => ({
-                        key: d.device,
-                        label: d.device,
-                        count: d.clicks,
-                        icon: DEVICE_ICONS[d.device as keyof typeof DEVICE_ICONS] ?? HelpCircle,
-                      }))}
+              <Card>
+                <CardHeader>
+                  <CardTitle>访问趋势</CardTitle>
+                  <CardDescription>
+                    鼠标移到曲线上可查看每天的点击数与访客数（点击约 1 秒内异步更新）。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <AreaTrendChart
+                    shortUrl={fullShortUrl}
+                    clicks={statsQuery.data.clicks}
+                    visitors={statsQuery.data.daily_visitors}
                   />
-                ) : (
-                  <BreakdownBarList
-                    tone="emerald"
-                    emptyText="该时间范围内暂无客户端分布数据。"
-                    items={statsQuery.data.clients
-                      .slice()
-                      .sort((a, b) => b.clicks - a.clicks)
-                      .map((c) => ({
-                        key: c.client,
-                        label: c.client,
-                        count: c.clicks,
-                        icon: CLIENT_ICONS[c.client as keyof typeof CLIENT_ICONS] ?? HelpCircle,
+                </CardContent>
+              </Card>
+
+              <div className="grid gap-6 lg:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>主要来源网站</CardTitle>
+                    <CardDescription>
+                      按点击量降序展示前 10 个引流来源（直接访问记为 direct）。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <BreakdownBarList
+                      tone="indigo"
+                      emptyText="该时间范围内暂无来源记录。"
+                      items={statsQuery.data.referrers.map((r) => ({
+                        key: r.referrer,
+                        label: r.referrer,
+                        count: r.clicks,
+                        icon: Globe,
                       }))}
-                  />
-                )}
-              </CardContent>
-            </Card>
-          </div>
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="flex-row items-center justify-between gap-2">
+                    <div>
+                      <CardTitle>访问环境分布</CardTitle>
+                      <CardDescription>按终端设备或客户端类型拆分。</CardDescription>
+                    </div>
+                    <SegmentedControl<'devices' | 'clients'>
+                      ariaLabel="切换访问环境维度"
+                      value={dimTab}
+                      onChange={setDimTab}
+                      options={[
+                        { value: 'devices', label: '设备' },
+                        { value: 'clients', label: '客户端' },
+                      ]}
+                    />
+                  </CardHeader>
+                  <CardContent>
+                    {dimTab === 'devices' ? (
+                      <BreakdownBarList
+                        tone="sky"
+                        emptyText="该时间范围内暂无设备分布数据。"
+                        items={statsQuery.data.devices
+                          .slice()
+                          .sort((a, b) => b.clicks - a.clicks)
+                          .map((d) => ({
+                            key: d.device,
+                            label: d.device,
+                            count: d.clicks,
+                            icon: DEVICE_ICONS[d.device as keyof typeof DEVICE_ICONS] ?? HelpCircle,
+                          }))}
+                      />
+                    ) : (
+                      <BreakdownBarList
+                        tone="emerald"
+                        emptyText="该时间范围内暂无客户端分布数据。"
+                        items={statsQuery.data.clients
+                          .slice()
+                          .sort((a, b) => b.clicks - a.clicks)
+                          .map((c) => ({
+                            key: c.client,
+                            label: c.client,
+                            count: c.clicks,
+                            icon: CLIENT_ICONS[c.client as keyof typeof CLIENT_ICONS] ?? HelpCircle,
+                          }))}
+                      />
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            </>
+          ) : null}
         </>
-      ) : null}
+      )}
 
       <QRCodeDialog
         open={qrOpen}

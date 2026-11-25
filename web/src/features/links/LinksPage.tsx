@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Input, Select } from '@/components/ui/input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Skeleton } from '@/components/ui/skeleton';
-import { usePublicBaseUrl } from '@/features/auth/api';
+import { useAnalyticsEnabled, usePublicBaseUrl } from '@/features/auth/api';
 import { canWriteLinks } from '@/features/auth/permissions';
 import { getErrorMessage } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
@@ -48,11 +48,13 @@ export function LinksPage() {
   const { org } = useCurrentOrg();
   const navigate = useNavigate();
   const publicBaseUrl = usePublicBaseUrl();
+  const analyticsEnabled = useAnalyticsEnabled();
   const writable = canWriteLinks(org.role);
 
   useDocumentTitle(`短链管理 · ${org.name}`);
 
   const [sort, setSort] = useState<LinkSort>('id');
+  const effectiveSort: LinkSort = analyticsEnabled ? sort : 'id';
   const [statusFilter, setStatusFilter] = useState<LinkStatusFilter>('');
   const [view, setView] = useState<LinksViewMode>('cards');
   const [search, setSearch] = useState('');
@@ -71,7 +73,7 @@ export function LinksPage() {
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  const linksQuery = useInfiniteLinks(org.id, sort, statusFilter, debouncedSearch);
+  const linksQuery = useInfiniteLinks(org.id, effectiveSort, statusFilter, debouncedSearch);
   const updateLink = useUpdateLink(org.id);
   const deleteLink = useDeleteLink(org.id);
 
@@ -130,8 +132,8 @@ export function LinksPage() {
     let todayClicks = 0;
     for (const item of allLinks) {
       if (item.status === 'active') active += 1;
-      totalClicks += item.clicks;
-      todayClicks += item.clicks_today;
+      totalClicks += item.clicks ?? 0;
+      todayClicks += item.clicks_today ?? 0;
     }
     return { total: allLinks.length, active, totalClicks, todayClicks };
   }, [allLinks]);
@@ -207,7 +209,12 @@ export function LinksPage() {
 
       {/* 诚实口径概览条：全局配额来自后端真实计数，点击统计明确标示为“已加载短链汇总” */}
       {allLinks.length > 0 && (
-        <div className="grid grid-cols-3 divide-x divide-zinc-200/80 rounded-xl border border-zinc-200/90 bg-zinc-50/50">
+        <div
+          className={cn(
+            'grid divide-x divide-zinc-200/80 rounded-xl border border-zinc-200/90 bg-zinc-50/50',
+            analyticsEnabled ? 'grid-cols-3' : 'grid-cols-2',
+          )}
+        >
           <div className="px-4 py-3">
             <div className="text-xs text-zinc-500">本月创建配额</div>
             <div className="mt-1 flex items-baseline gap-1.5">
@@ -235,25 +242,27 @@ export function LinksPage() {
               <span className="text-xs text-zinc-400">{summary.active} 条活跃</span>
             </div>
           </div>
-          <div className="px-4 py-3">
-            <div className="text-xs text-zinc-500">
-              {hasActiveFilters
-                ? '筛选结果点击'
-                : linksQuery.hasNextPage
-                  ? '已加载短链点击'
-                  : '累计点击'}
-            </div>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="font-mono text-lg font-semibold tabular-nums text-zinc-950">
-                {formatNumber(summary.totalClicks)}
-              </span>
-              {summary.todayClicks > 0 && (
-                <span className="font-mono text-xs text-emerald-600 tabular-nums">
-                  今日 +{formatNumber(summary.todayClicks)}
+          {analyticsEnabled && (
+            <div className="px-4 py-3">
+              <div className="text-xs text-zinc-500">
+                {hasActiveFilters
+                  ? '筛选结果点击'
+                  : linksQuery.hasNextPage
+                    ? '已加载短链点击'
+                    : '累计点击'}
+              </div>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="font-mono text-lg font-semibold tabular-nums text-zinc-950">
+                  {formatNumber(summary.totalClicks)}
                 </span>
-              )}
+                {summary.todayClicks > 0 && (
+                  <span className="font-mono text-xs text-emerald-600 tabular-nums">
+                    今日 +{formatNumber(summary.todayClicks)}
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -306,12 +315,12 @@ export function LinksPage() {
 
           <Select
             aria-label="排序方式"
-            value={sort}
+            value={effectiveSort}
             onChange={(e) => setSort(e.target.value as LinkSort)}
           >
             <option value="id">按最新创建</option>
-            <option value="clicks">按累计点击</option>
-            <option value="clicks_today">按今日点击</option>
+            {analyticsEnabled && <option value="clicks">按累计点击</option>}
+            {analyticsEnabled && <option value="clicks_today">按今日点击</option>}
           </Select>
 
           <SegmentedControl<LinksViewMode>
@@ -388,7 +397,7 @@ export function LinksPage() {
           }
           action={
             <div className="flex flex-wrap items-center justify-center gap-2">
-              {canDirectLookup && (
+              {analyticsEnabled && canDirectLookup && (
                 <Button size="sm" onClick={() => navigate(routes.linkStats(org.id, trimmedSearch))}>
                   直接查询短码 /r/{trimmedSearch}
                   <ArrowRight className="size-3.5" />
@@ -415,6 +424,7 @@ export function LinksPage() {
                 orgId={org.id}
                 link={link}
                 publicBaseUrl={publicBaseUrl}
+                analyticsEnabled={analyticsEnabled}
                 view={view}
                 writable={writable}
                 mutating={updateLink.isPending}

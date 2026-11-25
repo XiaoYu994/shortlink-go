@@ -17,8 +17,8 @@ export interface AdminLink {
   banned_at?: string;
   ban_reason?: string;
   created_at: string;
-  clicks: number;
-  clicks_today: number;
+  clicks?: number;
+  clicks_today?: number;
 }
 
 export interface ListLinksResponse {
@@ -133,11 +133,11 @@ export function useLinkDetail(orgId: number, code: string) {
   });
 }
 
-export function useLinkStats(orgId: number, code: string, days: 7 | 30) {
+export function useLinkStats(orgId: number, code: string, days: 7 | 30, enabled = true) {
   return useQuery({
     queryKey: linkKeys.stats(orgId, code, days),
     queryFn: ({ signal }) => fetchLinkStats(orgId, code, days, signal),
-    enabled: Boolean(code),
+    enabled: Boolean(code) && enabled,
   });
 }
 

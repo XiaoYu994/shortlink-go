@@ -22,7 +22,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useAuthProviders } from '@/features/auth/api';
+import { useCapabilities } from '@/features/auth/api';
 import { canManageWebhooks, ROLE_LABELS } from '@/features/auth/permissions';
 import { getErrorMessage } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
@@ -44,8 +44,10 @@ import { WebhookFormDialog } from './WebhookFormDialog';
 export function WebhooksPage() {
   const { org } = useCurrentOrg();
   const allowed = canManageWebhooks(org.role);
-  const providersQuery = useAuthProviders();
-  const webhooksDisabledByServer = providersQuery.isSuccess && !providersQuery.data.webhooks;
+  const capabilitiesQuery = useCapabilities();
+  const webhooksEnabled = capabilitiesQuery.isSuccess && capabilitiesQuery.data.features.webhooks;
+  const webhooksDisabledByServer =
+    capabilitiesQuery.isSuccess && !capabilitiesQuery.data.features.webhooks;
 
   useDocumentTitle(`Webhooks · ${org.name}`);
 
@@ -80,7 +82,7 @@ export function WebhooksPage() {
   const activeDeliveries =
     deliveriesHook && deliveriesHook.orgId === org.id ? deliveriesHook.webhook : null;
 
-  const webhooksQuery = useWebhooks(org.id, allowed && !webhooksDisabledByServer);
+  const webhooksQuery = useWebhooks(org.id, allowed && webhooksEnabled);
   const updateWebhook = useUpdateWebhook(org.id);
   const deleteWebhook = useDeleteWebhook(org.id);
   const rotateSecret = useRotateWebhookSecret(org.id);
@@ -143,6 +145,21 @@ export function WebhooksPage() {
     );
   }
 
+  if (capabilitiesQuery.isError) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Webhooks"
+          description="将短链创建、变更与安全封禁事件实时推送到外部系统。"
+        />
+        <ErrorAlert
+          message={`无法获取服务端功能配置：${getErrorMessage(capabilitiesQuery.error)}`}
+          onRetry={() => void capabilitiesQuery.refetch()}
+        />
+      </div>
+    );
+  }
+
   if (webhooksDisabledByServer) {
     return (
       <div className="space-y-6">
@@ -171,7 +188,7 @@ export function WebhooksPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={webhooksQuery.isFetching}
+              disabled={!webhooksEnabled || webhooksQuery.isFetching}
               onClick={() => void webhooksQuery.refetch()}
             >
               <RefreshCw className={cn('size-3.5', webhooksQuery.isFetching && 'animate-spin')} />
@@ -179,7 +196,7 @@ export function WebhooksPage() {
             </Button>
             <Button
               size="sm"
-              disabled={reachedLimit}
+              disabled={!webhooksEnabled || reachedLimit}
               onClick={() => {
                 setFormState({ orgId: org.id, editing: null });
               }}
