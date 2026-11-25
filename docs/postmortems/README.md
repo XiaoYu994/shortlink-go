@@ -18,6 +18,7 @@
 | --- | --- | --- | --- |
 | 2026-11-24 | [PostgreSQL 索引失效、队列积压雪崩与租约 ABA 覆盖审查](2026-11-24-postgres-schema-and-query-audit.md) | 架构审查 | [ADR 0022](../adr/0022-postgres-query-and-lease-hardening.md) |
 | 2026-11-24 | [日志体系与可观测性架构审查](2026-11-24-logging-system-audit.md) | 架构审查 | [ADR 0005](../adr/0005-prometheus-before-tracing.md)、[ADR 0023](../adr/0023-audit-logs.md) |
+| 2026-11-24 | [全量架构深度审查与四批次系统加固复盘](2026-11-24-full-architecture-audit.md) | 架构审查 | [ADR 0024](../adr/0024-process-boundary-and-ops-isolation.md)、[ADR 0025](../adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)、[ADR 0026](../adr/0026-timeseries-partitioning-and-retention.md) |
 
 ## 模板
 

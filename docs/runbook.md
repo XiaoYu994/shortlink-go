@@ -11,11 +11,11 @@ REDIS_URL=redis://localhost:6379/0
 VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`。打开之后取 `X-Forwarded-For` 的最右一段。公网入口用 `deploy/nginx.conf`，它把这个头覆盖成代理看到的对端地址，并且不转发 `/metrics`、`/healthz` 和 `/readyz`。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
+`REDIS_URL` 支持密码、TLS（`rediss://`）和 DB 编号；没有密码也可以，直接写 `redis://localhost:6379/0`。`VISITOR_SALT` 是访客哈希的密钥，redirector 启动时必填；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`，多跳代理场景需同时配置 `TRUST_PROXY_CIDRS` 右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
 
 `.env` 已被 gitignore，不会提交。
 
-- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily`、`users`、`user_identities`、`memberships`、`sessions`、`invitations` 和 `jobs`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
+- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs`，以及按月范围分区的 `link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily` 和 `audit_logs`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
 
 如果使用项目自带的 `docker-compose.yml`：
 
@@ -169,7 +169,7 @@ make prometheus
 
 Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程的 `/metrics`，端口来自 `ADDR` 和 `CONSOLE_ADDR`（默认 `8080` 和 `8081`，job 分别是 `redirector` 和 `console`）。两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。改了端口要重新执行 `make prometheus`，容器才会换上新的抓取配置。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
-告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次。`ShortlinkClicksLost`：5 分钟窗口里 `shortlink_clicks_dropped_total` 或 `shortlink_clicks_written_total{result="error"}` 有增加，这个条件保持 1 分钟后状态变成 firing。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
+告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次，当前共配置 9 条告警规则：`ShortlinkClicksLost`、`ShortlinkClickRecorderStopped`（写入协程 panic 停摆）、`ShortlinkHigh5xxRate`（>1%）、`ShortlinkRedirectHighLatency`（P99 > 200ms）、`ShortlinkCacheFallback`、`ShortlinkCacheShedding`、`ShortlinkJobsBacklog`、`ShortlinkJobsDead` 与 `ShortlinkWorkerDown`。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
 
 ## 基线压测（无缓存）
 
@@ -841,11 +841,11 @@ make web-dev
 WORKER_ADDR=127.0.0.1:8082 make run-worker
 ```
 
-- 创建短链和修改 URL 时，PostgreSQL 在同一条多 CTE 语句内写入 `link.risk_scan` 任务；只改 `expires_at` 或 `disabled` 不入队。
-- `console worker` 通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`），抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据地址，命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
-- Redis 只存扫描结果短时缓存（fail-open），不承载任务队列；Redis 写负缓存失败返回 `cache.ErrNotUpdated` 时，worker 自动退避重试自愈。
-- 同一个 worker 进程定时分批清理过期/吊销超 7 天的 `sessions` 和完成超 7 天的 `done` 任务；`dead` 任务保留供排障。
-- 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站，不提供关闭 SSRF 检查的全局环境变量。
+- 创建短链和修改 URL 时，PostgreSQL 在同一条多 CTE 语句内写入 `link.risk_scan` 任务；只改 `expires_at` 或 `disabled` 不入队。同时 `Update`、`Delete`、`Ban`、`BanIfURL` 与 `Unban` 会同事务入队无去重键的 `cache.reconcile` 电平对账任务（[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)），`Delete` 额外入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行。
+- `console worker` 通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`），抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据及 NAT64（`64:ff9b::/96`）/6to4（`2002::/16`）地址并支持出口端口白名单（`RISK_ALLOWED_PORTS`），命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
+- Redis 只存扫描结果短时缓存（fail-open，且不缓存 4xx 响应），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，由同事务入队的 `cache.reconcile` 自动退避对账自愈。
+- 同一个 worker 进程启动时调用 `EnsureMonthlyPartitions` 预建未来 2 个月分区，并在后台按 `WORKER_CLEANUP_INTERVAL`（默认 1 小时）分批清理过期 `sessions`、`done`/`dead` 任务（`dead` 默认 30 天）、过期/撤销/被取代 `invitations`（默认 30 天），同时运行 `partitions.maintain` 预建未来月表并整月 `DROP TABLE` 超过保留期的历史统计分区（`WORKER_STATS_RETENTION_DAYS=90`）与审计分区（`WORKER_AUDIT_RETENTION_DAYS=180`，永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
+- 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站（编译期隔离在 `//go:build devtest`），不提供关闭 SSRF 检查的全局环境变量。
 
 ## 后台任务与异步风控基准测试（2026-11-23）
 
@@ -982,7 +982,7 @@ psql "$DATABASE_URL" -c 'SELECT id, code, url, created_at FROM links ORDER BY id
 ```bash
 make test             # 全部测试；使用 .env 里的 TEST_*，库没准备好时会失败
 make test-unit        # 只跑不依赖 PostgreSQL/Redis 的测试
-make verify           # 格式校验、vet、单测、lint、build，不启动 Docker
+make verify           # 格式校验、vet、单测、arch-check 边界门禁、lint、build，不启动 Docker
 make test-integration # 重建测试库，再跑全部测试（含集成）
 make smoke            # 启动真实进程跑冒烟测试
 make selfcheck        # test-db + verify + test-integration + smoke

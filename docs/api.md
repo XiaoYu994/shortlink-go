@@ -28,6 +28,7 @@
 | console | `GET` | `/api/v1/api-keys` | 当前组织 API Key 列表（不含明文，需要 `apikeys:read`，仅 `owner`/`admin` 会话） |
 | console | `POST` | `/api/v1/api-keys` | 为当前组织签发 API Key（明文只返回一次，需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
 | console | `DELETE` | `/api/v1/api-keys/{id}` | 吊销当前组织的 API Key（需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
+| console | `GET` | `/api/v1/audit-logs` | 查询当前组织的操作审计日志（支持按 `action` 筛选与 Keyset 游标分页，需要 `audit:read`） |
 | console | `GET` | `/`（及前端路径） | 可选：配置 `WEB_DIST_DIR` 时托管最小前端控制台 SPA，`/api/*`、`/r/*`、运维路径严格保持隔离 |
 | console | `POST` | `/api/v1/links` | 创建短链（需要 `links:write`） |
 | console | `GET` | `/api/v1/links` | 当前租户的链接列表，支持排序和游标分页（需要 `links:read`） |
@@ -36,7 +37,7 @@
 | console | `DELETE` | `/api/v1/links/{code}` | 硬删除，返回 204（需要 `links:write`） |
 | console | `GET` | `/api/v1/links/{code}/stats` | 点击统计：日趋势、来源、设备、客户端、访客（需要 `stats:read`） |
 
-本地开发时 redirector 监听 `:8080`，console 监听 `:8081`；部署时由反向代理按路径前缀转发到两个进程。宿主机进程的入口是 `deploy/nginx.conf`，容器栈的入口是 `deploy/nginx.stack.conf`。两份都只转发 `/r/` 和 `/api/`，不转发 `/metrics`、`/healthz` 和 `/readyz`。创建响应的 `Location` 是相对路径 `/r/{code}`，调用方应拼公开域名，不是 console 的监听地址。管理 API 带版本前缀 `/api/v1`，并且需要通过 API Key 或会话鉴权。跳转路径 `/r/{code}` 不加版本，也不鉴权，因为短链是已经发出去的公开地址。`/healthz` 和 `/readyz` 是运维端点，不版本化。`/metrics` 同样是运维端点：不版本化，不对公网开放，由这层反向代理不转发。
+本地开发时 redirector 默认监听 `:8080`，console 默认监听 `:8081`；生产可分别配置 `OPS_ADDR`、`CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 与业务端口彻底物理隔离（未设时共端口，由 `deploy/nginx.conf` / `deploy/nginx.stack.conf` 不转发运维路径）。管理面除按租户限流外，在 `authenticate` 之前还设有按客户端 IP 的鉴权前有界限流（超限返回 429）。
 
 管理 API 支持两种凭证，按 `Authorization` 头优先且不回退：
 
@@ -473,7 +474,7 @@ curl -i localhost:8080/r/AbC123xy
 - 客户端：`browser`、`bot`、`cli`、`other`。
 - 访客：`HMAC-SHA256(VISITOR_SALT, 按天盐 + IP + User-Agent)` 的前 16 字节。不存原始 IP 和 User-Agent。
 
-客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才看 `X-Forwarded-For` 的最右一段。代理如果追加而不是覆盖，最左一段是客户端带来的，可以伪造；最右一段不是合法 IP 时改回连接地址，不往左找。`deploy/nginx.conf` 把这个头覆盖成代理看到的对端地址。这个开关只能开在可信反向代理后面。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
+客户端 IP 默认取连接地址。只有 `TRUST_PROXY_HEADERS=true` 时才解析 `X-Forwarded-For`：结合 `TRUST_PROXY_CIDRS`（配置了可信代理网段时从右往左剥离可信代理跳，否则取最右一段合法 IP），既防客户端伪造，也防止多层反代（CDN + Nginx）导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。`VISITOR_SALT` 由 redirector 启动时读取，为空则拒绝启动。
 
 ## 健康检查
 
@@ -506,6 +507,7 @@ curl -i localhost:8081/metrics   # console
 
 - `shortlink_http_requests_total`、`shortlink_http_request_duration_seconds`（`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`）
 - `shortlink_rate_limited_total`（被按租户限流拒绝的管理请求数；没有 label。两个进程都暴露，只有 console 会累加，redirector 恒为 0）
+- `shortlink_ip_rate_limited_total`（管理面鉴权前按客户端 IP 限流拒绝的请求数；仅 console 暴露，防伪造凭证穿透数据库）
 - `shortlink_cache_gets_total`（`result` 为 `hit`、`miss`、`fallback`。负缓存记成 `hit`）
 - `shortlink_cache_writes_total`（`result` 为 `success`、`skipped`、`error`。创建、修改、删除和回源写缓存都会计数；`skipped` 表示回源的 `SET NX` 发现 key 已有更新的值，可能是并发的创建或管理写。封禁和解封的缓存写入发生在 `console link` 命令里，不进这个进程的 `/metrics`）
 - `shortlink_cache_operation_duration_seconds`（缓存操作耗时，`operation` 为 `get`、`set`，`result` 取值同上面两个计数器）
@@ -514,7 +516,8 @@ curl -i localhost:8081/metrics   # console
 - `process_*`（进程 CPU、内存、文件描述符）
 - `shortlink_clicks_dropped_total`（缓冲满、没能记下的点击。启动后就是 0，没有 label；只有 redirector 有）
 - `shortlink_clicks_written_total`（交给存储的点击数，`result` 为 `success` 或 `error`。启动后两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`；只有 redirector 有）
-- `shortlink_jobs_processed_total`（后台任务完成计数，`kind` 如 `link.risk_scan`，`result` 为 `done`、`skipped`、`retry`、`dead`；仅 `console worker` 配置 `WORKER_ADDR` 时暴露）
+- `shortlink_clicks_recorder_stopped`（`ClickRecorder` 后台写入协程因 panic 停机时置 `1`，触发紧急告警）
+- `shortlink_jobs_processed_total`（后台任务完成计数，`kind` 包括 `link.risk_scan`、`cache.reconcile`、`link.purge_stats`，`result` 为 `done`、`skipped`、`retry`、`dead`；仅 `console worker` 配置 `WORKER_ADDR` 时暴露）
 - `shortlink_job_duration_seconds`（后台任务执行耗时直方图，`kind`；仅 `console worker`）
 - `shortlink_jobs_in_flight`（当前执行中的后台任务数，`kind`；仅 `console worker`）
 - `shortlink_jobs_reaped_total`（超时租约回收次数，`kind`；仅 `console worker`）
@@ -530,7 +533,7 @@ redirector 设了 `PPROF_ADDR` 时，在那个地址上另起一个监听提供 
 
 ## 请求编号
 
-经过路由的响应都带 `X-Request-ID`。调用方可以沿用自己的编号，但只接受长度不超过 128、由字母、数字、`.`、`_`、`-` 组成的值；其他值由服务端改成 32 位十六进制编号。同一次请求的访问日志和错误日志都有同一个 `request_id`。
+经过路由的响应均由服务端签发高熵 128 位十六进制编号，写入响应头 `X-Request-ID`、结构化日志 `request_id` 与审计记录 `audit_logs.request_id`（[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)）。客户端传入且符合长度不超过 128、仅含字母/数字/`.`/`_`/`-` 字符集的 `X-Request-ID` 只作为排障线索记录到日志字段 `client_request_id`，不会覆盖服务端签发的内部编号。
 
 ## 版本策略
 

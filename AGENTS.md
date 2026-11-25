@@ -29,8 +29,8 @@
 - SQL 组织与数据库纪律：
   - 多行 SQL 语句抽到文件顶部的包级 `const`，避免长 SQL 打断方法主流程；单行短 SQL 可就近内联。
   - 新增索引或改动查询/清理 SQL 时，在合成数据量上跑 `EXPLAIN (ANALYZE, BUFFERS)` 确认真正命中预期索引；禁止用 `OR` 混合有索引列与无索引列导致退化全表扫描。
-  - 后台清理与租约回收 SQL 一律带 `LIMIT` 分批执行；租约回写必须校验单调递增 Fencing Token（如 `jobs.lock_version`），不只依赖进程级 `WorkerID`。
-  - 避免给高频更新计数列（如 `tenants.link_usage`、`link_usage_month`）建索引，保留 PostgreSQL HOT Update 优化。
+  - 后台清理与租约回收 SQL 一律带 `LIMIT` 分批执行；在范围分区表（三张日统计表、`audit_logs`）上分批删改必须依据完整主键元组，禁止使用跨分区不唯一的 `ctid`；租约回写必须校验单调递增 Fencing Token（如 `jobs.lock_version`），不只依赖进程级 `WorkerID`；分区 DDL 必须在事务内设定 `SET LOCAL lock_timeout = '3s'` 且不得触碰 `*_default` 兜底分区。
+  - 避免给高频更新计数列（如 `tenants.link_usage`、`link_usage_month`）建索引，保留 PostgreSQL HOT Update 优化；高写表（`links`）保持适度 `fillfactor`。
 
 ### 命名与文件
 
@@ -82,7 +82,7 @@
 ## 提交前检查
 
 - `make verify`：gofmt 校验（只检查、不改文件）、go vet、go test -race（单测）、
-  golangci-lint、build，必须全部通过。不依赖 Docker。
+  `make arch-check`（静态依赖边界检查）、golangci-lint、build，必须全部通过。不依赖 Docker。
 - `make web-check`：改动 `web/` 前端代码时必须通过（Prettier 校验、`tsc --noEmit`、
   ESLint、Vitest、`vite build`）；前端代码约定详见 `web/AGENTS.md`。
 - `make selfcheck`：重建 `TEST_DATABASE_URL` 的 schema（迁移升到最新、降到空、再升到最新），

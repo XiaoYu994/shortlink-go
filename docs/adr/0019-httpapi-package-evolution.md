@@ -56,3 +56,4 @@
 - 阶段 11 的开发摩擦保持最低，同时在登录和成员 API 落地时通过拆结构体防住 `Server` 膨胀。
 - 未来模块变多时有明确的拆包时机和目标目录，不需要临时拍脑袋，也不会误拆成技术分层。
 - 短期内 `internal/httpapi` 的文件列表仍然偏长，靠清晰的文件命名和 `routes.go` 总览保持可读性。
+- 2026-11-24（演进完成与延续）：本 ADR 第 3 步已落地为 `internal/httpx`、`internal/redirector`、`internal/console` 三包；随后全量架构审查进一步把鉴权前按 IP 限流收口进 `internal/console/request.go`，并为 `httpx` 增加独立运维端口监听与可信代理链校验（见 [ADR 0024](0024-process-boundary-and-ops-isolation.md)），同时以 `make arch-check` 自动化守住底座与公开面依赖隔离。

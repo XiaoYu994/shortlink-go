@@ -40,6 +40,9 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0021](0021-tenant-self-service-and-web-console.md) | 租户自助闭环与最小前端控制台 | Accepted |
 | [0022](0022-postgres-query-and-lease-hardening.md) | PostgreSQL 查询路径、索引与后台任务租约加固 | Accepted |
 | [0023](0023-audit-logs.md) | 组织操作审计日志 | Accepted |
+| [0024](0024-process-boundary-and-ops-isolation.md) | 进程边界净化、独立运维端口、可信代理链与鉴权前 IP 限流 | Accepted |
+| [0025](0025-reconcile-cache-async-purge-and-audit-hardening.md) | 缓存电平对账、异步统计清理与审计元数据 fail-closed | Accepted |
+| [0026](0026-timeseries-partitioning-and-retention.md) | 时序统计表与审计日志的按月范围分区及保留期治理 | Accepted |
 
 ## 模板
 

@@ -63,3 +63,4 @@ PostgreSQL 的外键由系统触发器实现，成本与 MySQL 的 InnoDB 不完
   全表校验，所以应在对账结果为 0 时执行。
 - 需要重新评估的条件：团队放弃这条规范，或确定不再分片且更看重数据库层的
   完整性保护。
+- 2026-11-24（演进补充）：`postgres.Store.Delete` 不再在同一同步事务中直接扫描删除三张点击日统计表，改为删除 `links` 主行并在同事务入队 `link.purge_stats` Outbox 任务，由 worker 基于各表完整主键元组分批异步清理（防跨分区 `ctid` 冲突与长事务锁），见 [ADR 0025](0025-reconcile-cache-async-purge-and-audit-hardening.md) 与 [ADR 0026](0026-timeseries-partitioning-and-retention.md)。

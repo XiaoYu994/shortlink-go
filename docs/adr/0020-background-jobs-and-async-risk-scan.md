@@ -246,3 +246,6 @@ CREATE INDEX idx_jobs_finished_done
 - **直接引入 Kafka / RabbitMQ / NATS**：运维与本地开发复杂度高，且保证业务写与发消息原子性依然需要 Outbox；当前没有多服务扇出与十万级入队需求，留作未来加 relay 的演进路径。
 - **在 `SELECT ... FOR UPDATE` 事务内直接抓取 URL**：一次外部 HTTP 请求耗时可达数秒，会长时间占用数据库连接和行锁，极易打满连接池；必须改为短事务抢占 + 租约模式。
 - **单独建 `risk_scans` 表而非通用 `jobs` 表**：字段更贴合风控，但很快引入 Webhook 或异步邮件时又要复制一套抢占、重试、租约回收和清理逻辑；通用 `jobs` 表成本几乎相同且能直接复用。
+- **2026-11-24 演进补充**：
+  - 风控 handler 在 `BanIfURL` 遇 `cache.ErrNotUpdated` 时不再整体退避重跑外网 HTTP 抓取，改为仅记 Warn 日志并返回 `nil`，缓存一致由同事务入队的 `cache.reconcile` 任务负责收敛（见 [ADR 0025](0025-reconcile-cache-async-purge-and-audit-hardening.md)）。
+  - SSRF 防护新增封禁 `64:ff9b::/96`（NAT64）与 `2002::/16`（6to4）网段、可选出口端口白名单（`RISK_ALLOWED_PORTS`），并避免缓存 4xx 远端响应；周期维护任务补齐 `dead jobs`、过期/失效 `invitations` 清理及月分区治理 `partitions.maintain`（见 [ADR 0026](0026-timeseries-partitioning-and-retention.md)）。

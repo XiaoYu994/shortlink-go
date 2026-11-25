@@ -296,3 +296,4 @@ C 适合 GitHub 那样以个人为中心的产品；短链的 Key 多半给服�
 - 存量 API Key 迁移成全部 scope，行为不变；`created_by` 为空表示是运维命令签发的。
 - 修改 ADR 0009“以后的用户平台”第 1、3 条：平台在 console 里，不经过外部网关。
 - 以后的练习：把 `Authorizer` 换成 Casbin 实现；加 GitHub 作为第二个提供方，对比 OAuth 2.0 和 OIDC。
+- 2026-11-24（演进补充）：为彻底净化公开跳转进程边界，`internal/identity` 中的 OIDC / GitHub OAuth 客户端实现已拆入子包 `internal/identity/oauth`，父包不再传递引入 `go-oidc` 与 `oauth2`；`postgres` 与 `console` 的直接跨边界依赖收敛规则见 [ADR 0024](0024-process-boundary-and-ops-isolation.md)。

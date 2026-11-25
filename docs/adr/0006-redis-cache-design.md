@@ -73,6 +73,7 @@
 - 测试需要可用的 Redis；没有 `TEST_REDIS_URL` 时 cache 测试跳过，其余测试不受影响。
 - 生产上需要给缓存 Redis 配置 `maxmemory` 和淘汰策略，并尽量使用独立实例；默认的 `noeviction` 配置不适合缓存场景。
 - 缓存查找记在 `shortlink_cache_gets_total`（`hit` 含负缓存、`miss`、`fallback`），写缓存记在 `shortlink_cache_writes_total`（`success`、`skipped`、`error`；`skipped` 表示负缓存的 `SET NX` 发现 key 已存在），缓存操作耗时记在 `shortlink_cache_operation_duration_seconds`（`operation` 为 `get`、`set`）。压测对比沿用 `docs/runbook.md` 的基线方法，2026-11-12 的结果已记入 runbook（客户端 19,077 req/s，服务端跳转 p50 1.4ms / p99 4.7ms，数据库连接池未被使用）。`ClickRecorder` 的 dropped 计数已接入 `/metrics`，见 [ADR 0007](0007-async-click-recording.md)。
+- 2026-11-24（演进补充）：租户 `Update`/`Delete` 与运营 `Ban`/`Unban` 提交后，除保留快速同步写穿外，还会同一事务原子入队 `cache.reconcile` Outbox 任务（不设 `dedup_key`）；Redis 短时写失败时由后台 worker 自动对账自愈，不再承受最长 1 小时的陈旧正缓存窗口，见 [ADR 0025](0025-reconcile-cache-async-purge-and-audit-hardening.md)。
 
 ## 参考
 

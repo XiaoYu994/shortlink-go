@@ -108,6 +108,7 @@
 - 突发目标是已知的缺口：超过上限约 0.2 秒后开始丢点击，靠 `ShortlinkClicksLost` 发现。
 - 调大批次的收益是推算出来的。重新评估时先用第 1 步的 benchmark 换成实测，再决定。
 - 这些数字都来自同一台机器上的压测，只能用于前后对比，不是容量规划的依据。
+- 2026-11-24（演进补充）：修复 `ClickRecorder` 后台写入协程 `panic` 后静默丢弃而不报警的问题，新增 `shortlink_clicks_recorder_stopped` gauge 与 `ShortlinkClickRecorderStopped` 紧急告警；同时为 `links` 表设置 `fillfactor = 85`（迁移 `012`）缓解高频 `clicks` 更新导致的页分裂与锁争用，保留单写入者与日聚合存储模型不变。
 
 ## 参考
 
