@@ -81,27 +81,25 @@ type Options struct {
 
 // Server 持有管理进程需要的依赖，复用 httpx 提供的运维端点与通用中间件。
 type Server struct {
-	base           *httpx.Server
-	logger         *slog.Logger
-	store          LinkCreator
-	admin          LinkAdminStore
-	stats          LinkStatsStore
-	keys           APIKeyAuthenticator
-	sessions       SessionAuthenticator
-	authz          Authorizer
-	csrf           *http.CrossOriginProtection
-	auth           *authHandler
-	members        *memberHandler
-	orgs           *orgHandler
-	invitations    *invitationHandler
-	apiKeys        *apiKeyHandler
-	auditLogs      *auditHandler
-	web            http.Handler
-	publicBaseURL  string
-	trustProxy     bool
-	trustedProxies []netip.Prefix
-	limiter        *tenantRateLimiter
-	ipLimiter      *ipRateLimiter
+	base          *httpx.Server
+	logger        *slog.Logger
+	store         LinkCreator
+	admin         LinkAdminStore
+	stats         LinkStatsStore
+	keys          APIKeyAuthenticator
+	sessions      SessionAuthenticator
+	authz         Authorizer
+	csrf          *http.CrossOriginProtection
+	auth          *authHandler
+	members       *memberHandler
+	orgs          *orgHandler
+	invitations   *invitationHandler
+	apiKeys       *apiKeyHandler
+	auditLogs     *auditHandler
+	web           http.Handler
+	publicBaseURL string
+	limiter       *tenantRateLimiter
+	ipLimiter     *ipRateLimiter
 	// rateLimited 与 ipRateLimited 只属于管理 API；在 newServer 里注册一次，不在 Routes 中重复注册。
 	rateLimited   prometheus.Counter
 	ipRateLimited prometheus.Counter
@@ -173,12 +171,7 @@ func New(logger *slog.Logger, store Store, requestTimeout time.Duration, registr
 
 func newServer(d serverDeps) *Server {
 	base := httpx.New(d.logger, d.requestTimeout, d.registry)
-	base.SetAccessLog(httpx.AccessLogOptions{
-		TrustProxyHeaders: d.trustProxyHeaders,
-		TrustedProxyCIDRs: d.trustedProxyCIDRs,
-		SampleRate:        1,
-		SlowThreshold:     httpx.DefaultSlowRequestThreshold,
-	})
+	base.SetTrustedProxies(d.trustProxyHeaders, d.trustedProxyCIDRs)
 	logger := base.Logger()
 	csrf := http.NewCrossOriginProtection()
 	var auth *authHandler
@@ -210,29 +203,27 @@ func newServer(d serverDeps) *Server {
 		web = newWebSPAHandler(d.webDistDir)
 	}
 	return &Server{
-		base:           base,
-		logger:         logger,
-		store:          d.store,
-		admin:          d.admin,
-		stats:          d.stats,
-		keys:           d.keys,
-		sessions:       d.sessions,
-		authz:          d.authorizer,
-		csrf:           csrf,
-		auth:           auth,
-		members:        members,
-		orgs:           orgs,
-		invitations:    invitations,
-		apiKeys:        apiKeys,
-		auditLogs:      auditLogs,
-		web:            web,
-		publicBaseURL:  d.publicBaseURL,
-		trustProxy:     d.trustProxyHeaders,
-		trustedProxies: d.trustedProxyCIDRs,
-		limiter:        newTenantRateLimiter(),
-		ipLimiter:      newIPRateLimiter(d.ipRateLimit, d.ipRateBurst, defaultMaxIPBuckets),
-		rateLimited:    newRateLimitedCounter(d.registry),
-		ipRateLimited:  newIPRateLimitedCounter(d.registry),
+		base:          base,
+		logger:        logger,
+		store:         d.store,
+		admin:         d.admin,
+		stats:         d.stats,
+		keys:          d.keys,
+		sessions:      d.sessions,
+		authz:         d.authorizer,
+		csrf:          csrf,
+		auth:          auth,
+		members:       members,
+		orgs:          orgs,
+		invitations:   invitations,
+		apiKeys:       apiKeys,
+		auditLogs:     auditLogs,
+		web:           web,
+		publicBaseURL: d.publicBaseURL,
+		limiter:       newTenantRateLimiter(),
+		ipLimiter:     newIPRateLimiter(d.ipRateLimit, d.ipRateBurst, defaultMaxIPBuckets),
+		rateLimited:   newRateLimitedCounter(d.registry),
+		ipRateLimited: newIPRateLimitedCounter(d.registry),
 	}
 }
 

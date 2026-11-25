@@ -1,10 +1,14 @@
 package httpx
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestClientIP(t *testing.T) {
@@ -123,6 +127,76 @@ func TestClientIPWithTrustedProxies(t *testing.T) {
 			}
 			if got := ClientIPWithTrustedProxies(r, tt.trustProxy, tt.cidrs); got != tt.want {
 				t.Errorf("ClientIPWithTrustedProxies = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientIPFrom(t *testing.T) {
+	if got := ClientIPFrom(context.Background()); got != "" {
+		t.Fatalf("ClientIPFrom(Background) = %q, want empty", got)
+	}
+
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	tests := []struct {
+		name         string
+		trustHeaders bool
+		cidrs        []netip.Prefix
+		mutateCIDRs  bool
+		wantIP       string
+	}{
+		{
+			name:         "trustHeaders false uses remote addr",
+			trustHeaders: false,
+			wantIP:       "10.0.0.5",
+		},
+		{
+			name:         "single hop without cidrs uses rightmost forwarded ip",
+			trustHeaders: true,
+			wantIP:       "10.0.0.2",
+		},
+		{
+			name:         "trusted cidrs strips proxy chain and clones input slice",
+			trustHeaders: true,
+			cidrs:        append([]netip.Prefix(nil), trusted...),
+			mutateCIDRs:  true,
+			wantIP:       "203.0.113.9",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+			srv.SetTrustedProxies(tt.trustHeaders, tt.cidrs)
+			if tt.mutateCIDRs {
+				// 覆盖调用方传入的切片，确认 Server 内部持有独立副本。
+				tt.cidrs[0] = netip.MustParsePrefix("0.0.0.0/0")
+			}
+
+			var handlerIP string
+			handler := srv.Handler(func(mux *http.ServeMux) {
+				mux.HandleFunc("GET /ip", func(w http.ResponseWriter, r *http.Request) {
+					handlerIP = ClientIPFrom(r.Context())
+					w.WriteHeader(http.StatusNoContent)
+				})
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+			req.RemoteAddr = "10.0.0.5:4567"
+			req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.2")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+			}
+			if handlerIP != tt.wantIP {
+				t.Errorf("ClientIPFrom(ctx) = %q, want %q", handlerIP, tt.wantIP)
+			}
+			entry := oneLogEntry(t, &buf)
+			if entry["ip"] != tt.wantIP {
+				t.Errorf("access log ip = %v, want %q", entry["ip"], tt.wantIP)
 			}
 		})
 	}

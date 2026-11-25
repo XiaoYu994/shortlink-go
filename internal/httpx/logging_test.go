@@ -50,8 +50,10 @@ func TestLoggingRecordsStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			logger := slog.New(slog.NewJSONHandler(&buf, nil))
-			handler := logging(logger)(http.HandlerFunc(tt.handle))
+			srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+			handler := srv.Handler(func(mux *http.ServeMux) {
+				mux.HandleFunc("POST /api/v1/links", tt.handle)
+			})
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/links?token=secret", nil)
 			rec := httptest.NewRecorder()
@@ -174,10 +176,15 @@ func TestLoggingProbeLevels(t *testing.T) {
 
 func TestLoggingSkipsMetrics(t *testing.T) {
 	var buf bytes.Buffer
-	handler := logging(slog.New(slog.NewJSONHandler(&buf, nil)))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+	handler := srv.Handler(nil)
 
-	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, metricsPath, nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, metricsPath, nil))
 
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want %d", metricsPath, rec.Code, http.StatusOK)
+	}
 	if buf.Len() != 0 {
 		t.Errorf("metrics request was logged: %s", buf.String())
 	}
@@ -221,10 +228,12 @@ func logStatus(t *testing.T, entry map[string]any) int {
 // TestLoggingRecordsClientCanceled 验证客户端断开、handler 没写响应时，访问日志记 499 而不是 200。
 func TestLoggingRecordsClientCanceled(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	handler := logging(logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		// 真实 handler 在 IsClientGone 为 true 时直接 return，什么都不写。
-	}))
+	srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+	handler := srv.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /r/{code}", func(http.ResponseWriter, *http.Request) {
+			// 真实 handler 在 IsClientGone 为 true 时直接 return，什么都不写。
+		})
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/r/abc", nil)
 	ctx, cancel := context.WithCancel(req.Context())

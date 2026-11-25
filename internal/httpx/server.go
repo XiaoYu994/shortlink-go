@@ -10,6 +10,8 @@ package httpx
 import (
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -22,11 +24,11 @@ import (
 const (
 	healthzPath = "/healthz"
 	readyzPath  = "/readyz"
-	// metricsPath 是抓取路径。logging 和 HTTP 指标跳过它，避免抓取污染业务指标。
+	// metricsPath 是抓取路径。observe（访问日志和 HTTP 指标）跳过它，避免抓取污染业务指标。
 	metricsPath = "/metrics"
 )
 
-// isMetricsRequest 判断请求是否打到抓取端点；logging 和 HTTP 指标都跳过它。
+// isMetricsRequest 判断请求是否打到抓取端点；observe（访问日志和 HTTP 指标）跳过它。
 func isMetricsRequest(r *http.Request) bool {
 	return r.URL.Path == metricsPath
 }
@@ -44,6 +46,8 @@ Server 提供两个进程共用的 HTTP 底座：已包装 requestIDHandler 的 
 type Server struct {
 	logger         *slog.Logger
 	accessLog      accessLogger
+	trustProxy     bool
+	trustedProxies []netip.Prefix
 	requestTimeout time.Duration
 	registry       *prometheus.Registry
 	metrics        *httpMetrics
@@ -86,6 +90,15 @@ func New(logger *slog.Logger, requestTimeout time.Duration, registry *prometheus
 // SetAccessLog 配置 HTTP 访问日志的分级、采样与慢请求门槛。
 func (s *Server) SetAccessLog(opts AccessLogOptions) {
 	s.accessLog = newAccessLogger(s.logger, opts)
+}
+
+/*
+SetTrustedProxies 配置客户端 IP 解析是否信任代理头及多跳可信代理网段（ADR 0024）。
+客户端 IP 在 observe 入口解析一次并写入 context，供访问日志、限流与点击访客哈希共用。
+*/
+func (s *Server) SetTrustedProxies(trustHeaders bool, cidrs []netip.Prefix) {
+	s.trustProxy = trustHeaders
+	s.trustedProxies = slices.Clone(cidrs)
 }
 
 // Logger 返回已经包好上下文提取器的日志器；带请求 context 的日志会自动写上关联字段。
@@ -138,7 +151,7 @@ func (s *Server) registerOperational(mux *http.ServeMux) {
 /*
 withMiddleware 给一组路由套上中间件。
 requestID 在最外层，里面的 observe、recoverer 和 handler 拿到的 context 里已经有编号。
-observe 合并了访问日志和 HTTP 指标（共用同一次 statusWriter 与耗时统计），
+observe 合并了客户端 IP 解析、访问日志和 HTTP 指标（共用同一次 statusWriter、客户端 IP 与耗时统计），
 放在 recoverer 外面：panic 被写成 500 之后，访问日志和指标里的状态码也是 500。
 timeout 在最里层：它只约束 handler，日志和 panic 兜底要完整执行，不能被时限打断。
 mux 必须是这组路由自己的，observe 靠它查路由模式。
@@ -160,7 +173,11 @@ func (s *Server) observe(mux *http.ServeMux) middleware {
 				return
 			}
 
+			ip := ClientIPWithTrustedProxies(r, s.trustProxy, s.trustedProxies)
 			ctx, ev := logx.WithRequestEvent(r.Context())
+			if ip != "" {
+				ctx = withClientIP(ctx, ip)
+			}
 			r = r.WithContext(ctx)
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
@@ -169,7 +186,7 @@ func (s *Server) observe(mux *http.ServeMux) middleware {
 				status := responseStatus(sw, r)
 				route := routePattern(mux, r)
 				s.metrics.observe(route, r.Method, status, dur)
-				s.accessLog.log(r.Context(), r, route, status, sw.bytes, dur, ev.Snapshot())
+				s.accessLog.log(r.Context(), r, route, ip, status, sw.bytes, dur, ev.Snapshot())
 			}()
 			next.ServeHTTP(sw, r)
 		})

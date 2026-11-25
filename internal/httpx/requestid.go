@@ -23,7 +23,7 @@ requestID 为每个请求生成服务端权威编号，写进响应头和 contex
 客户端传来的 X-Request-ID 即使字符合法也不再覆写服务端 request_id 或审计表 request_id，
 而是在通过字符校验后额外挂进 client_request_id 日志字段，保留跨系统排障线索。
 
-这个中间件要放在 logging 外面。它通过 WithContext 交出一个新的 Request，
+这个中间件要放在 observe 外面。它通过 WithContext 交出一个新的 Request，
 外层函数里原来的那个 Request 看不到这次放进去的编号。
 */
 func requestID() middleware {

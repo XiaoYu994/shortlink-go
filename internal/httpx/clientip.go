@@ -1,11 +1,30 @@
 package httpx
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/netip"
 	"strings"
 )
+
+type clientIPContextKey struct{}
+
+func withClientIP(ctx context.Context, ip string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, clientIPContextKey{}, ip)
+}
+
+// ClientIPFrom 从请求 context 取出入口中间件解析好的客户端 IP；未经过 httpx 中间件或无法解析时返回空串。
+func ClientIPFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ip, _ := ctx.Value(clientIPContextKey{}).(string)
+	return ip
+}
 
 /*
 ClientIP 返回客户端地址，拿不到时返回空串。

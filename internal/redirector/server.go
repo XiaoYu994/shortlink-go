@@ -58,13 +58,11 @@ type Options struct {
 
 // Server 持有跳转进程需要的依赖，复用 httpx 提供的运维端点与通用中间件。
 type Server struct {
-	base           *httpx.Server
-	logger         *slog.Logger
-	store          LinkStore
-	clicks         ClickRecorder
-	visitorSalt    []byte
-	trustProxy     bool
-	trustedProxies []netip.Prefix
+	base        *httpx.Server
+	logger      *slog.Logger
+	store       LinkStore
+	clicks      ClickRecorder
+	visitorSalt []byte
 }
 
 // New 组装公开跳转进程，只挂载 /r/{code} 与通用运维端点。
@@ -74,21 +72,18 @@ func New(logger *slog.Logger, store LinkStore, requestTimeout time.Duration, reg
 	if opts.AccessLogSampleRate != nil {
 		sampleRate = *opts.AccessLogSampleRate
 	}
+	base.SetTrustedProxies(opts.TrustProxyHeaders, opts.TrustedProxyCIDRs)
 	base.SetAccessLog(httpx.AccessLogOptions{
-		TrustProxyHeaders: opts.TrustProxyHeaders,
-		TrustedProxyCIDRs: opts.TrustedProxyCIDRs,
-		SampleRate:        sampleRate,
-		SlowThreshold:     opts.AccessLogSlowThreshold,
-		Treat404AsInfo:    true,
+		SampleRate:     sampleRate,
+		SlowThreshold:  opts.AccessLogSlowThreshold,
+		Treat404AsInfo: true,
 	})
 	return &Server{
-		base:           base,
-		logger:         base.Logger(),
-		store:          store,
-		clicks:         opts.Clicks,
-		visitorSalt:    opts.VisitorSalt,
-		trustProxy:     opts.TrustProxyHeaders,
-		trustedProxies: opts.TrustedProxyCIDRs,
+		base:        base,
+		logger:      base.Logger(),
+		store:       store,
+		clicks:      opts.Clicks,
+		visitorSalt: opts.VisitorSalt,
 	}
 }
 

@@ -262,7 +262,7 @@ func (s *Server) ipRateLimit(next http.Handler) http.Handler {
 		if httpx.IsClientGone(s.logger, r) {
 			return
 		}
-		ip := httpx.ClientIPWithTrustedProxies(r, s.trustProxy, s.trustedProxies)
+		ip := httpx.ClientIPFrom(r.Context())
 		retryAfter, allowed := s.ipLimiter.allow(ip)
 		if !allowed {
 			s.ipRateLimited.Inc()

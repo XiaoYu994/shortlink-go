@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
-	"net/netip"
 	"time"
 
 	"shortlink/internal/logx"
@@ -22,8 +21,6 @@ const (
 
 // AccessLogOptions 控制 HTTP 访问日志（Canonical Log Line）的分级、采样与慢请求门槛。
 type AccessLogOptions struct {
-	TrustProxyHeaders bool
-	TrustedProxyCIDRs []netip.Prefix
 	// SampleRate 取值 [0, 1]：仅作用于非慢、正常 INFO 流量；5xx、4xx Warn 与慢请求全量保留。
 	SampleRate    float64
 	SlowThreshold time.Duration
@@ -56,38 +53,11 @@ func newAccessLogger(logger *slog.Logger, opts AccessLogOptions) accessLogger {
 	}
 }
 
-/*
-logging 是供独立中间件测试使用的访问日志包装；Server.withMiddleware 使用统一的 observe。
-请求入口挂载 RequestEvent 收集槽，结束时输出包含业务维度的单条 Canonical Log Line。
-*/
-func logging(logger *slog.Logger) middleware {
-	al := newAccessLogger(logger, AccessLogOptions{
-		SampleRate:    1,
-		SlowThreshold: DefaultSlowRequestThreshold,
-	})
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if isMetricsRequest(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			ctx, ev := logx.WithRequestEvent(r.Context())
-			r = r.WithContext(ctx)
-			start := time.Now()
-			sw := &statusWriter{ResponseWriter: w}
-			defer func() {
-				al.log(r.Context(), r, "", responseStatus(sw, r), sw.bytes, time.Since(start), ev.Snapshot())
-			}()
-			next.ServeHTTP(sw, r)
-		})
-	}
-}
-
 func (a accessLogger) log(
 	ctx context.Context,
 	r *http.Request,
 	route string,
+	ip string,
 	status int,
 	bytesWritten int,
 	dur time.Duration,
@@ -121,7 +91,7 @@ func (a accessLogger) log(
 		slog.Float64("duration_ms", durationMillis(dur)),
 		slog.Int("bytes", bytesWritten),
 	)
-	if ip := ClientIPWithTrustedProxies(r, a.opts.TrustProxyHeaders, a.opts.TrustedProxyCIDRs); ip != "" {
+	if ip != "" {
 		attrs = append(attrs, slog.String("ip", ip))
 	}
 	if snap.TenantID > 0 && logx.TenantIDFrom(ctx) == 0 {

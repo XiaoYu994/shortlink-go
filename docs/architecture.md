@@ -96,7 +96,7 @@ logx           -> 标准库、github.com/lmittmann/tint
 ```txt
 POST /api/v1/links
   -> requestID（始终服务端生成 128 位随机 hex；合法客户端值记入 client_request_id）
-  -> observe（访问日志 + HTTP 指标）
+  -> observe（客户端 IP 解析 + 访问日志 + HTTP 指标）
   -> recoverer
   -> timeout
   -> ipRateLimit：鉴权前按客户端 IP 有界令牌桶限流（防 401 穿透数据库），超限 429
@@ -117,7 +117,7 @@ POST /api/v1/links
 ```txt
 GET /r/{code}
   -> requestID
-  -> observe（访问日志 + HTTP 指标）
+  -> observe（客户端 IP 解析 + 访问日志 + HTTP 指标）
   -> recoverer
   -> timeout
   -> handleRedirect

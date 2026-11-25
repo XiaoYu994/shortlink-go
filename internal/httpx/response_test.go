@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type failingWriter struct {
@@ -71,5 +74,26 @@ func TestWriteJSONClientDisconnectDowngradedToDebug(t *testing.T) {
 				t.Errorf("error log missing cause: %s", debugBuf.String())
 			}
 		})
+	}
+}
+
+func TestIsClientGone(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	if IsClientGone(logger, req) {
+		t.Error("active context reported client gone")
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !IsClientGone(logger, req.WithContext(canceledCtx)) {
+		t.Error("canceled context not reported as client gone")
+	}
+
+	expiredCtx, expireCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expireCancel()
+	if IsClientGone(logger, req.WithContext(expiredCtx)) {
+		t.Error("deadline exceeded reported as client canceled")
 	}
 }

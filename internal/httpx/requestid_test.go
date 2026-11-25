@@ -131,10 +131,12 @@ func TestRequestIDTiesErrorAndAccessLog(t *testing.T) {
 
 func TestRequestIDTiesPanicAndAccessLog(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(logx.WrapContext(slog.NewJSONHandler(&buf, nil)))
-	handler := chain(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		panic("boom")
-	}), requestID(), logging(logger), recoverer(logger))
+	srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+	handler := srv.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /r/abc", func(http.ResponseWriter, *http.Request) {
+			panic("boom")
+		})
+	})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/abc", nil))

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -459,5 +460,50 @@ func TestRedirectorRouteIsolation(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Errorf("redirector GET %s = %d, want 200", path, rec.Code)
 		}
+	}
+}
+
+func TestRedirectVisitorHashAndAccessLogShareClientIP(t *testing.T) {
+	var buf bytes.Buffer
+	store := &stubStore{links: map[string]*link.Link{
+		"AbC123xy": {ID: 42, Code: "AbC123xy", URL: "https://example.com/target"},
+	}}
+	sink := &recordSink{}
+	salt := []byte("test-salt")
+	srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), store, 5*time.Second, newTestRegistry(), Options{
+		Clicks:            sink,
+		VisitorSalt:       salt,
+		TrustProxyHeaders: true,
+		TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/r/AbC123xy", nil)
+	req.RemoteAddr = "10.0.0.5:4567"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.2")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("decode access log: %v\n%s", err, buf.String())
+	}
+	if entry["ip"] != "203.0.113.9" {
+		t.Errorf("access log ip = %v, want 203.0.113.9", entry["ip"])
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.clicks) != 1 {
+		t.Fatalf("clicks = %d, want 1", len(sink.clicks))
+	}
+	got := sink.clicks[0]
+	want := click.NewClick(42, got.At, "", req.UserAgent(), "203.0.113.9", salt)
+	if !bytes.Equal(got.VisitorHash, want.VisitorHash) {
+		t.Errorf("VisitorHash = %x, want %x (for client IP 203.0.113.9)", got.VisitorHash, want.VisitorHash)
 	}
 }

@@ -17,7 +17,7 @@ type errorResponse struct {
 
 // IsClientGone 报告请求是否因客户端断开而被取消，这时响应已经没人接收，handler 直接返回，不要记成服务端错误。
 func IsClientGone(logger *slog.Logger, r *http.Request) bool {
-	if r.Context().Err() == context.Canceled {
+	if errors.Is(r.Context().Err(), context.Canceled) {
 		logger.DebugContext(r.Context(), "request canceled by client", "path", r.URL.Path)
 		return true
 	}

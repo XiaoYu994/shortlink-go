@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestChainNoMiddleware(t *testing.T) {
@@ -49,10 +50,12 @@ func TestChainOuterMiddlewareRunsFirst(t *testing.T) {
 
 func TestChainLoggingSeesRecoveredStatus(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	handler := chain(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		panic("boom")
-	}), logging(logger), recoverer(logger))
+	srv := New(slog.New(slog.NewJSONHandler(&buf, nil)), 5*time.Second, newTestRegistry())
+	handler := srv.Handler(func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /r/abc", func(http.ResponseWriter, *http.Request) {
+			panic("boom")
+		})
+	})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/r/abc", nil))
