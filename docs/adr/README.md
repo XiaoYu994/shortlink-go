@@ -45,6 +45,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0026](0026-timeseries-partitioning-and-retention.md) | 时序统计表与审计日志的按月范围分区及保留期治理 | Accepted |
 | [0027](0027-webhooks-and-async-invitation-email.md) | Webhook 订阅投递与异步成员邀请邮件 | Accepted |
 | [0028](0028-postgres-rls-tenant-isolation.md) | PostgreSQL 行级安全（RLS）作为租户隔离第二道防线 | Accepted |
+| [0029](0029-modular-feature-plugins.md) | 模块化特性插件架构：核心内核与可开关外围能力 | Accepted |
 
 ## 模板
 
