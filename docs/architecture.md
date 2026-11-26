@@ -13,8 +13,8 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`；配置 `OPS_ADDR` 时 `/healthz`、`/readyz`、`/metrics` 隔离到运维端口，未配置时共端口 | PostgreSQL（只读 `pgredirect`）、可选 Redis（只读 `cache.Reader`，`REDIS_URL` 为空时直连 PG）、可选 `ClickRecorder`（`FEATURE_ANALYTICS=false` 时不启动）；不含 `identity`、`risk`、`job`、`audit` |
-| `console` | 始终挂载核心路由：`GET /api/v1/capabilities`、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`；按需挂载认证插件 `AuthMethod`（如 `GET /api/v1/auth/{id}/login`·`callback`，标准 OIDC 与 GitHub 均走统一定位）、会话底座（`POST /api/v1/auth/logout`、`GET /api/v1/me`）与 `console.Module` 业务模块（`analytics` -> `/links/{code}/stats`、`orgs`、`members`、`invitations`、`api_keys`、`audit`、`webhooks`）、可选 `WEB_DIST_DIR` 前端静态页面（`/`）；`CONSOLE_OPS_ADDR` 可独立隔离运维端点 | PostgreSQL、可选 Redis（配置 `REDIS_URL` 时写穿维护缓存并入队 `cache.reconcile`）、可选 OIDC / GitHub OAuth 2.0 登录插件、`WEBHOOK_SECRET_KEY`（可选）、`SMTP_HOST`（可选，决定是否入队邀请邮件）；`key`、`tenant`、`member` 与无 Redis 时的 `link` 命令仅连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)） |
-| `console worker` | 无公开业务路由；配置 `WORKER_ADDR` 时暴露 `/healthz`、`/readyz`、`/metrics` | PostgreSQL（核心维护 `sessions`/`jobs`/`invitations` 清理与 `audit_logs` 分区维护）；按 `WorkerModule` 开关消费 `link.risk_scan`、`webhook.deliver`（+投递清理）、`invitation.email`、`cache.reconcile`、`link.purge_stats`（+统计表分区维护），关闭的特性自动注册 `disabledSkipHandler` 按 `job.Skip` 收尾（[ADR 0029](adr/0029-modular-feature-plugins.md)）；可选 Redis 与 SMTP |
+| `console` | 始终挂载核心路由：`GET /api/v1/capabilities`、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`；按需挂载认证插件 `AuthMethod`（跳转型 `GET /api/v1/auth/{id}/login`·`callback` 与交互型 `POST /api/v1/auth/{id}/send-code`·`verify`，涵盖 OIDC、GitHub 与手机号 OTP）、会话底座（`POST /api/v1/auth/logout`、`GET /api/v1/me`）与 `console.Module` 业务模块（`analytics` -> `/links/{code}/stats`、`orgs`、`members`、`invitations`、`api_keys`、`audit`、`webhooks`）、可选 `WEB_DIST_DIR` 前端静态页面（`/`）；`CONSOLE_OPS_ADDR` 可独立隔离运维端点 | PostgreSQL、可选 Redis（配置 `REDIS_URL` 时写穿维护缓存并入队 `cache.reconcile`）、可选 OIDC / GitHub / Phone OTP（`internal/sms`）登录插件、`WEBHOOK_SECRET_KEY`（可选）、`SMTP_HOST`（可选，决定是否入队邀请邮件）；`key`、`tenant`、`member` 与无 Redis 时的 `link` 命令仅连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)） |
+| `console worker` | 无公开业务路由；配置 `WORKER_ADDR` 时暴露 `/healthz`、`/readyz`、`/metrics` | PostgreSQL（核心维护 `sessions`/`jobs`/`invitations`/`phone_otp_challenges` 清理与 `audit_logs` 分区维护）；在 `cmd/console/feature_*.go` 按垂直特性自包含装配 `WorkerModule` 消费 `link.risk_scan`、`webhook.deliver`（+投递清理）、`invitation.email`、`cache.reconcile`、`link.purge_stats`（+统计表分区维护），关闭的特性自动注册 `disabledSkipHandler` 按 `job.Skip` 收尾（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）；可选 Redis 与 SMTP |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
 
@@ -25,14 +25,14 @@
 ```txt
 shortlink/
 ├── cmd/redirector/      # 公开跳转进程：GET /r/{code}、/healthz、/readyz、/metrics
-├── cmd/console/         # 管理进程：短链增删改查和统计；另有租户、API Key 和成员邀请运维命令
+├── cmd/console/         # 管理进程：按 feature_*.go 垂直特性自包含装配 serve/worker（ADR 0030），并提供租户、API Key、链接与成员运维命令
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
 │   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、BusinessHandler/OpsHandler 独立监听、/healthz、/readyz、/debug/pprof/、/debug/log/level、ClientIP（含可信代理 CIDR 右向剥离）、优雅启停与 JSON/错误写出
 │   ├── logx/            # 结构化日志底座：根 slog 构造（text 接入 lmittmann/tint 自动识别 TTY/NO_COLOR、json 保持标准库、service 标签、LevelVar）、WithGroup 顶层 context 字段注入（含 request_id/client_request_id/tenant_id/job_id/job_kind）、RequestEvent 宽事件收集槽与敏感信息脱敏（零业务依赖）
 │   ├── redirector/      # 公开跳转进程 HTTP 层：GET /r/{code}、点击记录与只读 LinkStore、ClickRecorder 接口
-│   ├── console/         # 管理进程 HTTP 层：核心短链 CRUD、/api/v1/capabilities、两层登录插件底座（AuthMethod + OAuthAuthMethod + SessionIssuer）、console.Module 业务模块（orgs/members/invitations/api_keys/audit/webhooks/analytics）、webhandler、鉴权前有界按 IP 限流与按租户限流；定义各消费方 Store/OAuthClient/Authorizer 接口（ADR 0029）
+│   ├── console/         # 管理进程 HTTP 层：核心短链 CRUD、/api/v1/capabilities、两层登录插件底座（AuthMethod + OAuthAuthMethod + PhoneOTPAuthMethod + SessionIssuer）、console.Module 业务模块（orgs/members/invitations/api_keys/audit/webhooks/analytics）、webhandler、鉴权前有界按 IP 限流与按租户限流；定义各消费方 Store/OAuthClient/Authorizer 接口（ADR 0029、ADR 0030）
 │   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、权限表、MemberScope 与成员规则（零 OAuth/PG 外部库依赖）
 │   │   ├── oauth/       # 外部 OAuth/OIDC 客户端实现（go-oidc、golang.org/x/oauth2）
 │   │   ├── fakegithub/  # 仅测试用：内存版 GitHub OAuth 2.0 与 REST API 提供方（不进入生产二进制）
@@ -47,6 +47,7 @@ shortlink/
 │   ├── risk/            # 异步 URL 风控：基于 safehttp 的客户端/按 host 限速、Redis fail-open 结果缓存、规则检测与 link.risk_scan 处理器
 │   ├── webhook/         # 租户 Webhook 订阅校验、AES-256-GCM（tenant_id AAD）密文加解密、HMAC-SHA256 签名校验与 webhook.deliver 处理器（含自动熔断与指标）
 │   ├── mailer/          # 仅依赖 Go 标准库的邮件发送器（SMTP StartTLS/SMTPS/Plain 与 CR/LF 注入防护）及邀请邮件正文构造（make arch-check 强制零内部依赖）
+│   ├── sms/             # 短信验证码发送通道抽象（Sender）：防 SSRF WebhookSender（经 safehttp）与本地开发 LogSender（make arch-check 强制仅依赖 safehttp/logx，ADR 0030）
 │   ├── memorystore/     # 内存存储，仅测试和本地开发；只实现跳转和创建
 │   ├── pgdb/            # PostgreSQL 公共连接池参数、约束错误判断与测试库 advisory lock 底座（零业务依赖）
 │   ├── pgredirect/      # 跳转数据面专属 PostgreSQL 存储：只读 GetByCode 与 ClickRecorder 批量写出（零管理/身份/风控依赖）
@@ -67,12 +68,12 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/redirector -> redirector, httpx, logx, pgdb, pgredirect, storemetrics(Reader), cache(Reader), click, config（严格零 identity/risk/job/audit/safehttp/webhook/mailer 依赖，make arch-check 校验）
-cmd/console    -> console, httpx, logx, audit, identity(/oauth), job, link, postgres, risk, safehttp, webhook, mailer, storemetrics, cache, config；key/tenant/member 命令只用 postgres，link 命令和 worker 模式还要 cache/risk/job/webhook/mailer
+cmd/redirector -> redirector, httpx, logx, pgdb, pgredirect, storemetrics(Reader), cache(Reader), click, config（严格零 identity/risk/job/audit/safehttp/webhook/mailer/sms 依赖，make arch-check 校验）
+cmd/console    -> console, httpx, logx, audit, identity(/oauth), job, link, postgres, risk, safehttp, webhook, mailer, sms, storemetrics, cache, config；key/tenant/member 命令只用 postgres，serve/worker 按 feature_*.go 垂直装配各特性
 cmd/migrate    -> golang-migrate
 config         -> logx, 标准库（零业务包依赖）
 redirector     -> httpx, link, click, idgen, Prometheus
-console        -> httpx, logx, audit, link, click, idgen, identity, tenant, ratelimit, safehttp, webhook, Prometheus
+console        -> httpx, logx, audit, link, click, idgen, identity, tenant, ratelimit, safehttp, webhook, sms, Prometheus
 httpx          -> logx, 标准库、Prometheus
 identity       -> tenant, logx
 identity/oauth -> identity, logx, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
@@ -83,6 +84,7 @@ safehttp       -> ratelimit, 标准库（严格零业务/存储/cache/config 依
 risk           -> safehttp, cache, audit, job, link, go-redis, Prometheus
 webhook        -> safehttp, audit, job, 标准库、Prometheus
 mailer         -> 标准库（严格零 internal/* 与第三方依赖，make arch-check 校验）
+sms            -> safehttp, logx（严格零 PG/Redis/OAuth 依赖，make arch-check 校验）
 pgdb           -> 标准库、jackc/pgx
 pgredirect     -> pgdb, link, click
 postgres       -> pgdb, pgredirect, audit, link, click, idgen, identity, job, tenant, webhook, mailer
@@ -174,7 +176,7 @@ GET /api/v1/links/{code}/stats
 - `internal/cache`：`GetByCode` 的 Redis 读缓存。值、TTL、singleflight、故障降级和指标见 [ADR 0006](adr/0006-redis-cache-design.md)，冷缓存回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写和回源的两种 `SET` 见 [ADR 0011](adr/0011-link-crud-api.md)，下架后的缓存和复查见 [ADR 0016](adr/0016-link-states-and-takedown.md)。
 - `internal/click`：点击分类和异步批量写出。投递和关停见 [ADR 0007](adr/0007-async-click-recording.md)，日聚合、维度和访客哈希见 [ADR 0012](adr/0012-click-analytics.md)。
 - 进程指标和连接池指标见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。
-- 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs`、`webhooks`、`webhook_deliveries`、按月范围分区表 `link_clicks_daily` / `link_dimension_daily` / `link_visitors_daily` / `audit_logs` 的列与分区定义以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)，审计日志与 fail-closed 元数据约束见 [ADR 0023](adr/0023-audit-logs.md)、[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)，时序按月分区与自动淘汰见 [ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)，Webhook 订阅投递与异步邀请邮件见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)，PostgreSQL 行级安全（RLS）第二道租户隔离防线（`shortlink_tenant` 角色与 `SET LOCAL` 事务上下文）见 [ADR 0028](adr/0028-postgres-rls-tenant-isolation.md)。
+- 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`phone_otp_challenges`、`jobs`、`webhooks`、`webhook_deliveries`、按月范围分区表 `link_clicks_daily` / `link_dimension_daily` / `link_visitors_daily` / `audit_logs` 的列与分区定义以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)，审计日志与 fail-closed 元数据约束见 [ADR 0023](adr/0023-audit-logs.md)、[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)，时序按月分区与自动淘汰见 [ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)，Webhook 订阅投递与异步邀请邮件见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)，PostgreSQL 行级安全（RLS）第二道租户隔离防线（`shortlink_tenant` 角色与 `SET LOCAL` 事务上下文）见 [ADR 0028](adr/0028-postgres-rls-tenant-isolation.md)。
 - 租户配额和限流见 [ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0015](adr/0015-monthly-link-quota.md)。
 - 点击日聚合和统计查询见 [ADR 0012](adr/0012-click-analytics.md)。
 
@@ -202,7 +204,8 @@ GET /api/v1/links/{code}/stats
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
 - `ACCESS_LOG_SAMPLE_RATE` / `ACCESS_LOG_SLOW_THRESHOLD`：可选，仅 redirector 使用。控制正常 `INFO` 跳转访问日志的采样率（`[0, 1]`，默认 `1`）与慢请求门槛（默认 `200ms`，超门槛及 `5xx` 全量保留）
 - `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
-- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URL`：可选，仅 console 使用。三个要么全配、要么全空（只配一部分时启动失败）；可与 OIDC 独立启用或同时启用，两者都为空时不挂载登录、登出、/me、自助建组织、成员、邀请、API Key、审计日志与 Webhook 管理路由（均为仅限会话用户 `ActorUser` 的路由），只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)、[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)、[ADR 0023](adr/0023-audit-logs.md)）
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URL`：可选，仅 console 使用。三个要么全配、要么全空（只配一部分时启动失败）；可与 OIDC、Phone OTP 独立启用或同时启用，全部登录方式都为空时不挂载登录、登出、/me、自助建组织、成员、邀请、API Key、审计日志与 Webhook 管理路由（均为仅限会话用户 `ActorUser` 的路由），只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)、[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)、[ADR 0023](adr/0023-audit-logs.md)）
+- `SMS_PROVIDER` / `SMS_WEBHOOK_URL` / `SMS_WEBHOOK_TOKEN` / `SMS_ALLOWED_PORTS` / `SMS_TIMEOUT` / `SMS_OTP_TTL` / `SMS_OTP_COOLDOWN` / `SMS_OTP_MAX_PER_HOUR` / `SMS_OTP_MAX_ATTEMPTS` / `SMS_SECURE_COOKIES`：可选，仅 `console serve` 使用。`SMS_PROVIDER` 留空关闭手机号 OTP 登录；支持 `webhook`（经 `safehttp` 防 SSRF 投递）与本地开发 `log` 模式（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）；过期挑战清理由 `console worker` 按 `WORKER_OTP_RETENTION`（默认 `24h`）定期执行
 - `WEB_DIST_DIR`：可选，仅 console 使用。指向 `make web-build` 生成的静态目录后在 `/` 提供最小前端控制台 SPA，同时严格隔离 `/api/*`、`/r/*`、`/healthz`、`/readyz`、`/metrics`（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）
 - `PUBLIC_BASE_URL`：可选，仅 console 使用。公开短链跳转基地址（如 `https://s.example.com` 或本地 `http://127.0.0.1:8080`），随 `GET /api/v1/capabilities` 下发给前端拼装可点击短链与二维码；单入口反代时可留空
 - `WORKER_ADDR` / `WORKER_CONCURRENCY` / `WORKER_MAX_PER_TENANT` / `WORKER_POLL_INTERVAL` / `WORKER_LEASE_DURATION` / `WORKER_JOB_TIMEOUT` / `WORKER_REAP_INTERVAL` / `WORKER_CLEANUP_INTERVAL` / `WORKER_SESSION_RETENTION` / `WORKER_DONE_JOB_RETENTION` / `WORKER_DEAD_JOB_RETENTION` / `WORKER_INVITATION_RETENTION` / `WORKER_WEBHOOK_DELIVERY_RETENTION`（默认 `168h`）/ `WORKER_STATS_RETENTION_DAYS`（默认 `90`）/ `WORKER_AUDIT_RETENTION_DAYS`（默认 `180`）/ `RISK_FETCH_TIMEOUT` / `RISK_HOST_RATE_LIMIT` / `RISK_BLOCKED_HOSTS` / `RISK_BLOCKED_KEYWORDS` / `RISK_ALLOWED_PORTS`：仅 `console worker` 使用（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)、[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）

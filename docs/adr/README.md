@@ -46,6 +46,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0027](0027-webhooks-and-async-invitation-email.md) | Webhook 订阅投递与异步成员邀请邮件 | Accepted |
 | [0028](0028-postgres-rls-tenant-isolation.md) | PostgreSQL 行级安全（RLS）作为租户隔离第二道防线 | Accepted |
 | [0029](0029-modular-feature-plugins.md) | 模块化特性插件架构：核心内核与可开关外围能力 | Accepted |
+| [0030](0030-phone-otp-and-vertical-console-assembly.md) | 手机号短信验证码登录（Phone OTP）与 `cmd/console` 垂直特性装配演进 | Accepted |
 
 ## 模板
 

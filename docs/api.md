@@ -16,15 +16,17 @@
 | console | `GET` | `/api/v1/auth/oidc/callback` | OIDC 回调：校验 state、PKCE 与 ID Token 并建立服务端会话（有 `return_to` 时 302 跳转，否则返回 200 JSON；仅配置完整 `OIDC_*` 时注册） |
 | console | `GET` | `/api/v1/auth/github/login` | 发起 GitHub OAuth 2.0 登录（支持可选 `?return_to=/...`，仅配置完整 `GITHUB_*` 时注册） |
 | console | `GET` | `/api/v1/auth/github/callback` | GitHub 回调并建立服务端会话（仅配置完整 `GITHUB_*` 时注册） |
-| console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（配置 OIDC 或 GitHub 时注册） |
-| console | `GET` | `/api/v1/me` | 返回当前登录用户信息与所属组织列表（配置 OIDC 或 GitHub 时注册） |
+| console | `POST` | `/api/v1/auth/phone/send-code` | 发送手机号 6 位短信登录验证码（受 IP 限流、CSRF、单号冷却与小时频控保护；仅配置 `SMS_PROVIDER` 时注册，[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)） |
+| console | `POST` | `/api/v1/auth/phone/verify` | 核验手机号验证码并建立服务端会话（一次性原子消费，写入 `sl_session` Cookie 并返回 200 JSON；仅配置 `SMS_PROVIDER` 时注册） |
+| console | `POST` | `/api/v1/auth/logout` | 吊销当前服务端会话并清除会话 Cookie（启用任意用户登录方式时注册） |
+| console | `GET` | `/api/v1/me` | 返回当前登录用户信息与所属组织列表（启用任意用户登录方式时注册） |
 | console | `POST` | `/api/v1/orgs` | 当前登录用户自助创建组织并成为 `owner`（仅会话 + CSRF，不要求 `X-Org-ID`） |
-| console | `GET` | `/api/v1/members` | 当前组织成员列表（配置 OIDC 或 GitHub 时注册，需要 `members:read`） |
-| console | `PATCH` | `/api/v1/members/{user_id}` | 修改当前组织成员角色（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
-| console | `DELETE` | `/api/v1/members/{user_id}` | 将成员移出当前组织（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
-| console | `GET` | `/api/v1/invitations` | 当前组织邀请列表（配置 OIDC 或 GitHub 时注册，需要 `members:read`） |
-| console | `POST` | `/api/v1/invitations` | 发起当前组织邮箱邀请（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
-| console | `DELETE` | `/api/v1/invitations/{id}` | 撤销待兑现邀请（配置 OIDC 或 GitHub 时注册，需要 `members:write`） |
+| console | `GET` | `/api/v1/members` | 当前组织成员列表（启用任意用户登录方式时注册，需要 `members:read`） |
+| console | `PATCH` | `/api/v1/members/{user_id}` | 修改当前组织成员角色（启用任意用户登录方式时注册，需要 `members:write`） |
+| console | `DELETE` | `/api/v1/members/{user_id}` | 将成员移出当前组织（启用任意用户登录方式时注册，需要 `members:write`） |
+| console | `GET` | `/api/v1/invitations` | 当前组织邀请列表（启用任意用户登录方式时注册，需要 `members:read`） |
+| console | `POST` | `/api/v1/invitations` | 发起当前组织邮箱邀请（启用任意用户登录方式时注册，需要 `members:write`） |
+| console | `DELETE` | `/api/v1/invitations/{id}` | 撤销待兑现邀请（启用任意用户登录方式时注册，需要 `members:write`） |
 | console | `GET` | `/api/v1/api-keys` | 当前组织 API Key 列表（不含明文，需要 `apikeys:read`，仅 `owner`/`admin` 会话） |
 | console | `POST` | `/api/v1/api-keys` | 为当前组织签发 API Key（明文只返回一次，需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
 | console | `DELETE` | `/api/v1/api-keys/{id}` | 吊销当前组织的 API Key（需要 `apikeys:write`，仅 `owner`/`admin` 会话） |
@@ -258,7 +260,13 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 ```json
 {
   "auth_methods": [
-    {"id": "oidc", "kind": "redirect", "login_url": "/api/v1/auth/oidc/login"}
+    {"id": "oidc", "kind": "redirect", "login_url": "/api/v1/auth/oidc/login"},
+    {
+      "id": "phone",
+      "kind": "phone_otp",
+      "send_code_url": "/api/v1/auth/phone/send-code",
+      "verify_code_url": "/api/v1/auth/phone/verify"
+    }
   ],
   "features": {
     "analytics": true,
@@ -339,9 +347,38 @@ Cookie: sl_oidc_flow=...
 
 - 账号隔离：按 `(issuer, subject)` 区分身份，GitHub 与 OIDC 即使主邮箱相同也不会自动合并成同一个平台用户。
 
+## 手机号短信验证码登录（Phone OTP）
+
+配置 `SMS_PROVIDER`（`webhook` 或本地开发用 `log`）后，console 注册以下两个 `POST` 端点（未配置时返回 404），与 OIDC / GitHub 共享同一套会话底座（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）。两个端点均受鉴权前 IP 限流与 `CrossOriginProtection` 保护，响应一律带 `Cache-Control: no-store`。
+
+### 发送验证码
+
+```bash
+curl -i -X POST localhost:8081/api/v1/auth/phone/send-code \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"+8613800138000"}'
+```
+
+- `phone` 必填，必须满足严格 E.164 格式（`^\+[1-9][0-9]{6,14}$`），否则返回 400 `{"error":"invalid phone"}`。
+- 同一手机号在冷却期（默认 60s）或近 1 小时发送次数达到上限（默认 5 次）时返回 `429 Too Many Requests` + `Retry-After`（整数秒），错误码为 `otp cooldown active` 或 `otp rate limit exceeded`。
+- 短信同步发送失败时自动回滚刚写入的挑战行（不消耗冷却期与小时额度），网关错误返回 `502 sms provider unavailable`，超时返回 `504 request timed out`。
+- 成功返回 `200 OK`：`{"expires_in":300,"cooldown_seconds":60}`（绝不返回验证码明文）。
+
+### 核验验证码并建会话
+
+```bash
+curl -i -c cookies.txt -X POST localhost:8081/api/v1/auth/phone/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"+8613800138000","code":"123456"}'
+```
+
+- `phone` 格式非法返回 400 `{"error":"invalid phone"}`；`code` 不是 6 位数字返回 400 `{"error":"invalid verification code"}`。
+- 验证码不存在、已过期、不匹配、已被消费或错误达到上限（默认 5 次自动作废）一律返回 401 `{"error":"invalid verification code"}`；并发重放受数据库行锁串行化，保证一码仅生效一次。
+- 核验通过后以 `(issuer="urn:shortlink:phone", subject="<E.164>", email="", email_verified=false, name="+86****8000")` 签发统一 `sl_session` Cookie 并返回 `200 OK` `loginResponse` JSON（不自动兑现邮箱邀请；用户随后可访问 `/api/v1/me` 或自助 `POST /api/v1/orgs`）。
+
 ## 当前用户与登出
 
-配置完整 `OIDC_*` 或 `GITHUB_*` 之一后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（两者都未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
+启用任意用户登录方式（`OIDC_*`、`GITHUB_*` 或 `SMS_PROVIDER`）后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（全部未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
 
 ### 查询当前用户
 

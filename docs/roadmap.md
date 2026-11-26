@@ -174,3 +174,11 @@
 - [x] 阶段 B：两层登录插件抽象（`AuthMethod` + `SessionIssuer` + `OAuthAuthMethod`，统一 `/api/v1/auth/{id}/login·callback`）、`console.Module` 路由模块化、`GET /api/v1/capabilities` 与前端能力感知改造
 - [x] 阶段 C：`WorkerModule` 后台模块封装、`EnsureStatsPartitions`/`EnsureAuditPartitions` 拆分与已关闭特性任务 `disabledSkipHandler`（`job.Skip`）
 - [x] 阶段 D：数据面与基础设施轻量化（`FEATURE_ANALYTICS=false` 全链路裁剪点击采集/统计查询/点击字段与排序，`REDIS_URL=""` 可选无 Redis 极简单 PG 模式）与端到端极简模式冒烟验证
+
+## 手机号短信验证码登录与垂直特性装配（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)，已完成）
+
+- [x] `internal/identity` 严格 E.164 手机号校验、脱敏展示名与 HMAC-SHA256 验证码加盐摘要；`internal/sms` 防 SSRF Webhook 发送器与开发日志发送器（纳入 `make arch-check`）
+- [x] 迁移 `017` `phone_otp_challenges` 表与 `internal/postgres` 事务级冷却/小时频控、发信失败回滚、5 次错试作废、`FOR UPDATE` 防并发重放与分批清理
+- [x] `internal/console` `PhoneOTPAuthMethod`（`POST /api/v1/auth/phone/send-code`·`verify`）直插 `AuthMethod` + `SessionIssuer` 与 `/api/v1/capabilities` 动态路径下发
+- [x] `cmd/console/` 演进为 `feature_*.go` 垂直特性自包含装配（收口 `serve.go`、`worker.go`、`workermodule.go`）并接入 `phone_otp.cleanup`
+- [x] 前端 `LoginPage` + `PhoneOTPLoginForm` 能力驱动渲染与 `make smoke` 本地 SMS Webhook 桩端到端闭环验证

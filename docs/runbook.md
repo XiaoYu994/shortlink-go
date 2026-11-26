@@ -15,7 +15,7 @@ VISITOR_SALT=dev-only-visitor-salt
 
 `.env` 已被 gitignore，不会提交。
 
-- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`jobs`，以及按月范围分区的 `link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily` 和 `audit_logs`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
+- 在仓库根目录执行过 `make migrate`。它读取 `DATABASE_URL`，把 `migrations/` 里的 up SQL 应用到最新，版本记在 `schema_migrations`。库里会有 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`phone_otp_challenges`、`jobs`、`webhooks`、`webhook_deliveries`，以及按月范围分区的 `link_clicks_daily`、`link_dimension_daily`、`link_visitors_daily` 和 `audit_logs`。`tenant_id` 没有数据库外键。HTTP 进程启动时不迁移。
 
 如果使用项目自带的 `docker-compose.yml`：
 
