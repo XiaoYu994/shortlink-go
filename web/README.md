@@ -102,5 +102,5 @@ web/src/
 
 1. 在 `src/lib/endpoints.ts` 注册后端端点，在 `src/app/routes.ts` 注册路由模式与构造函数；
 2. 新建 `src/features/<domain>/`（参考 `src/features/webhooks/` 或 `src/features/audit/`），放 `api.ts`（query keys + hooks）、页面/弹窗组件与对应测试；
-3. 在 `src/app/router.tsx` 的 `/orgs/:orgId` 下挂载路由，并在 `src/app/ConsoleLayout.tsx` 的 `navItems` 数组里加导航入口；
+3. 在 `src/app/router.tsx` 的 `/orgs/:orgId` 下挂载路由，并在 `src/app/ConsoleLayout.tsx` 的 `navItems` 数组里加导航入口（若是可开关的外围特性，同步在导航与页面内接入 `features/auth/api.ts` 的 `capabilities` hook 控制显隐）；
 4. 运行 `make web-check` 校验格式、类型、Lint、测试与构建。

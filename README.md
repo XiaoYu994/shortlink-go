@@ -64,6 +64,7 @@ make selfcheck    # 格式、vet、单测、lint、build、集成测试、冒烟
 | [docs/architecture.md](docs/architecture.md) | 架构、目录、依赖方向、请求流程 |
 | [docs/api.md](docs/api.md) | HTTP API 契约和示例 |
 | [docs/runbook.md](docs/runbook.md) | 本地启动、数据库、排错 |
+| [docs/conventions.md](docs/conventions.md) | Go 工程规范与编码约定 |
 | [docs/roadmap.md](docs/roadmap.md) | 学习路线和进度 |
 | [docs/adr/README.md](docs/adr/README.md) | 架构决策记录 |
 | [docs/postmortems/README.md](docs/postmortems/README.md) | 问题复盘与调优记录 |
@@ -71,5 +72,5 @@ make selfcheck    # 格式、vet、单测、lint、build、集成测试、冒烟
 
 ## 代码约定
 
-- 全局协作方式、Go 约定与提交规范：见 [AGENTS.md](AGENTS.md)。
-- 前端控制台（`web/`）开发规范：见 [web/AGENTS.md](web/AGENTS.md)。
+- AI 协作边界、验证命令与反模式红线：见 [AGENTS.md](AGENTS.md)（存储层见 [internal/postgres/AGENTS.md](internal/postgres/AGENTS.md)，前端见 [web/AGENTS.md](web/AGENTS.md)）。
+- 人类向 Go 工程规范与学习沉淀：见 [docs/conventions.md](docs/conventions.md)。
