@@ -157,9 +157,6 @@ WHERE (link_id, day, visitor_hash) IN (
 )`
 )
 
-// ErrAnalyticsDisabled 表示当前 Store 关闭了点击统计（WithAnalytics(false)），拒绝依赖统计表的排序查询。
-var ErrAnalyticsDisabled = errors.New("analytics is disabled")
-
 // rowScanner 让 QueryRow 和 Rows 共用一段扫描逻辑。
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -311,7 +308,7 @@ func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLi
 	}
 
 	if !s.analyticsEnabled && (opts.Sort == link.SortClicks || opts.Sort == link.SortClicksToday) {
-		return nil, fmt.Errorf("list links: %w", ErrAnalyticsDisabled)
+		return nil, fmt.Errorf("list links: %w", link.ErrAnalyticsDisabled)
 	}
 	if opts.Sort == link.SortClicksToday {
 		return s.listByClicksToday(ctx, opts)

@@ -15,8 +15,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { getErrorMessage } from '@/lib/api-client';
 import { ENDPOINTS } from '@/lib/endpoints';
 import { useDocumentTitle } from '@/lib/use-document-title';
-import { useCapabilities, useMe } from './api';
+import { type AuthMethodDescriptor, useCapabilities, useMe } from './api';
 import { sanitizeReturnTo } from './return-to';
+
+function isRedirectMethod(
+  m: AuthMethodDescriptor,
+): m is AuthMethodDescriptor & { login_url: string } {
+  return m.kind === 'redirect' && Boolean(m.login_url);
+}
 
 const REDIRECT_METHOD_META: Record<
   string,
@@ -39,10 +45,10 @@ export function LoginPage() {
   }
 
   const capabilities = capabilitiesQuery.data;
-  const redirectMethods = (capabilities?.auth_methods ?? []).filter(
-    (m): m is typeof m & { login_url: string } => m.kind === 'redirect' && Boolean(m.login_url),
-  );
-  const hasAnyMethod = redirectMethods.length > 0;
+  const authMethods = capabilities?.auth_methods ?? [];
+  const redirectMethods = authMethods.filter(isRedirectMethod);
+  const unsupportedMethods = authMethods.filter((m) => !isRedirectMethod(m));
+  const hasAnyMethod = authMethods.length > 0;
 
   return (
     <div className="grid min-h-screen bg-white lg:grid-cols-2">
@@ -182,9 +188,9 @@ export function LoginPage() {
               {capabilities && !hasAnyMethod && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-900">
                   当前 <code className="font-mono text-xs">console</code>{' '}
-                  未启用任何浏览器登录方式。请在服务端配置{' '}
+                  未启用任何用户登录方式。请在服务端配置登录提供方（如{' '}
                   <code className="font-mono text-xs">OIDC_*</code> 或{' '}
-                  <code className="font-mono text-xs">GITHUB_*</code> 后重启。
+                  <code className="font-mono text-xs">GITHUB_*</code>）后重启。
                 </div>
               )}
 
@@ -210,6 +216,23 @@ export function LoginPage() {
                   </a>
                 );
               })}
+
+              {unsupportedMethods.length > 0 &&
+                (redirectMethods.length === 0 ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-900">
+                    服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互：
+                    <code className="ml-1 font-mono text-xs">
+                      {unsupportedMethods.map((m) => m.id).join('、')}
+                    </code>
+                  </div>
+                ) : (
+                  <p className="pt-1 text-xs text-zinc-500">
+                    另有服务端已启用但当前页面暂未支持的登录方式：
+                    <code className="ml-1 font-mono text-[11px] text-zinc-600">
+                      {unsupportedMethods.map((m) => m.id).join('、')}
+                    </code>
+                  </p>
+                ))}
             </CardContent>
           </Card>
 

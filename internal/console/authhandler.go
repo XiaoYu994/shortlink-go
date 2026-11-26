@@ -146,10 +146,15 @@ func (h *authHandler) IssueSession(w http.ResponseWriter, r *http.Request, id id
 	if httpx.IsClientGone(h.logger, r) {
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
 	if h.sessions == nil {
 		h.logger.ErrorContext(r.Context(), "issue session", "err", errors.New("session creator is nil"))
 		httpx.WriteError(h.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	returnTo, ok := ValidateReturnTo(opts.ReturnTo)
+	if !ok {
+		httpx.WriteError(h.logger, r.Context(), w, http.StatusBadRequest, "invalid return_to")
 		return
 	}
 
@@ -161,8 +166,8 @@ func (h *authHandler) IssueSession(w http.ResponseWriter, r *http.Request, id id
 	}
 
 	setSessionCookie(w, issued, opts.SecureCookie)
-	if opts.ReturnTo != "" {
-		http.Redirect(w, r, opts.ReturnTo, http.StatusFound)
+	if returnTo != "" {
+		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
 	httpx.WriteJSON(h.logger, r.Context(), w, http.StatusOK, loginResponse{

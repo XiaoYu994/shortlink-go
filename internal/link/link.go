@@ -57,6 +57,12 @@ ErrURLChanged 表示按期望 URL 条件封禁时，链接仍在但目标 URL �
 var ErrURLChanged = errors.New("link url changed")
 
 /*
+ErrAnalyticsDisabled 表示当前关闭了点击统计（FEATURE_ANALYTICS=false），
+拒绝依赖统计表的查询或排序（ADR 0029）。
+*/
+var ErrAnalyticsDisabled = errors.New("analytics is disabled")
+
+/*
 BanReason 是封禁原因的封闭类别集合，不是自由文本。
 它会原样出现在租户的 API 响应里，前端按类别给文案；加类别要同时改这里、
 数据库 CHECK 和迁移。

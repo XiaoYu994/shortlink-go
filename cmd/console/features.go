@@ -23,17 +23,12 @@ type StoreFeatures struct {
 	Email     bool // SMTP_HOST 非空
 }
 
-func (f StoreFeatures) enabledDisabled() (enabled, disabled []string) {
-	items := []struct {
-		name string
-		on   bool
-	}{
-		{"cache", f.Cache},
-		{"analytics", f.Analytics},
-		{"risk_scan", f.RiskScan},
-		{"webhooks", f.Webhooks},
-		{"email", f.Email},
-	}
+type featureStatus struct {
+	name string
+	on   bool
+}
+
+func partitionFeatures(items []featureStatus) (enabled, disabled []string) {
 	for _, item := range items {
 		if item.on {
 			enabled = append(enabled, item.name)
@@ -42,6 +37,35 @@ func (f StoreFeatures) enabledDisabled() (enabled, disabled []string) {
 		}
 	}
 	return enabled, disabled
+}
+
+func (f StoreFeatures) featureStatuses(webhooksAPIEnabled bool) []featureStatus {
+	items := []featureStatus{
+		{"cache", f.Cache},
+		{"analytics", f.Analytics},
+		{"risk_scan", f.RiskScan},
+	}
+	if f.Webhooks && !webhooksAPIEnabled {
+		items = append(items,
+			featureStatus{"webhooks_fanout", true},
+			featureStatus{"webhooks_api", false},
+		)
+	} else {
+		items = append(items, featureStatus{"webhooks", f.Webhooks})
+	}
+	return append(items, featureStatus{"email", f.Email})
+}
+
+func (f StoreFeatures) enabledDisabled() (enabled, disabled []string) {
+	return partitionFeatures(f.featureStatuses(true))
+}
+
+/*
+consoleEnabledDisabled 生成 console serve 启动日志中的特性状态列表：
+当配置了 WEBHOOK_SECRET_KEY 但未启用任何用户登录方式时，明确区分事件扇出启用而管理 API 关闭。
+*/
+func (f StoreFeatures) consoleEnabledDisabled(webhooksAPIEnabled, webEnabled bool) (enabled, disabled []string) {
+	return partitionFeatures(append(f.featureStatuses(webhooksAPIEnabled), featureStatus{"web", webEnabled}))
 }
 
 /*

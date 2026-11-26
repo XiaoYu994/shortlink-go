@@ -82,6 +82,16 @@ groups:
           summary: 有后台任务进入 dead 终态
           description: 任务类型 {{ $labels.kind }} 最近 5 分钟有任务重试耗尽或永久失败进入 dead，请排查 last_error。
 
+      - alert: ShortlinkJobsFeatureDisabledSkipped
+        # 窗口（3m）短于持续时间（5m），过滤计划内关停或滚动发布期的单次残留跳过，仅对跨进程配置漂移导致的持续跳过告警。
+        expr: sum by (kind, feature) (increase(shortlink_jobs_feature_disabled_skipped_total[3m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 后台任务因特性关闭持续被跳过
+          description: console worker 持续跳过任务类型 {{ $labels.kind }}（feature={{ $labels.feature }}）；若非计划内关停或滚动发布收尾窗口，请排查 console serve 与 worker 的环境变量是否一致。
+
       - alert: ShortlinkWebhookHighFailureRate
         expr: |
           sum(rate(shortlink_webhook_deliveries_total{result="failed"}[5m]))

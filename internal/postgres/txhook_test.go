@@ -314,8 +314,8 @@ func TestStoreWithAnalyticsDisabled(t *testing.T) {
 	}
 
 	for _, s := range []link.Sort{link.SortClicks, link.SortClicksToday} {
-		if _, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 10, Sort: s}); !errors.Is(err, ErrAnalyticsDisabled) {
-			t.Errorf("List(%s) err = %v, want ErrAnalyticsDisabled", s, err)
+		if _, err := store.List(ctx, link.ListOptions{TenantID: tenantID, Limit: 10, Sort: s}); !errors.Is(err, link.ErrAnalyticsDisabled) {
+			t.Errorf("List(%s) err = %v, want link.ErrAnalyticsDisabled", s, err)
 		}
 	}
 

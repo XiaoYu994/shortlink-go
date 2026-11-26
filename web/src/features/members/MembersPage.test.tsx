@@ -115,4 +115,64 @@ describe('MembersPage', () => {
     expect(screen.getByRole('button', { name: '复制登录入口' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '撤销邀请' })).toBeInTheDocument();
   });
+
+  it.each([
+    {
+      label: 'automatic email notice when features.email is true',
+      emailEnabled: true,
+      invitee: 'dave@example.com',
+      wantShown: /系统将自动向/,
+      wantHidden: /服务端未开启自动邀请邮件/,
+    },
+    {
+      label: 'manual copy notice when features.email is false',
+      emailEnabled: false,
+      invitee: 'erin@example.com',
+      wantShown: /服务端未开启自动邀请邮件/,
+      wantHidden: /系统将自动向/,
+    },
+  ])(
+    'shows $label after creating invitation',
+    async ({ emailEnabled, invitee, wantShown, wantHidden }) => {
+      const user = userEvent.setup();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url === ENDPOINTS.capabilities) {
+          return jsonResponse({
+            auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+            features: { analytics: true, webhooks: true, risk_scan: true, email: emailEnabled },
+          });
+        }
+        if (url === ENDPOINTS.members.list) {
+          return jsonResponse({ items: [] });
+        }
+        if (url === ENDPOINTS.invitations.listCreate && init?.method === 'POST') {
+          return jsonResponse(
+            {
+              id: 21,
+              email: invitee,
+              role: 'member',
+              status: 'pending',
+              created_at: '2026-11-26T09:00:00Z',
+            },
+            201,
+          );
+        }
+        if (url === ENDPOINTS.invitations.listCreate) {
+          return jsonResponse({ items: [] });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+
+      renderWithOrg(<MembersPage />, { orgId: 4, role: 'owner' });
+
+      await user.click(await screen.findByRole('button', { name: '邀请成员' }));
+      await user.type(await screen.findByLabelText('受邀人邮箱'), invitee);
+      await user.click(screen.getByRole('button', { name: '发起邀请' }));
+
+      expect(await screen.findByText('邀请已登记')).toBeInTheDocument();
+      expect(screen.getByText(wantShown)).toBeInTheDocument();
+      expect(screen.queryByText(wantHidden)).not.toBeInTheDocument();
+    },
+  );
 });

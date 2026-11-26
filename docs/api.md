@@ -569,6 +569,7 @@ curl -i localhost:8081/metrics   # console
 - `shortlink_clicks_written_total`（交给存储的点击数，`result` 为 `success` 或 `error`。启动后两个序列都是 0。写失败时 dropped 仍是 0，要看 `error`；只有 redirector 有）
 - `shortlink_clicks_recorder_stopped`（`ClickRecorder` 后台写入协程因 panic 停机时置 `1`，触发紧急告警）
 - `shortlink_jobs_processed_total`（后台任务完成计数，`kind` 包括 `link.risk_scan`、`cache.reconcile`、`link.purge_stats`、`webhook.deliver`、`invitation.email`，`result` 为 `done`、`skipped`、`retry`、`dead`；仅 `console worker` 配置 `WORKER_ADDR` 时暴露）
+- `shortlink_jobs_feature_disabled_skipped_total`（因对应内置特性关闭被兜底处理器跳过的后台任务计数，带 `kind` 与 `feature` 标签，用于发现跨进程特性配置漂移；仅 `console worker` 暴露）
 - `shortlink_job_duration_seconds`（后台任务执行耗时直方图，`kind`；仅 `console worker`）
 - `shortlink_jobs_in_flight`（当前执行中的后台任务数，`kind`；仅 `console worker`）
 - `shortlink_jobs_reaped_total`（超时租约回收次数，`kind`；仅 `console worker`）

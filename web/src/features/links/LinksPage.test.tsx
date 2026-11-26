@@ -360,4 +360,39 @@ describe('LinksPage', () => {
     expect(await screen.findByRole('menuitem', { name: /查看二维码/ })).toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: /查看点击统计/ })).not.toBeInTheDocument();
   });
+
+  it('conservatively hides click controls while capabilities fails or is pending', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse({ error: 'internal error' }, 500);
+      }
+      return jsonResponse({
+        items: [
+          {
+            code: 'Pend1234',
+            url: 'https://example.com/pending',
+            status: 'active',
+            created_at: '2026-11-23T08:00:00Z',
+            clicks: 5,
+            clicks_today: 1,
+          },
+        ],
+      });
+    });
+
+    renderWithOrg(<LinksPage />, { orgId: 1, role: 'owner' });
+
+    expect(await screen.findByText('/r/Pend1234')).toBeInTheDocument();
+    expect(screen.queryByText('累计点击')).not.toBeInTheDocument();
+    expect(screen.queryByText('次点击')).not.toBeInTheDocument();
+    const sortSelect = screen.getByLabelText('排序方式');
+    expect(sortSelect.querySelector('option[value="clicks"]')).toBeNull();
+    expect(sortSelect.querySelector('option[value="clicks_today"]')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '操作 Pend1234' }));
+    expect(await screen.findByRole('menuitem', { name: /查看二维码/ })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /查看点击统计/ })).not.toBeInTheDocument();
+  });
 });

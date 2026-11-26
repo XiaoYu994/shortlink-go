@@ -148,7 +148,7 @@ func (m *OAuthAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request, lo
 		return
 	}
 
-	returnTo, ok := validateReturnTo(r.URL.Query().Get("return_to"))
+	returnTo, ok := ValidateReturnTo(r.URL.Query().Get("return_to"))
 	if !ok {
 		httpx.WriteError(logger, r.Context(), w, http.StatusBadRequest, "invalid return_to")
 		return
@@ -367,17 +367,17 @@ func decodeFlowCookie(sealed string, spec flowCookieSpec) (authFlowCookie, bool)
 	if !spec.requireNonce && flow.Nonce != "" {
 		return authFlowCookie{}, false
 	}
-	if _, ok := validateReturnTo(flow.ReturnTo); !ok {
+	if _, ok := ValidateReturnTo(flow.ReturnTo); !ok {
 		return authFlowCookie{}, false
 	}
 	return flow, true
 }
 
 /*
-validateReturnTo 只允许空串或站内前端相对路径，防止开放重定向攻击（ADR 0021）。
+ValidateReturnTo 只允许空串或站内前端相对路径，防止开放重定向攻击（ADR 0021）。
 拒绝协议相对路径（//evil.com）、反斜杠、控制字符，以及指向 /api/ 或 /r/ 的路径。
 */
-func validateReturnTo(raw string) (string, bool) {
+func ValidateReturnTo(raw string) (string, bool) {
 	if raw == "" {
 		return "", true
 	}

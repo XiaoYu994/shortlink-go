@@ -71,11 +71,12 @@ export function postLogout(): Promise<void> {
   });
 }
 
-export function useCapabilities() {
+export function useCapabilities(enabled = true) {
   return useQuery({
     queryKey: authKeys.capabilities,
     queryFn: ({ signal }) => fetchCapabilities(signal),
     staleTime: 5 * 60_000,
+    enabled,
   });
 }
 
@@ -91,10 +92,16 @@ export function useWebhooksEnabled(): boolean {
   return Boolean(data?.features.webhooks);
 }
 
-// 报告后端是否启用了点击统计（FEATURE_ANALYTICS，默认 true）。
+// 报告后端是否启用了点击统计（FEATURE_ANALYTICS）；加载中或能力接口异常时保守返回 false，避免统计关闭时首屏闪烁。
 export function useAnalyticsEnabled(): boolean {
   const { data } = useCapabilities();
-  return data ? data.features.analytics : true;
+  return Boolean(data?.features.analytics);
+}
+
+// 报告后端是否启用了异步邀请邮件（SMTP_HOST）；加载中或能力接口异常时返回 undefined，供调用方回退中性提示。
+export function useEmailEnabled(enabled = true): boolean | undefined {
+  const { data } = useCapabilities(enabled);
+  return data?.features.email;
 }
 
 export function useMe() {

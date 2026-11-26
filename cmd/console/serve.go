@@ -108,6 +108,7 @@ func runServe(cliOpts serveCLIOptions) error {
 			console.NewAuditModule(pgStore),
 		)
 	}
+	webhooksAPIEnabled := false
 	if cfg.WebhookSecretKey != "" && sessions != nil {
 		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
 		if err != nil {
@@ -121,11 +122,15 @@ func runServe(cliOpts serveCLIOptions) error {
 			AllowedPorts:     cfg.WebhookAllowedPorts,
 			AllowedHostPorts: cliOpts.allowTestHosts,
 		}))
+		webhooksAPIEnabled = true
 		logger.Info("webhooks api enabled")
 	} else if cfg.WebhookSecretKey == "" {
 		logger.Info("webhooks api disabled: WEBHOOK_SECRET_KEY is not set")
 	} else {
 		logger.Info("webhooks api disabled: at least one user auth method is required")
+	}
+	if err := console.ValidateModules(modules); err != nil {
+		return fmt.Errorf("validate modules: %w", err)
 	}
 	if cfg.WebDistDir != "" {
 		info, err := os.Stat(cfg.WebDistDir)
@@ -135,12 +140,7 @@ func runServe(cliOpts serveCLIOptions) error {
 		logger.Info("serving web console static files", "dir", cfg.WebDistDir)
 	}
 
-	enabledFeatures, disabledFeatures := storeFeatures.enabledDisabled()
-	if cfg.WebDistDir != "" {
-		enabledFeatures = append(enabledFeatures, "web")
-	} else {
-		disabledFeatures = append(disabledFeatures, "web")
-	}
+	enabledFeatures, disabledFeatures := storeFeatures.consoleEnabledDisabled(webhooksAPIEnabled, cfg.WebDistDir != "")
 	enabledAuthMethods := make([]string, 0, len(authMethods))
 	for _, m := range authMethods {
 		enabledAuthMethods = append(enabledAuthMethods, m.Descriptor().ID)

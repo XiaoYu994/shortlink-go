@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { jsonResponse } from '@/test/test-utils';
+import type { AuthMethodDescriptor } from './api';
 import { LoginPage } from './LoginPage';
 import { sanitizeReturnTo } from './return-to';
 
@@ -31,7 +32,7 @@ describe('LoginPage', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders redirect auth methods dynamically from /api/v1/capabilities', async () => {
+  function renderLoginPage(authMethods: AuthMethodDescriptor[], initialEntry = '/login') {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
       if (url === '/api/v1/me') {
@@ -39,10 +40,7 @@ describe('LoginPage', () => {
       }
       if (url === '/api/v1/capabilities') {
         return jsonResponse({
-          auth_methods: [
-            { id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' },
-            { id: 'github', kind: 'redirect', login_url: '/api/v1/auth/github/login' },
-          ],
+          auth_methods: authMethods,
           features: { analytics: true, webhooks: false, risk_scan: true, email: false },
         });
       }
@@ -54,10 +52,20 @@ describe('LoginPage', () => {
     });
     render(
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={['/login?return_to=/orgs/1/links']}>
+        <MemoryRouter initialEntries={[initialEntry]}>
           <LoginPage />
         </MemoryRouter>
       </QueryClientProvider>,
+    );
+  }
+
+  it('renders redirect auth methods dynamically from /api/v1/capabilities', async () => {
+    renderLoginPage(
+      [
+        { id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' },
+        { id: 'github', kind: 'redirect', login_url: '/api/v1/auth/github/login' },
+      ],
+      '/login?return_to=/orgs/1/links',
     );
 
     const oidcLink = await screen.findByRole('link', { name: /使用 OIDC 单点登录/ });
@@ -70,5 +78,29 @@ describe('LoginPage', () => {
       'href',
       '/api/v1/auth/github/login?return_to=%2Forgs%2F1%2Flinks',
     );
+  });
+
+  it('shows unsupported notice instead of empty warning for non-redirect auth methods', async () => {
+    renderLoginPage([{ id: 'phone', kind: 'phone_otp' }]);
+
+    expect(
+      await screen.findByText(/服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互/),
+    ).toBeInTheDocument();
+    expect(screen.getByText('phone')).toBeInTheDocument();
+    expect(screen.queryByText(/未启用任何用户登录方式/)).not.toBeInTheDocument();
+  });
+
+  it('shows muted footnote below login buttons when mixed with unsupported auth methods', async () => {
+    renderLoginPage([
+      { id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' },
+      { id: 'phone', kind: 'phone_otp' },
+    ]);
+
+    expect(await screen.findByRole('link', { name: /使用 OIDC 单点登录/ })).toBeInTheDocument();
+    expect(screen.getByText(/另有服务端已启用但当前页面暂未支持的登录方式/)).toBeInTheDocument();
+    expect(screen.getByText('phone')).toBeInTheDocument();
+    expect(
+      screen.queryByText(/服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互/),
+    ).not.toBeInTheDocument();
   });
 });

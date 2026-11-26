@@ -3,8 +3,10 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -356,5 +358,92 @@ func TestOAuthAuthMethodIsolatesFlowCookieByID(t *testing.T) {
 	}
 	if sharedClient.exchangeCalls != 0 || sessions.calls != 0 {
 		t.Fatalf("unexpected side effects on cross-method cookie replay: exchange=%d sessions=%d", sharedClient.exchangeCalls, sessions.calls)
+	}
+}
+
+type stubReturnToAuthMethod struct{}
+
+func (m *stubReturnToAuthMethod) Descriptor() AuthMethodDescriptor {
+	return AuthMethodDescriptor{ID: "return-to-probe", Kind: AuthFlowPhoneOTP}
+}
+
+func (m *stubReturnToAuthMethod) SecureCookies() bool { return false }
+
+func (m *stubReturnToAuthMethod) RegisterRoutes(tk AuthToolkit) {
+	tk.Mux.Handle("POST /api/v1/auth/return-to-probe/verify", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tk.Issuer.IssueSession(w, r, identity.ExternalIdentity{
+			Issuer:        "urn:shortlink:probe",
+			Subject:       "u1",
+			EmailVerified: false,
+		}, IssueSessionOptions{
+			ReturnTo: r.URL.Query().Get("return_to"),
+		})
+	}))
+}
+
+func TestIssueSessionRejectsInvalidReturnTo(t *testing.T) {
+	sessions := &stubSessionStore{}
+	srv := New(selfServiceLogger(), &stubStore{}, 2*time.Second, prometheus.NewRegistry(), Options{
+		Authorizer:  identity.NewMapAuthorizer(),
+		Sessions:    sessions,
+		AuthMethods: []AuthMethod{&stubReturnToAuthMethod{}},
+	})
+	h := srv.Routes()
+
+	for _, bad := range []string{"//evil.com", "https://evil.com", "/api/v1/me", "/r/AbC123xy"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/return-to-probe/verify?return_to="+url.QueryEscape(bad), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("return_to=%q status = %d, want 400 (body=%s)", bad, rec.Code, rec.Body.String())
+		}
+		if findCookie(rec.Result().Cookies(), SessionCookieName) != nil {
+			t.Errorf("return_to=%q issued sl_session cookie on 400", bad)
+		}
+	}
+	if sessions.calls != 0 {
+		t.Fatalf("sessions.calls = %d, want 0 when return_to is invalid", sessions.calls)
+	}
+}
+
+type stubNamedModule struct {
+	name string
+}
+
+func (m stubNamedModule) Name() string                  { return m.name }
+func (m stubNamedModule) RegisterRoutes(RouteRegistrar) {}
+
+func TestValidateModules(t *testing.T) {
+	if err := ValidateModules([]Module{nil, stubNamedModule{name: "alpha"}, stubNamedModule{name: "beta"}}); err != nil {
+		t.Fatalf("ValidateModules(valid) = %v, want nil", err)
+	}
+	if err := ValidateModules([]Module{stubNamedModule{name: ""}}); err == nil {
+		t.Fatal("ValidateModules(empty name) = nil, want error")
+	}
+	if err := ValidateModules([]Module{stubNamedModule{name: "alpha"}, stubNamedModule{name: "alpha"}}); err == nil {
+		t.Fatal("ValidateModules(duplicate) = nil, want error")
+	}
+}
+
+func TestHandleListMapsErrAnalyticsDisabledToBadRequest(t *testing.T) {
+	admin := &stubAdmin{
+		listFn: func(context.Context, link.ListOptions) ([]link.AdminLink, error) {
+			return nil, fmt.Errorf("list links: %w", link.ErrAnalyticsDisabled)
+		},
+	}
+	srv := newServer(serverDeps{
+		logger:         selfServiceLogger(),
+		store:          &stubStore{},
+		admin:          admin,
+		requestTimeout: 5 * time.Second,
+		registry:       newTestRegistry(),
+		keys:           allowKey{},
+		authorizer:     identity.NewMapAuthorizer(),
+		modules:        []Module{NewStatsModule(admin)},
+	})
+
+	rec := doAdminRequest(t, srv.Routes(), http.MethodGet, "/api/v1/links?sort=clicks", "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), link.ErrAnalyticsDisabled.Error()) {
+		t.Fatalf("GET /links?sort=clicks = %d %s, want 400 %q", rec.Code, rec.Body.String(), link.ErrAnalyticsDisabled.Error())
 	}
 }

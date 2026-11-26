@@ -65,3 +65,51 @@ func TestLoadLinkCLIStoreFeatures(t *testing.T) {
 		t.Fatal("expected error for invalid WEBHOOK_SECRET_KEY")
 	}
 }
+
+func TestConsoleEnabledDisabled(t *testing.T) {
+	tests := []struct {
+		name               string
+		features           StoreFeatures
+		webhooksAPIEnabled bool
+		webEnabled         bool
+		wantEnabled        []string
+		wantDisabled       []string
+	}{
+		{
+			name:               "webhooks api and web enabled",
+			features:           StoreFeatures{Cache: true, Analytics: true, RiskScan: true, Webhooks: true, Email: true},
+			webhooksAPIEnabled: true,
+			webEnabled:         true,
+			wantEnabled:        []string{"cache", "analytics", "risk_scan", "webhooks", "email", "web"},
+			wantDisabled:       nil,
+		},
+		{
+			name:               "webhooks fanout only without auth methods",
+			features:           StoreFeatures{Webhooks: true},
+			webhooksAPIEnabled: false,
+			webEnabled:         false,
+			wantEnabled:        []string{"webhooks_fanout"},
+			wantDisabled:       []string{"cache", "analytics", "risk_scan", "webhooks_api", "email", "web"},
+		},
+		{
+			name:               "webhooks disabled",
+			features:           StoreFeatures{Analytics: true},
+			webhooksAPIEnabled: false,
+			webEnabled:         true,
+			wantEnabled:        []string{"analytics", "web"},
+			wantDisabled:       []string{"cache", "risk_scan", "webhooks", "email"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enabled, disabled := tt.features.consoleEnabledDisabled(tt.webhooksAPIEnabled, tt.webEnabled)
+			if !slices.Equal(enabled, tt.wantEnabled) {
+				t.Errorf("enabled = %v, want %v", enabled, tt.wantEnabled)
+			}
+			if !slices.Equal(disabled, tt.wantDisabled) {
+				t.Errorf("disabled = %v, want %v", disabled, tt.wantDisabled)
+			}
+		})
+	}
+}

@@ -177,21 +177,9 @@ func newServer(d serverDeps) *Server {
 		auth = newAuthHandler(logger, d.authMethods, d.sessionMgr, csrf, d.sessionTTL)
 	}
 
-	modules := make([]Module, 0, len(d.modules))
-	moduleSet := make(map[string]struct{}, len(d.modules))
-	for _, m := range d.modules {
-		if m == nil {
-			continue
-		}
-		name := m.Name()
-		if name == "" {
-			panic("console: module name must not be empty")
-		}
-		if _, dup := moduleSet[name]; dup {
-			panic(fmt.Sprintf("console: duplicate module %q", name))
-		}
-		moduleSet[name] = struct{}{}
-		modules = append(modules, m)
+	modules, moduleSet, err := indexModules(d.modules)
+	if err != nil {
+		panic(fmt.Sprintf("console: %v", err))
 	}
 
 	var web http.Handler

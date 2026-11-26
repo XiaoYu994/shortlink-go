@@ -1,6 +1,7 @@
 package console
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -49,6 +50,10 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	// 多要一条用来判断有没有下一页，不额外查询总数。
 	items, err := s.admin.List(r.Context(), opts)
 	if err != nil {
+		if errors.Is(err, link.ErrAnalyticsDisabled) {
+			httpx.WriteError(s.logger, r.Context(), w, http.StatusBadRequest, link.ErrAnalyticsDisabled.Error())
+			return
+		}
 		httpx.HandleStoreError(s.logger, w, r, "list links", err)
 		return
 	}
@@ -87,7 +92,7 @@ func parseListOptions(r *http.Request, tenantID int64, analyticsEnabled bool) (l
 			sort = link.SortID
 		case link.SortClicks, link.SortClicksToday:
 			if !analyticsEnabled {
-				return link.ListOptions{}, badRequestError("analytics is disabled")
+				return link.ListOptions{}, badRequestError(link.ErrAnalyticsDisabled.Error())
 			}
 			sort = link.Sort(raw)
 		default:

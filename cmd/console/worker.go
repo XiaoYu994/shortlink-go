@@ -38,7 +38,7 @@ const (
 	maxPurgeStatsBatchesPerRun = 20
 	purgeStatsDeferDelay       = 100 * time.Millisecond
 	partitionMonthsAhead       = 2
-	partitionStartupTimeout    = 10 * time.Second
+	workerStartupTimeout       = 10 * time.Second
 )
 
 type workerCLIOptions struct {
@@ -106,17 +106,6 @@ func runWorker(cliOpts workerCLIOptions) error {
 	logger.Info("worker features configured", "enabled_features", enabledFeatures, "disabled_features", disabledFeatures)
 
 	pgStore := newConfiguredPostgresStore(db, storeFeatures)
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), partitionStartupTimeout)
-	nowUTC := time.Now().UTC()
-	_, startupAuditErr := pgStore.EnsureAuditPartitions(startupCtx, nowUTC, partitionMonthsAhead)
-	var startupStatsErr error
-	if startupAuditErr == nil && cfg.Features.Analytics {
-		_, startupStatsErr = pgStore.EnsureStatsPartitions(startupCtx, nowUTC, partitionMonthsAhead)
-	}
-	cancelStartup()
-	if err := errors.Join(startupAuditErr, startupStatsErr); err != nil {
-		return err
-	}
 
 	metricsStore := storemetrics.New(pgStore, registry)
 	var (
@@ -218,8 +207,9 @@ func runWorker(cliOpts workerCLIOptions) error {
 		logger.Info("invitation email sender disabled: SMTP_HOST is not set")
 	}
 
-	handlers, periodicTasks, err := assembleWorkerModules(
+	assembled, err := assembleWorkerModules(
 		logger,
+		registry,
 		coreWorkerModule{
 			store:               pgStore,
 			cleanupInterval:     cfg.CleanupInterval,
@@ -250,7 +240,14 @@ func runWorker(cliOpts workerCLIOptions) error {
 		return fmt.Errorf("assemble worker modules: %w", err)
 	}
 
-	runner := job.New(pgStore, handlers, logger, registry, job.Options{
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), workerStartupTimeout)
+	startupErr := assembled.runStartup(startupCtx)
+	cancelStartup()
+	if startupErr != nil {
+		return fmt.Errorf("run worker startup: %w", startupErr)
+	}
+
+	runner := job.New(pgStore, assembled.handlers, logger, registry, job.Options{
 		Concurrency:     cfg.Concurrency,
 		MaxPerTenant:    cfg.MaxPerTenant,
 		PollInterval:    cfg.PollInterval,
@@ -258,7 +255,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 		JobTimeout:      cfg.JobTimeout,
 		ReapInterval:    cfg.ReapInterval,
 		ShutdownTimeout: cfg.ShutdownTimeout,
-		PeriodicTasks:   periodicTasks,
+		PeriodicTasks:   assembled.periodic,
 	})
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

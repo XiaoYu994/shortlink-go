@@ -169,7 +169,7 @@ make prometheus
 
 Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程的 `/metrics`，端口来自 `ADDR` 和 `CONSOLE_ADDR`（默认 `8080` 和 `8081`，job 分别是 `redirector` 和 `console`）。两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。改了端口要重新执行 `make prometheus`，容器才会换上新的抓取配置。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
-告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次，当前共配置 9 条告警规则：`ShortlinkClicksLost`、`ShortlinkClickRecorderStopped`（写入协程 panic 停摆）、`ShortlinkHigh5xxRate`（>1%）、`ShortlinkRedirectHighLatency`（P99 > 200ms）、`ShortlinkCacheFallback`、`ShortlinkCacheShedding`、`ShortlinkJobsBacklog`、`ShortlinkJobsDead` 与 `ShortlinkWorkerDown`。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
+告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次，当前共配置 12 条告警规则：`ShortlinkClicksLost`、`ShortlinkClickRecorderStopped`（写入协程 panic 停摆）、`ShortlinkHigh5xxRate`（>1%）、`ShortlinkRedirectHighLatency`（P99 > 200ms）、`ShortlinkCacheFallback`、`ShortlinkCacheShedding`、`ShortlinkJobsBacklog`、`ShortlinkJobsDead`、`ShortlinkJobsFeatureDisabledSkipped`（跨进程特性开关漂移导致任务持续被跳过）、`ShortlinkWebhookHighFailureRate`、`ShortlinkWebhookAutoDisabled` 与 `ShortlinkWorkerDown`。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
 
 ## 基线压测（无缓存）
 

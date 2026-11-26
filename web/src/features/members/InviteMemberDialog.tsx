@@ -14,7 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input, Label, Select } from '@/components/ui/input';
-import type { Role } from '@/features/auth/api';
+import { type Role, useEmailEnabled } from '@/features/auth/api';
 import { assignableRolesFor, ROLE_LABELS } from '@/features/auth/permissions';
 import { getErrorMessage } from '@/lib/api-client';
 import { localDatetimeToISO } from '@/lib/format';
@@ -25,6 +25,35 @@ interface InviteMemberDialogProps {
   actorRole: Role;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+function InvitationCreatedNotice({
+  email,
+  role,
+  emailEnabled,
+}: {
+  email: string;
+  role: Role;
+  emailEnabled: boolean | undefined;
+}) {
+  const emailTag = <strong className="font-mono text-zinc-900">{email}</strong>;
+  const roleLabel = ROLE_LABELS[role];
+  if (emailEnabled === false) {
+    return (
+      <>
+        服务端未开启自动邀请邮件，请复制下方控制台登录入口发送给 {emailTag}
+        ，对方登录后将自动以 {roleLabel} 身份加入组织。
+      </>
+    );
+  }
+  const prefix = emailEnabled === true ? '系统将自动向 ' : '若后端已配置 SMTP，系统会自动向 ';
+  return (
+    <>
+      {prefix}
+      {emailTag} 发送邀请邮件；你也可以复制下方控制台登录入口发给对方，登录后将自动以 {roleLabel}{' '}
+      身份加入组织。
+    </>
+  );
 }
 
 export function InviteMemberDialog({
@@ -39,6 +68,7 @@ export function InviteMemberDialog({
   const [formError, setFormError] = useState<string | null>(null);
   const [createdInv, setCreatedInv] = useState<Invitation | null>(null);
 
+  const emailEnabled = useEmailEnabled(open);
   const createInvitation = useCreateInvitation(orgId);
   const roles = assignableRolesFor(actorRole);
 
@@ -88,10 +118,11 @@ export function InviteMemberDialog({
                 <DialogTitle>邀请已登记</DialogTitle>
               </div>
               <DialogDescription>
-                若后端已配置 SMTP，系统会自动向{' '}
-                <strong className="font-mono text-zinc-900">{createdInv.email}</strong>{' '}
-                发送邀请邮件；你也可以复制下方控制台登录入口发给对方，登录后将自动以{' '}
-                {ROLE_LABELS[createdInv.role]} 身份加入组织。
+                <InvitationCreatedNotice
+                  email={createdInv.email}
+                  role={createdInv.role}
+                  emailEnabled={emailEnabled}
+                />
               </DialogDescription>
             </DialogHeader>
 
