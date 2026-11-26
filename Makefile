@@ -75,7 +75,8 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 	check_absent() { \
 		pkg=$$1; shift; \
 		self=$$(go list "$$pkg"); \
-		deps=$$(go list -deps "$$pkg" | grep -Fxv "$$self"); \
+		deps=$$(go list -deps "$$pkg"); \
+		deps=$$(printf '%s\n' "$$deps" | grep -Fxv "$$self" || true); \
 		for forbid in "$$@"; do \
 			if printf '%s\n' "$$deps" | grep -Eq "$$forbid"; then \
 				echo "arch-check 失败: $$pkg 不应依赖 $$forbid" >&2; \
@@ -83,30 +84,72 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 			fi; \
 		done; \
 	}; \
+	check_internal_allow() { \
+		pkg=$$1; shift; \
+		self=$$(go list "$$pkg"); \
+		deps=$$(go list -deps "$$pkg"); \
+		bad=$$(printf '%s\n' "$$deps" | grep -Fxv "$$self" | grep -E '^shortlink/internal/' || true); \
+		if [ "$$#" -gt 0 ]; then \
+			for allow in "$$@"; do \
+				if [ -z "$$bad" ]; then break; fi; \
+				bad=$$(printf '%s\n' "$$bad" | grep -Fxv "$$allow" || true); \
+			done; \
+		fi; \
+		if [ -n "$$bad" ]; then \
+			echo "arch-check 失败: $$pkg 出现未允许的 internal 依赖:" >&2; \
+			printf '%s\n' "$$bad" >&2; \
+			exit 1; \
+		fi; \
+	}; \
 	check_absent ./cmd/redirector \
-		'^shortlink/internal/(identity|risk|job|audit|postgres|safehttp|webhook|mailer)(/|$$)' \
+		'^shortlink/internal/(console|identity|risk|job|audit|postgres|safehttp|webhook|mailer)(/|$$)' \
 		'^github\.com/coreos/go-oidc' \
 		'^golang\.org/x/oauth2'; \
-	check_absent ./internal/httpx \
-		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit|safehttp|webhook|mailer)(/|$$)'; \
-	check_absent ./internal/identity \
-		'^github\.com/coreos/go-oidc' \
-		'^golang\.org/x/oauth2' \
-		'^github\.com/jackc/pgx' \
-		'^github\.com/redis/go-redis'; \
-	check_absent ./internal/config \
-		'^shortlink/internal/(postgres|pgredirect|cache|job|risk|link|identity|safehttp|webhook|mailer)(/|$$)'; \
-	check_absent ./internal/safehttp \
-		'^shortlink/internal/(link|tenant|identity|postgres|pgredirect|cache|risk|job|audit|webhook|mailer)(/|$$)'; \
-	check_absent ./internal/ratelimit \
-		'^shortlink/internal/' \
+	check_internal_allow ./internal/logx; \
+	check_absent ./internal/logx \
 		'^github\.com/jackc/pgx' \
 		'^github\.com/redis/go-redis' \
 		'^github\.com/prometheus/' \
 		'^github\.com/coreos/go-oidc' \
 		'^golang\.org/x/oauth2'; \
+	check_internal_allow ./internal/httpx \
+		shortlink/internal/logx; \
+	check_internal_allow ./internal/config \
+		shortlink/internal/logx \
+		shortlink/internal/pgdb; \
+	check_internal_allow ./internal/safehttp \
+		shortlink/internal/ratelimit; \
+	check_internal_allow ./internal/pgdb; \
+	check_absent ./internal/pgdb \
+		'^github\.com/redis/go-redis' \
+		'^github\.com/prometheus/' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
+	check_internal_allow ./internal/pgredirect \
+		shortlink/internal/pgdb \
+		shortlink/internal/link \
+		shortlink/internal/click; \
+	check_absent ./internal/pgredirect \
+		'^github\.com/redis/go-redis' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
+	check_internal_allow ./internal/identity \
+		shortlink/internal/tenant \
+		shortlink/internal/logx; \
+	check_absent ./internal/identity \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2' \
+		'^github\.com/jackc/pgx' \
+		'^github\.com/redis/go-redis'; \
+	check_internal_allow ./internal/ratelimit; \
+	check_absent ./internal/ratelimit \
+		'^github\.com/jackc/pgx' \
+		'^github\.com/redis/go-redis' \
+		'^github\.com/prometheus/' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
+	check_internal_allow ./internal/mailer; \
 	check_absent ./internal/mailer \
-		'^shortlink/internal/' \
 		'^github\.com/jackc/pgx' \
 		'^github\.com/redis/go-redis' \
 		'^github\.com/coreos/go-oidc' \

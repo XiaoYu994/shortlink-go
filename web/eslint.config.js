@@ -26,4 +26,36 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: ['src/lib/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              regex: '^(@/|(\\.\\./)+)(components|features|app)(/|$)',
+              message: 'src/lib 必须保持零业务与零 UI 耦合，禁止依赖 components/features/app。',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/components/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              regex: '^(@/|(\\.\\./)+)(features|app)(/|$)',
+              message: 'src/components 必须保持零业务耦合，禁止依赖 features/app。',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );
