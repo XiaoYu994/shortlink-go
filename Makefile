@@ -102,7 +102,7 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 		fi; \
 	}; \
 	check_absent ./cmd/redirector \
-		'^shortlink/internal/(console|identity|risk|job|audit|postgres|safehttp|webhook|mailer)(/|$$)' \
+		'^shortlink/internal/(console|identity|risk|job|audit|postgres|safehttp|webhook|mailer|sms)(/|$$)' \
 		'^github\.com/coreos/go-oidc' \
 		'^golang\.org/x/oauth2'; \
 	check_internal_allow ./internal/logx; \
@@ -150,6 +150,15 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 		'^golang\.org/x/oauth2'; \
 	check_internal_allow ./internal/mailer; \
 	check_absent ./internal/mailer \
+		'^github\.com/jackc/pgx' \
+		'^github\.com/redis/go-redis' \
+		'^github\.com/coreos/go-oidc' \
+		'^golang\.org/x/oauth2'; \
+	check_internal_allow ./internal/sms \
+		shortlink/internal/safehttp \
+		shortlink/internal/ratelimit \
+		shortlink/internal/logx; \
+	check_absent ./internal/sms \
 		'^github\.com/jackc/pgx' \
 		'^github\.com/redis/go-redis' \
 		'^github\.com/coreos/go-oidc' \

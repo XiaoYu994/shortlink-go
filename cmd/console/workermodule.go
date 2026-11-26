@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -207,6 +206,24 @@ func disabledSkipHandler(logger *slog.Logger, counter *prometheus.CounterVec, ki
 	}
 }
 
+type retentionCleanupFunc func(ctx context.Context, retention time.Duration, limit int) (int64, error)
+
+func drainRetentionBatches(ctx context.Context, retention time.Duration, fn retentionCleanupFunc) (int64, error) {
+	return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
+		return fn(ctx, retention, limit)
+	})
+}
+
+func cleanupBatchTask(name string, interval, retention time.Duration, fn retentionCleanupFunc) job.PeriodicTask {
+	return job.PeriodicTask{
+		Name:     name,
+		Interval: interval,
+		Run: func(ctx context.Context) (int64, error) {
+			return drainRetentionBatches(ctx, retention, fn)
+		},
+	}
+}
+
 type coreCleanupStore interface {
 	CleanupExpiredSessionsByExpiry(ctx context.Context, retention time.Duration, limit int) (int64, error)
 	CleanupRevokedSessions(ctx context.Context, retention time.Duration, limit int) (int64, error)
@@ -230,24 +247,6 @@ type coreWorkerModule struct {
 }
 
 func (m coreWorkerModule) Name() string { return "core" }
-
-type retentionCleanupFunc func(ctx context.Context, retention time.Duration, limit int) (int64, error)
-
-func drainRetentionBatches(ctx context.Context, retention time.Duration, fn retentionCleanupFunc) (int64, error) {
-	return drainCleanupBatches(ctx, cleanupBatchLimit, maxCleanupBatchesPerTick, func(ctx context.Context, limit int) (int64, error) {
-		return fn(ctx, retention, limit)
-	})
-}
-
-func cleanupBatchTask(name string, interval, retention time.Duration, fn retentionCleanupFunc) job.PeriodicTask {
-	return job.PeriodicTask{
-		Name:     name,
-		Interval: interval,
-		Run: func(ctx context.Context) (int64, error) {
-			return drainRetentionBatches(ctx, retention, fn)
-		},
-	}
-}
 
 func (m coreWorkerModule) RegisterWorker(r WorkerRegistrar) error {
 	if m.store == nil {
@@ -289,157 +288,6 @@ func (m coreWorkerModule) RegisterWorker(r WorkerRegistrar) error {
 				return 0, err
 			}
 			return m.store.DropExpiredAuditPartitions(ctx, now, m.auditRetentionDays)
-		},
-	})
-	return nil
-}
-
-type riskWorkerModule struct {
-	enabled bool
-	handler job.Handler
-}
-
-func (m riskWorkerModule) Name() string { return "risk_scan" }
-
-func (m riskWorkerModule) RegisterWorker(r WorkerRegistrar) error {
-	if !m.enabled {
-		r.HandleDisabled(job.KindLinkRiskScan, m.Name())
-		return nil
-	}
-	r.Handle(job.KindLinkRiskScan, m.handler)
-	return nil
-}
-
-type webhookDeliveryCleaner interface {
-	CleanupWebhookDeliveries(ctx context.Context, retention time.Duration, limit int) (int64, error)
-}
-
-type webhookWorkerModule struct {
-	enabled         bool
-	handler         job.Handler
-	cleaner         webhookDeliveryCleaner
-	cleanupInterval time.Duration
-	retention       time.Duration
-}
-
-func (m webhookWorkerModule) Name() string { return "webhooks" }
-
-func (m webhookWorkerModule) RegisterWorker(r WorkerRegistrar) error {
-	if !m.enabled {
-		r.HandleDisabled(job.KindWebhookDeliver, m.Name())
-		return nil
-	}
-	if m.cleaner == nil {
-		return errors.New("webhook delivery cleaner is nil")
-	}
-	r.Handle(job.KindWebhookDeliver, m.handler)
-	r.Periodic(cleanupBatchTask("webhooks.cleanup_deliveries", m.cleanupInterval, m.retention, m.cleaner.CleanupWebhookDeliveries))
-	return nil
-}
-
-type emailWorkerModule struct {
-	enabled bool
-	handler job.Handler
-}
-
-func (m emailWorkerModule) Name() string { return "email" }
-
-func (m emailWorkerModule) RegisterWorker(r WorkerRegistrar) error {
-	if !m.enabled {
-		r.HandleDisabled(job.KindInvitationEmail, m.Name())
-		return nil
-	}
-	r.Handle(job.KindInvitationEmail, m.handler)
-	return nil
-}
-
-type cacheReconciler interface {
-	Reconcile(ctx context.Context, code string) error
-}
-
-type cacheWorkerModule struct {
-	reconciler cacheReconciler
-}
-
-func (m cacheWorkerModule) Name() string { return "cache" }
-
-func (m cacheWorkerModule) RegisterWorker(r WorkerRegistrar) error {
-	if m.reconciler == nil {
-		r.HandleDisabled(job.KindCacheReconcile, m.Name())
-		return nil
-	}
-	r.Handle(job.KindCacheReconcile, func(ctx context.Context, j job.Job) error {
-		var p struct {
-			Code string `json:"code"`
-		}
-		if err := json.Unmarshal(j.Payload, &p); err != nil {
-			return job.Permanent(fmt.Errorf("decode cache.reconcile payload: %w", err))
-		}
-		if p.Code == "" {
-			return job.Permanent(errors.New("cache.reconcile payload missing code"))
-		}
-		return m.reconciler.Reconcile(ctx, p.Code)
-	})
-	return nil
-}
-
-type statsMaintenanceStore interface {
-	PurgeLinkStatsBatch(ctx context.Context, linkID int64, limit int) (int64, error)
-	EnsureStatsPartitions(ctx context.Context, now time.Time, monthsAhead int) (int, error)
-	DropExpiredStatsPartitions(ctx context.Context, now time.Time, retentionDays int) (int64, error)
-}
-
-type analyticsWorkerModule struct {
-	enabled         bool
-	store           statsMaintenanceStore
-	cleanupInterval time.Duration
-	retentionDays   int
-}
-
-func (m analyticsWorkerModule) Name() string { return "analytics" }
-
-func (m analyticsWorkerModule) RegisterWorker(r WorkerRegistrar) error {
-	if !m.enabled {
-		r.HandleDisabled(job.KindLinkPurgeStats, m.Name())
-		return nil
-	}
-	if m.store == nil {
-		return errors.New("stats maintenance store is nil")
-	}
-	r.OnStart("stats_partitions.ensure", func(ctx context.Context) error {
-		_, err := m.store.EnsureStatsPartitions(ctx, time.Now().UTC(), partitionMonthsAhead)
-		return err
-	})
-	r.Handle(job.KindLinkPurgeStats, func(ctx context.Context, j job.Job) error {
-		var p struct {
-			LinkID int64 `json:"link_id"`
-		}
-		if err := json.Unmarshal(j.Payload, &p); err != nil {
-			return job.Permanent(fmt.Errorf("decode link.purge_stats payload: %w", err))
-		}
-		if p.LinkID <= 0 {
-			return job.Permanent(errors.New("link.purge_stats payload missing link_id"))
-		}
-		for range maxPurgeStatsBatchesPerRun {
-			n, err := m.store.PurgeLinkStatsBatch(ctx, p.LinkID, purgeStatsBatchLimit)
-			if err != nil {
-				return err
-			}
-			if n < purgeStatsBatchLimit {
-				return nil
-			}
-		}
-		return job.Defer(purgeStatsDeferDelay, "more link stats remain to purge")
-	})
-	r.Periodic(job.PeriodicTask{
-		Name:     "stats_partitions.maintain",
-		Interval: m.cleanupInterval,
-		Run: func(ctx context.Context) (int64, error) {
-			now := time.Now().UTC()
-			if _, err := m.store.EnsureStatsPartitions(ctx, now, partitionMonthsAhead); err != nil {
-				return 0, err
-			}
-			return m.store.DropExpiredStatsPartitions(ctx, now, m.retentionDays)
 		},
 	})
 	return nil

@@ -18,6 +18,22 @@ func RedactSecret(s string) string {
 }
 
 /*
+RedactPhone 脱敏手机号中间位（如 +8613800138000 -> +86****8000），
+供日志与用户默认展示名共用，作为全仓库手机号脱敏的单一事实来源（ADR 0030）。
+*/
+func RedactPhone(phone string) string {
+	n := len(phone)
+	switch {
+	case n <= 5:
+		return "****"
+	case n <= 9:
+		return phone[:2] + "****" + phone[n-2:]
+	default:
+		return phone[:3] + "****" + phone[n-4:]
+	}
+}
+
+/*
 RedactURL 对数据库连接串、Redis URL 或带查询凭据的 URL 做脱敏：
  1. 借 url.URL.Redacted() 将 userinfo 中的密码掩码为 xxxxx；
  2. 对常见敏感查询参数（如 password、token、secret、api_key）将值替换为 REDACTED，

@@ -13,12 +13,14 @@ import (
 
 	"shortlink/internal/cache"
 	"shortlink/internal/config"
+	"shortlink/internal/identity"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
 	"shortlink/internal/logx"
 	"shortlink/internal/mailer"
 	"shortlink/internal/pgdb"
 	"shortlink/internal/risk"
+	"shortlink/internal/sms"
 	"shortlink/internal/webhook"
 )
 
@@ -43,6 +45,16 @@ func baseConsoleTestEnv() map[string]string {
 		"GITHUB_CLIENT_ID":                  "",
 		"GITHUB_CLIENT_SECRET":              "",
 		"GITHUB_REDIRECT_URL":               "",
+		"SMS_PROVIDER":                      "",
+		"SMS_WEBHOOK_URL":                   "",
+		"SMS_WEBHOOK_TOKEN":                 "",
+		"SMS_ALLOWED_PORTS":                 "",
+		"SMS_TIMEOUT":                       "",
+		"SMS_OTP_TTL":                       "",
+		"SMS_OTP_COOLDOWN":                  "",
+		"SMS_OTP_MAX_PER_HOUR":              "",
+		"SMS_OTP_MAX_ATTEMPTS":              "",
+		"SMS_SECURE_COOKIES":                "",
 		"WEB_DIST_DIR":                      "",
 		"PUBLIC_BASE_URL":                   "",
 		"WORKER_ADDR":                       "",
@@ -57,6 +69,7 @@ func baseConsoleTestEnv() map[string]string {
 		"WORKER_DONE_JOB_RETENTION":         "",
 		"WORKER_DEAD_JOB_RETENTION":         "",
 		"WORKER_INVITATION_RETENTION":       "",
+		"WORKER_OTP_RETENTION":              "",
 		"RISK_FETCH_TIMEOUT":                "",
 		"RISK_HOST_RATE_LIMIT":              "",
 		"RISK_BLOCKED_HOSTS":                "",
@@ -101,8 +114,15 @@ func defaultBaseConfig(addr string) config.BaseConfig {
 func TestLoadConsoleConfig(t *testing.T) {
 	base := baseConsoleTestEnv()
 	defaults := ConsoleConfig{
-		BaseConfig:  defaultBaseConfig(defaultConsoleAddr),
-		Features:    config.FeatureFlags{Analytics: true, RiskScan: true},
+		BaseConfig: defaultBaseConfig(defaultConsoleAddr),
+		Features:   config.FeatureFlags{Analytics: true, RiskScan: true},
+		PhoneOTP: PhoneOTPConfig{
+			Timeout:     sms.DefaultTimeout,
+			TTL:         identity.DefaultOTPTTL,
+			Cooldown:    identity.DefaultOTPCooldown,
+			MaxPerHour:  identity.DefaultOTPMaxPerHour,
+			MaxAttempts: identity.DefaultOTPMaxAttempts,
+		},
 		IPRateLimit: defaultConsoleIPRateLimit,
 		IPRateBurst: defaultConsoleIPRateBurst,
 	}
@@ -309,6 +329,52 @@ func TestLoadConsoleConfig(t *testing.T) {
 			env:     map[string]string{"SMTP_HOST": "smtp.example.com"},
 			wantErr: "SMTP_FROM is required",
 		},
+		{
+			name: "phone otp webhook configured",
+			env: map[string]string{
+				"SMS_PROVIDER":         "webhook",
+				"SMS_WEBHOOK_URL":      "https://sms.example.com/otp",
+				"SMS_WEBHOOK_TOKEN":    "sms-secret",
+				"SMS_ALLOWED_PORTS":    "443,8443",
+				"SMS_TIMEOUT":          "3s",
+				"SMS_OTP_TTL":          "10m",
+				"SMS_OTP_COOLDOWN":     "30s",
+				"SMS_OTP_MAX_PER_HOUR": "8",
+				"SMS_OTP_MAX_ATTEMPTS": "4",
+				"SMS_SECURE_COOKIES":   "true",
+			},
+			want: func() ConsoleConfig {
+				c := defaults
+				c.PhoneOTP = PhoneOTPConfig{
+					Provider:      "webhook",
+					WebhookURL:    "https://sms.example.com/otp",
+					WebhookToken:  "sms-secret",
+					AllowedPorts:  []int{443, 8443},
+					Timeout:       3 * time.Second,
+					TTL:           10 * time.Minute,
+					Cooldown:      30 * time.Second,
+					MaxPerHour:    8,
+					MaxAttempts:   4,
+					SecureCookies: true,
+				}
+				return c
+			}(),
+		},
+		{
+			name:    "sms webhook url without provider rejected",
+			env:     map[string]string{"SMS_WEBHOOK_URL": "https://sms.example.com/otp"},
+			wantErr: "SMS_PROVIDER is required",
+		},
+		{
+			name:    "sms webhook provider without url rejected",
+			env:     map[string]string{"SMS_PROVIDER": "webhook"},
+			wantErr: "SMS_WEBHOOK_URL is required",
+		},
+		{
+			name:    "sms unsupported provider rejected",
+			env:     map[string]string{"SMS_PROVIDER": "aliyun"},
+			wantErr: "SMS_PROVIDER must be",
+		},
 	}
 
 	for _, tt := range tests {
@@ -349,6 +415,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 		DoneJobRetention:              defaultWorkerRetention,
 		DeadJobRetention:              defaultWorkerLongRetention,
 		InvitationRetention:           defaultWorkerLongRetention,
+		OTPRetention:                  identity.DefaultOTPRetention,
 		StatsRetentionDays:            defaultStatsRetentionDays,
 		AuditRetentionDays:            defaultAuditRetentionDays,
 		RiskFetchTimeout:              risk.DefaultFetchTimeout,
@@ -394,6 +461,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 				"WORKER_DONE_JOB_RETENTION":   "48h",
 				"WORKER_DEAD_JOB_RETENTION":   "168h",
 				"WORKER_INVITATION_RETENTION": "168h",
+				"WORKER_OTP_RETENTION":        "12h",
 				"WORKER_STATS_RETENTION_DAYS": "45",
 				"WORKER_AUDIT_RETENTION_DAYS": "365",
 				"RISK_FETCH_TIMEOUT":          "3s",
@@ -416,6 +484,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 				DoneJobRetention:              48 * time.Hour,
 				DeadJobRetention:              168 * time.Hour,
 				InvitationRetention:           168 * time.Hour,
+				OTPRetention:                  12 * time.Hour,
 				StatsRetentionDays:            45,
 				AuditRetentionDays:            365,
 				RiskFetchTimeout:              3 * time.Second,
@@ -579,12 +648,26 @@ func TestLoadWorkerConfig(t *testing.T) {
 	}
 }
 
+func phoneOTPConfigEqual(a, b PhoneOTPConfig) bool {
+	return a.Provider == b.Provider &&
+		a.WebhookURL == b.WebhookURL &&
+		a.WebhookToken == b.WebhookToken &&
+		slices.Equal(a.AllowedPorts, b.AllowedPorts) &&
+		a.Timeout == b.Timeout &&
+		a.TTL == b.TTL &&
+		a.Cooldown == b.Cooldown &&
+		a.MaxPerHour == b.MaxPerHour &&
+		a.MaxAttempts == b.MaxAttempts &&
+		a.SecureCookies == b.SecureCookies
+}
+
 func consoleConfigEqual(a, b ConsoleConfig) bool {
 	return a.BaseConfig == b.BaseConfig &&
 		a.Features == b.Features &&
 		a.EmailEnabled == b.EmailEnabled &&
 		a.OIDC == b.OIDC &&
 		a.GitHub == b.GitHub &&
+		phoneOTPConfigEqual(a.PhoneOTP, b.PhoneOTP) &&
 		a.WebDistDir == b.WebDistDir &&
 		a.PublicBaseURL == b.PublicBaseURL &&
 		a.WebhookSecretKey == b.WebhookSecretKey &&
@@ -609,6 +692,7 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.DoneJobRetention == b.DoneJobRetention &&
 		a.DeadJobRetention == b.DeadJobRetention &&
 		a.InvitationRetention == b.InvitationRetention &&
+		a.OTPRetention == b.OTPRetention &&
 		a.StatsRetentionDays == b.StatsRetentionDays &&
 		a.AuditRetentionDays == b.AuditRetentionDays &&
 		a.RiskFetchTimeout == b.RiskFetchTimeout &&
@@ -641,7 +725,12 @@ func TestConsoleConfigRedaction(t *testing.T) {
 		RedirectURL:  "https://console.example.com/api/v1/auth/github/callback",
 	}
 	webhookMasterKey := strings.Repeat("ef", 32)
-	conCfg := ConsoleConfig{BaseConfig: base, OIDC: oidcCfg, GitHub: ghCfg, WebhookSecretKey: webhookMasterKey}
+	phoneCfg := PhoneOTPConfig{
+		Provider:     "webhook",
+		WebhookURL:   "https://sms.example.com/otp",
+		WebhookToken: "sms-top-secret",
+	}
+	conCfg := ConsoleConfig{BaseConfig: base, OIDC: oidcCfg, GitHub: ghCfg, PhoneOTP: phoneCfg, WebhookSecretKey: webhookMasterKey}
 	workerCfg := WorkerConfig{
 		BaseConfig:          base,
 		Concurrency:         8,
@@ -656,10 +745,10 @@ func TestConsoleConfigRedaction(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger, _ := base.NewLoggerWithService(&buf, "console-config-test")
-	logger.Info("dump", "console", conCfg, "worker", workerCfg, "oidc", oidcCfg, "github", ghCfg)
+	logger.Info("dump", "console", conCfg, "worker", workerCfg, "oidc", oidcCfg, "github", ghCfg, "phone", phoneCfg)
 
-	combined := buf.String() + "\n" + fmt.Sprintf("%+v %+v %+v %+v", conCfg, workerCfg, oidcCfg, ghCfg)
-	for _, secret := range []string{"pg-secret", "redis-secret", "oidc-top-secret", "github-top-secret", webhookMasterKey, "smtp-top-secret"} {
+	combined := buf.String() + "\n" + fmt.Sprintf("%+v %+v %+v %+v %+v", conCfg, workerCfg, oidcCfg, ghCfg, phoneCfg)
+	for _, secret := range []string{"pg-secret", "redis-secret", "oidc-top-secret", "github-top-secret", "sms-top-secret", webhookMasterKey, "smtp-top-secret"} {
 		if strings.Contains(combined, secret) {
 			t.Errorf("secret %q leaked in config output: %s", secret, combined)
 		}

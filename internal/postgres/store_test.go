@@ -85,7 +85,7 @@ func newTestStoreWithOptions(t testing.TB, opts ...StoreOption) (*Store, int64) 
 	if _, err := db.ExecContext(ctx, `TRUNCATE links, api_keys, tenants,
     link_clicks_daily, link_dimension_daily, link_visitors_daily,
     users, user_identities, memberships, sessions, invitations, jobs, audit_logs,
-    webhooks, webhook_deliveries RESTART IDENTITY`); err != nil {
+    webhooks, webhook_deliveries, phone_otp_challenges RESTART IDENTITY`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	var tenantID int64

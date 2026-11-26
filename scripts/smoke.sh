@@ -38,6 +38,7 @@ WORKER_PID=
 STUB_PID=
 WEBHOOK_STUB_PID=
 SMTP_STUB_PID=
+SMS_STUB_PID=
 WATCHDOG_PID=
 
 cleanup() {
@@ -46,7 +47,7 @@ cleanup() {
 		kill "$WATCHDOG_PID" 2>/dev/null || true
 		wait "$WATCHDOG_PID" 2>/dev/null || true
 	fi
-	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}" "${WEBHOOK_STUB_PID:-}" "${SMTP_STUB_PID:-}"; do
+	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}" "${WEBHOOK_STUB_PID:-}" "${SMTP_STUB_PID:-}" "${SMS_STUB_PID:-}"; do
 		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 			kill -TERM "$pid" 2>/dev/null || true
 			i=0
@@ -201,6 +202,7 @@ worker_addr=${SMOKE_WORKER_ADDR:-127.0.0.1:18082}
 risk_stub_port=${SMOKE_RISK_STUB_PORT:-18089}
 webhook_stub_port=${SMOKE_WEBHOOK_STUB_PORT:-18090}
 smtp_stub_port=${SMOKE_SMTP_STUB_PORT:-18091}
+sms_stub_port=${SMOKE_SMS_STUB_PORT:-18092}
 REDIRECTOR_BASE=http://$redirector_addr
 REDIRECTOR_OPS_BASE=http://$redirector_ops_addr
 CONSOLE_BASE=http://$console_addr
@@ -208,6 +210,8 @@ CONSOLE_OPS_BASE=http://$console_ops_addr
 WORKER_BASE=http://$worker_addr
 RISK_STUB_HOST=127.0.0.1:$risk_stub_port
 WEBHOOK_STUB_HOST=127.0.0.1:$webhook_stub_port
+SMS_STUB_HOST=127.0.0.1:$sms_stub_port
+SMOKE_SMS_TOKEN=smoke-sms-token
 SMOKE_WEBHOOK_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 export LOG_LEVEL=error
 # redirector 没有盐会拒绝启动。CI 从 .env.example 生成 .env，本机可能还没配。
@@ -245,6 +249,68 @@ if ./bin/console serve --allow-test-host "$WEBHOOK_STUB_HOST" >/dev/null 2>&1; t
 	fail '生产 bin/console serve 不应允许 --allow-test-host'
 fi
 
+# 本地 HTTP 短信网关桩：校验 Bearer 令牌并把收到的验证码 JSON 落盘供冒烟读取。
+cat >"$TMP/sms_stub.py" <<'EOF'
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+expected_token = sys.argv[2]
+out_path = sys.argv[3]
+
+
+class SMSHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path != "/send":
+            self.send_response(404)
+            self.end_headers()
+            return
+        if self.headers.get("Authorization") != f"Bearer {expected_token}":
+            self.send_response(401)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        payload = json.loads(body.decode("utf-8"))
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+            f.flush()
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+
+
+class Server(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
+Server(("127.0.0.1", port), SMSHandler).serve_forever()
+EOF
+
+: >"$TMP/sms_messages.jsonl"
+python3 "$TMP/sms_stub.py" "$sms_stub_port" "$SMOKE_SMS_TOKEN" "$TMP/sms_messages.jsonl" >"$TMP/sms_stub.log" 2>&1 &
+SMS_STUB_PID=$!
+i=0
+while ! curl -fsS --max-time 1 "http://$SMS_STUB_HOST/health" >/dev/null 2>&1; do
+	kill -0 "$SMS_STUB_PID" 2>/dev/null || fail '本地 SMS 接收桩启动失败'
+	i=$((i + 1))
+	[ "$i" -ge 50 ] && fail '本地 SMS 接收桩 5 秒内未就绪'
+	sleep 0.1
+done
+
 # 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
 ADDR=$redirector_addr OPS_ADDR=$redirector_ops_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
@@ -254,11 +320,15 @@ OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
 OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
 OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
 OIDC_REDIRECT_URL=$SMOKE_OIDC_REDIRECT_URL \
+SMS_PROVIDER=webhook \
+SMS_WEBHOOK_URL="http://$SMS_STUB_HOST/send" \
+SMS_WEBHOOK_TOKEN=$SMOKE_SMS_TOKEN \
+SMS_OTP_COOLDOWN=60s \
 WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
 SMTP_HOST=127.0.0.1 \
 SMTP_FROM=noreply@shortlink.local \
 WEB_DIST_DIR=$TMP/webdist \
-	"$CONSOLE_BIN" serve --allow-test-host "$WEBHOOK_STUB_HOST" >"$CONSOLE_LOG" 2>&1 &
+	"$CONSOLE_BIN" serve --allow-test-host "$WEBHOOK_STUB_HOST" --allow-test-host "$SMS_STUB_HOST" >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
 wait_ready "$REDIRECTOR_OPS_BASE" "$REDIRECTOR_PID" redirector
@@ -749,6 +819,91 @@ status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code
 assert_eq "$status" 401 '登出后重放会话创建短链'
 grep -q '"unauthorized"' "$TMP/body" || fail "登出后创建短链响应体不是 unauthorized: $(cat "$TMP/body")"
 
+echo 'smoke: phone otp login and session'
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' "$CONSOLE_BASE/api/v1/capabilities")
+assert_eq "$status" 200 'GET /api/v1/capabilities 状态码'
+grep -Fq '"kind":"phone_otp"' "$TMP/body" || fail "capabilities 缺少 phone_otp 登录方式: $(cat "$TMP/body")"
+grep -Fq '"send_code_url":"/api/v1/auth/phone/send-code"' "$TMP/body" || fail "capabilities 缺少 send_code_url: $(cat "$TMP/body")"
+grep -Fq '"verify_code_url":"/api/v1/auth/phone/verify"' "$TMP/body" || fail "capabilities 缺少 verify_code_url: $(cat "$TMP/body")"
+
+smoke_phone='+8613800138099'
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-d "{\"phone\":\"$smoke_phone\"}" \
+	"$CONSOLE_BASE/api/v1/auth/phone/send-code")
+assert_eq "$status" 200 'POST /api/v1/auth/phone/send-code 状态码'
+assert_eq "$(header Cache-Control)" 'no-store' 'send-code Cache-Control'
+grep -Fq '"cooldown_seconds":60' "$TMP/body" || fail "send-code 缺少 cooldown_seconds: $(cat "$TMP/body")"
+
+# 冷却期内立即重发必须返回 429 并带 Retry-After。
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-d "{\"phone\":\"$smoke_phone\"}" \
+	"$CONSOLE_BASE/api/v1/auth/phone/send-code")
+assert_eq "$status" 429 '冷却期内重复发码应返回 429'
+otp_retry_after=$(header Retry-After)
+case "$otp_retry_after" in
+	''|*[!0-9]*) fail "OTP 冷却 Retry-After 不是整数秒: '$otp_retry_after'" ;;
+esac
+[ "$otp_retry_after" -ge 1 ] || fail "OTP 冷却 Retry-After 小于 1: $otp_retry_after"
+
+smoke_otp_code=$(python3 -c "
+import json, sys
+with open('$TMP/sms_messages.jsonl', 'r', encoding='utf-8') as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+for r in reversed(rows):
+    if r.get('to') == '$smoke_phone':
+        print(r.get('code', ''))
+        sys.exit(0)
+sys.exit(1)
+") || fail "本地 SMS 桩未收到 $smoke_phone 的验证码"
+[ "${#smoke_otp_code}" -eq 6 ] || fail "SMS 桩收到的验证码格式非法: $smoke_otp_code"
+
+wrong_otp='000000'
+if [ "$smoke_otp_code" = "$wrong_otp" ]; then
+	wrong_otp='999999'
+fi
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-d "{\"phone\":\"$smoke_phone\",\"code\":\"$wrong_otp\"}" \
+	"$CONSOLE_BASE/api/v1/auth/phone/verify")
+assert_eq "$status" 401 '错误验证码核验应返回 401'
+
+phone_cookies=$TMP/phone_cookies.txt
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-c "$phone_cookies" \
+	-X POST -H 'Content-Type: application/json' \
+	-d "{\"phone\":\"$smoke_phone\",\"code\":\"$smoke_otp_code\"}" \
+	"$CONSOLE_BASE/api/v1/auth/phone/verify")
+assert_eq "$status" 200 '正确验证码核验应返回 200'
+assert_eq "$(header Cache-Control)" 'no-store' 'verify Cache-Control'
+grep -q 'sl_session' "$phone_cookies" || fail '手机号登录成功后未写入 sl_session Cookie'
+grep -Fq '"name":"+86****8099"' "$TMP/body" || fail "手机号登录用户展示名未脱敏: $(cat "$TMP/body")"
+
+# 同一验证码不可重放。
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-d "{\"phone\":\"$smoke_phone\",\"code\":\"$smoke_otp_code\"}" \
+	"$CONSOLE_BASE/api/v1/auth/phone/verify")
+assert_eq "$status" 401 '已消费验证码重放应返回 401'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
+	-b "$phone_cookies" "$CONSOLE_BASE/api/v1/me")
+assert_eq "$status" 200 '手机号会话 GET /api/v1/me 状态码'
+grep -Fq '"organizations":[]' "$TMP/body" || fail "首次手机号登录用户不应自动加入任何组织: $(cat "$TMP/body")"
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-b "$phone_cookies" \
+	-d '{"name":"phone-smoke-org"}' \
+	"$CONSOLE_BASE/api/v1/orgs")
+assert_eq "$status" 201 '手机号登录用户自助创建组织状态码'
+
+status=$(curl -sS --max-time 10 -o "$TMP/body" -w '%{http_code}' \
+	-X POST -b "$phone_cookies" -c "$phone_cookies" \
+	"$CONSOLE_BASE/api/v1/auth/logout")
+assert_eq "$status" 204 '手机号会话 POST /api/v1/auth/logout 状态码'
+
 echo 'smoke: async risk scan'
 # 先清理前面冒烟段写入的 example.com 待审任务，确保本次风控冒烟完全离线、只访问本地假站点。
 psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DELETE FROM jobs" \
@@ -1216,6 +1371,9 @@ OIDC_REDIRECT_URL= \
 GITHUB_CLIENT_ID= \
 GITHUB_CLIENT_SECRET= \
 GITHUB_REDIRECT_URL= \
+SMS_PROVIDER= \
+SMS_WEBHOOK_URL= \
+SMS_WEBHOOK_TOKEN= \
 WEBHOOK_SECRET_KEY= \
 SMTP_HOST= \
 WEB_DIST_DIR= \

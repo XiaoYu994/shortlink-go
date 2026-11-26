@@ -14,14 +14,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
+	"shortlink/internal/console"
+	"shortlink/internal/identity"
 	"shortlink/internal/job"
+	"shortlink/internal/link"
+	"shortlink/internal/mailer"
+	"shortlink/internal/sms"
+	"shortlink/internal/webhook"
 )
+
+const testWebhookSecretHex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 type stubWorkerStore struct {
 	purgeCalls int
 	statsCalls int
 	auditCalls int
 	whClean    int
+	otpClean   int
+	banCalls   int
+	whReads    int
+	emailReads int
 }
 
 func (s *stubWorkerStore) CleanupExpiredSessionsByExpiry(context.Context, time.Duration, int) (int64, error) {
@@ -52,9 +64,28 @@ func (s *stubWorkerStore) EnsureAuditPartitions(context.Context, time.Time, int)
 func (s *stubWorkerStore) DropExpiredAuditPartitions(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
 }
+func (s *stubWorkerStore) CleanupExpiredPhoneOTPChallenges(context.Context, time.Duration, int) (int64, error) {
+	s.otpClean++
+	return 0, nil
+}
 func (s *stubWorkerStore) CleanupWebhookDeliveries(context.Context, time.Duration, int) (int64, error) {
 	s.whClean++
 	return 0, nil
+}
+func (s *stubWorkerStore) GetWebhookForDelivery(context.Context, int64) (webhook.DeliveryTarget, error) {
+	s.whReads++
+	return webhook.DeliveryTarget{}, webhook.ErrNotFound
+}
+func (s *stubWorkerStore) RecordWebhookDelivery(context.Context, webhook.RecordDeliveryParams) (bool, error) {
+	return false, nil
+}
+func (s *stubWorkerStore) GetInvitationEmailTarget(context.Context, int64) (mailer.InvitationEmailTarget, error) {
+	s.emailReads++
+	return mailer.InvitationEmailTarget{}, identity.ErrInvitationNotFound
+}
+func (s *stubWorkerStore) BanIfURL(context.Context, string, string, link.BanReason, link.BanSource) (*link.Link, error) {
+	s.banCalls++
+	return nil, nil
 }
 func (s *stubWorkerStore) PurgeLinkStatsBatch(context.Context, int64, int) (int64, error) {
 	s.purgeCalls++
@@ -79,14 +110,26 @@ func (s *stubReconciler) Reconcile(_ context.Context, code string) error {
 	return nil
 }
 
+type stubPhoneOTPConsoleStore struct{}
+
+func (stubPhoneOTPConsoleStore) CreatePhoneOTPChallenge(context.Context, identity.PhoneOTPChallengeParams) (int64, error) {
+	return 1, nil
+}
+func (stubPhoneOTPConsoleStore) DeleteUnsentPhoneOTPChallenge(context.Context, int64) error {
+	return nil
+}
+func (stubPhoneOTPConsoleStore) VerifyPhoneOTPChallenge(context.Context, string, string) error {
+	return nil
+}
+
 func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 	store := &stubWorkerStore{}
 	reconciler := &stubReconciler{}
-	var riskCalls, whCalls, emailCalls int
+	reg := prometheus.NewRegistry()
 
 	assembled, err := assembleWorkerModules(
 		nil,
-		nil,
+		reg,
 		coreWorkerModule{
 			store:               store,
 			cleanupInterval:     time.Hour,
@@ -96,15 +139,35 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 			invitationRetention: time.Hour,
 			auditRetentionDays:  180,
 		},
-		riskWorkerModule{enabled: true, handler: func(context.Context, job.Job) error { riskCalls++; return nil }},
-		webhookWorkerModule{
-			enabled:         true,
-			handler:         func(context.Context, job.Job) error { whCalls++; return nil },
+		phoneOTPWorkerModule{
 			cleaner:         store,
 			cleanupInterval: time.Hour,
-			retention:       time.Hour,
+			retention:       24 * time.Hour,
 		},
-		emailWorkerModule{enabled: true, handler: func(context.Context, job.Job) error { emailCalls++; return nil }},
+		riskWorkerModule{
+			enabled:      true,
+			banner:       store,
+			fetchTimeout: time.Second,
+			blockedHosts: map[string]link.BanReason{"evil.example": link.BanReasonPhishing},
+		},
+		webhookWorkerModule{
+			secretKey:       testWebhookSecretHex,
+			store:           store,
+			timeout:         time.Second,
+			cleanupInterval: time.Hour,
+			retention:       time.Hour,
+			registry:        reg,
+		},
+		emailWorkerModule{
+			smtp: mailer.SMTPConfig{
+				Host:    "smtp.example.com",
+				Port:    587,
+				From:    "noreply@example.com",
+				TLSMode: mailer.TLSModeStartTLS,
+				Timeout: time.Second,
+			},
+			store: store,
+		},
 		cacheWorkerModule{reconciler: reconciler},
 		analyticsWorkerModule{
 			enabled:         true,
@@ -125,14 +188,14 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 		t.Fatalf("startup calls = audit:%d stats:%d, want 1/1", store.auditCalls, store.statsCalls)
 	}
 
-	if err := handlers[job.KindLinkRiskScan](context.Background(), job.Job{}); err != nil {
+	if err := handlers[job.KindLinkRiskScan](context.Background(), job.Job{Payload: []byte(`{"link_id":1,"code":"AbC12345","url":"https://evil.example/a"}`)}); err != nil {
 		t.Fatalf("risk handler: %v", err)
 	}
-	if err := handlers[job.KindWebhookDeliver](context.Background(), job.Job{}); err != nil {
-		t.Fatalf("webhook handler: %v", err)
+	if err := handlers[job.KindWebhookDeliver](context.Background(), job.Job{Payload: []byte(`{"webhook_id":1,"event_id":"evt-1","event":"link.created","data":{}}`)}); !job.IsSkipped(err) {
+		t.Fatalf("webhook handler on missing target = %v, want job.Skip", err)
 	}
-	if err := handlers[job.KindInvitationEmail](context.Background(), job.Job{}); err != nil {
-		t.Fatalf("email handler: %v", err)
+	if err := handlers[job.KindInvitationEmail](context.Background(), job.Job{Payload: []byte(`{"invitation_id":1}`)}); !job.IsSkipped(err) {
+		t.Fatalf("email handler on missing invitation = %v, want job.Skip", err)
 	}
 	if err := handlers[job.KindCacheReconcile](context.Background(), job.Job{Payload: []byte(`{"code":"AbC12345"}`)}); err != nil {
 		t.Fatalf("cache handler: %v", err)
@@ -140,14 +203,22 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 	if err := handlers[job.KindLinkPurgeStats](context.Background(), job.Job{Payload: []byte(`{"link_id":7}`)}); err != nil {
 		t.Fatalf("purge stats handler: %v", err)
 	}
-	if riskCalls != 1 || whCalls != 1 || emailCalls != 1 || reconciler.calls != 1 || store.purgeCalls != 1 {
-		t.Fatalf("handler calls = risk:%d wh:%d email:%d cache:%d purge:%d, want all 1",
-			riskCalls, whCalls, emailCalls, reconciler.calls, store.purgeCalls)
+	if store.banCalls != 1 || store.whReads != 1 || store.emailReads != 1 || reconciler.calls != 1 || store.purgeCalls != 1 {
+		t.Fatalf("handler calls = ban:%d wh:%d email:%d cache:%d purge:%d, want all 1",
+			store.banCalls, store.whReads, store.emailReads, reconciler.calls, store.purgeCalls)
 	}
 
 	names := make([]string, 0, len(periodic))
 	for _, p := range periodic {
 		names = append(names, p.Name)
+		if p.Name == "phone_otp.cleanup" {
+			if _, err := p.Run(context.Background()); err != nil {
+				t.Fatalf("phone_otp.cleanup: %v", err)
+			}
+		}
+	}
+	if store.otpClean != 1 {
+		t.Fatalf("otpClean = %d, want 1", store.otpClean)
 	}
 	for _, want := range []string{
 		"sessions.cleanup_expired",
@@ -156,6 +227,7 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 		"jobs.cleanup_dead",
 		"invitations.cleanup",
 		"audit_partitions.maintain",
+		"phone_otp.cleanup",
 		"webhooks.cleanup_deliveries",
 		"stats_partitions.maintain",
 	} {
@@ -167,12 +239,6 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 
 func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T) {
 	store := &stubWorkerStore{}
-	var realHandlerCalls int
-	shouldNotRun := func(context.Context, job.Job) error {
-		realHandlerCalls++
-		return nil
-	}
-
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
@@ -188,9 +254,10 @@ func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T)
 			invitationRetention: time.Hour,
 			auditRetentionDays:  180,
 		},
-		riskWorkerModule{enabled: false, handler: shouldNotRun},
-		webhookWorkerModule{enabled: false, handler: shouldNotRun, cleaner: store, cleanupInterval: time.Hour, retention: time.Hour},
-		emailWorkerModule{enabled: false, handler: shouldNotRun},
+		phoneOTPWorkerModule{cleaner: store, cleanupInterval: time.Hour, retention: 24 * time.Hour},
+		riskWorkerModule{enabled: false, banner: store},
+		webhookWorkerModule{secretKey: "", store: store, cleanupInterval: time.Hour, retention: time.Hour},
+		emailWorkerModule{smtp: mailer.SMTPConfig{}, store: store},
 		cacheWorkerModule{reconciler: nil},
 		analyticsWorkerModule{enabled: false, store: store, cleanupInterval: time.Hour, retentionDays: 90},
 	)
@@ -245,12 +312,12 @@ func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T)
 			t.Errorf("skip log missing feature=%s: %s", tc.feature, logBuf.String())
 		}
 	}
-	if realHandlerCalls != 0 || store.purgeCalls != 0 || store.whClean != 0 || store.statsCalls != 0 {
-		t.Fatalf("disabled modules produced unexpected side effects: real=%d purge=%d whClean=%d stats=%d",
-			realHandlerCalls, store.purgeCalls, store.whClean, store.statsCalls)
+	if store.banCalls != 0 || store.whReads != 0 || store.emailReads != 0 || store.purgeCalls != 0 || store.whClean != 0 || store.statsCalls != 0 {
+		t.Fatalf("disabled modules produced unexpected side effects: ban=%d wh=%d email=%d purge=%d whClean=%d stats=%d",
+			store.banCalls, store.whReads, store.emailReads, store.purgeCalls, store.whClean, store.statsCalls)
 	}
 
-	// 关闭 webhooks 与 analytics 后，不再注册它们的周期维护任务，但审计分区维护保持启用。
+	// 关闭 webhooks 与 analytics 后，不再注册它们的周期维护任务，但审计分区与 OTP 清理保持启用。
 	names := make([]string, 0, len(periodic))
 	for _, p := range periodic {
 		names = append(names, p.Name)
@@ -261,14 +328,13 @@ func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T)
 	if slices.Contains(names, "stats_partitions.maintain") {
 		t.Errorf("disabled analytics still registered stats partition maintenance: %v", names)
 	}
-	if !slices.Contains(names, "audit_partitions.maintain") {
-		t.Errorf("core audit partition maintenance missing: %v", names)
+	if !slices.Contains(names, "audit_partitions.maintain") || !slices.Contains(names, "phone_otp.cleanup") {
+		t.Errorf("core maintenance tasks missing: %v", names)
 	}
 }
 
 func TestAssembleWorkerModulesValidation(t *testing.T) {
 	store := &stubWorkerStore{}
-	noop := func(context.Context, job.Job) error { return nil }
 
 	tests := []struct {
 		name    string
@@ -290,8 +356,28 @@ func TestAssembleWorkerModulesValidation(t *testing.T) {
 			modules: []WorkerModule{coreWorkerModule{cleanupInterval: time.Hour, auditRetentionDays: 180}},
 		},
 		{
-			name:    "enabled webhook module with nil cleaner",
-			modules: []WorkerModule{webhookWorkerModule{enabled: true, handler: noop, cleanupInterval: time.Hour}},
+			name:    "nil phone otp cleaner",
+			modules: []WorkerModule{phoneOTPWorkerModule{cleanupInterval: time.Hour, retention: time.Hour}},
+		},
+		{
+			name:    "enabled risk module with nil banner",
+			modules: []WorkerModule{riskWorkerModule{enabled: true}},
+		},
+		{
+			name:    "enabled webhook module with nil store",
+			modules: []WorkerModule{webhookWorkerModule{secretKey: testWebhookSecretHex, cleanupInterval: time.Hour}},
+		},
+		{
+			name:    "enabled webhook module with invalid secret key",
+			modules: []WorkerModule{webhookWorkerModule{secretKey: "not-hex", store: store, cleanupInterval: time.Hour}},
+		},
+		{
+			name:    "enabled email module with nil store",
+			modules: []WorkerModule{emailWorkerModule{smtp: mailer.SMTPConfig{Host: "smtp.example.com", From: "noreply@example.com"}}},
+		},
+		{
+			name:    "enabled email module with invalid smtp config",
+			modules: []WorkerModule{emailWorkerModule{smtp: mailer.SMTPConfig{Host: "smtp.example.com"}, store: store}},
 		},
 		{
 			name:    "enabled analytics module with nil store",
@@ -305,6 +391,37 @@ func TestAssembleWorkerModulesValidation(t *testing.T) {
 				t.Fatalf("assembleWorkerModules(%s) = nil, want error", tt.name)
 			}
 		})
+	}
+}
+
+func TestInitPhoneOTPAuthMethod(t *testing.T) {
+	store := stubPhoneOTPConsoleStore{}
+
+	m, err := initPhoneOTPAuthMethod(PhoneOTPConfig{}, store, nil, nil)
+	if err != nil || m != nil {
+		t.Fatalf("disabled initPhoneOTPAuthMethod = (%v, %v), want (nil, nil)", m, err)
+	}
+
+	m, err = initPhoneOTPAuthMethod(PhoneOTPConfig{Provider: sms.ProviderLog}, store, nil, nil)
+	if err != nil || m == nil || m.Descriptor().Kind != console.AuthFlowPhoneOTP {
+		t.Fatalf("log initPhoneOTPAuthMethod = (%v, %v)", m, err)
+	}
+
+	// webhook 指向回环地址且无 devtest allowlist 时必须在启动期拒绝。
+	if _, err := initPhoneOTPAuthMethod(PhoneOTPConfig{
+		Provider:   sms.ProviderWebhook,
+		WebhookURL: "http://127.0.0.1:18092/sms",
+	}, store, nil, nil); err == nil {
+		t.Fatal("webhook loopback without allowlist = nil, want error")
+	}
+
+	// 显式 allowTestHosts 放行后构造成功。
+	m, err = initPhoneOTPAuthMethod(PhoneOTPConfig{
+		Provider:   sms.ProviderWebhook,
+		WebhookURL: "http://127.0.0.1:18092/sms",
+	}, store, []string{"127.0.0.1:18092"}, nil)
+	if err != nil || m == nil || m.Descriptor().SendCodeURL != "/api/v1/auth/phone/send-code" {
+		t.Fatalf("webhook with allowlist = (%v, %v)", m, err)
 	}
 }
 
@@ -471,7 +588,7 @@ func TestDisabledWorkerModulesThroughRunnerMarkDoneAndRecordSkippedMetric(t *tes
 		logger,
 		registry,
 		riskWorkerModule{enabled: false},
-		webhookWorkerModule{enabled: false},
+		webhookWorkerModule{secretKey: ""},
 	)
 	if err != nil {
 		t.Fatalf("assembleWorkerModules: %v", err)

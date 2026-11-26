@@ -1,8 +1,7 @@
 /*
-worker 是 console 的后台任务模式（阶段 12、ADR 0020）：
-运行 PostgreSQL Outbox Worker Pool，处理异步 URL 风控（link.risk_scan）、
-回收过期租约，并定期循环分批清理过期会话、已完成/死信任务与过期/失效邀请。
-配置了 WORKER_ADDR 时同时暴露独立的 /healthz、/readyz 和 /metrics 运维端口。
+worker 是 console 的后台任务模式（阶段 12、ADR 0020、ADR 0030）：
+作为纯组合根按垂直特性装配各 WorkerModule（核心清理、手机号 OTP 清理、异步风控、Webhook、
+异步邀请邮件、缓存对账与点击统计维护），并按 WORKER_ADDR 可选暴露运维端口。
 */
 package main
 
@@ -20,15 +19,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
-	"shortlink/internal/cache"
 	"shortlink/internal/httpx"
 	"shortlink/internal/job"
-	"shortlink/internal/mailer"
 	"shortlink/internal/postgres"
 	"shortlink/internal/risk"
-	"shortlink/internal/safehttp"
 	"shortlink/internal/storemetrics"
-	"shortlink/internal/webhook"
 )
 
 const (
@@ -106,105 +101,19 @@ func runWorker(cliOpts workerCLIOptions) error {
 	logger.Info("worker features configured", "enabled_features", enabledFeatures, "disabled_features", disabledFeatures)
 
 	pgStore := newConfiguredPostgresStore(db, storeFeatures)
-
 	metricsStore := storemetrics.New(pgStore, registry)
 	var (
-		banner       risk.LinkBanner = metricsStore
-		reconciler   cacheReconciler
-		verdictCache *risk.VerdictCache
+		banner     risk.LinkBanner = metricsStore
+		reconciler cacheReconciler
 	)
-	if cfg.RedisURL != "" {
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		rdb, err := cache.Open(ctx, cfg.RedisURL)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("connect redis: %w", err)
-		}
-		defer func() { _ = rdb.Close() }()
-		logger.Info("connected to redis")
-
-		cachedStore := cache.New(metricsStore, rdb, registry, cache.Options{
-			FetchTimeout: cfg.CacheFetchTimeout,
-			Logger:       logger,
-		})
+	cachedStore, rdb, closeRedis, err := openRedisCache(cfg.RedisURL, metricsStore, registry, cfg.CacheFetchTimeout, logger)
+	if err != nil {
+		return err
+	}
+	defer closeRedis()
+	if cachedStore != nil {
 		banner = cachedStore
 		reconciler = cachedStore
-		if cfg.Features.RiskScan {
-			verdictCache = risk.NewVerdictCache(rdb, registry, risk.VerdictCacheOptions{Logger: logger})
-		}
-	} else {
-		logger.Info("redis cache disabled: REDIS_URL is not set")
-	}
-
-	var riskHandler job.Handler
-	if cfg.Features.RiskScan {
-		httpClient := risk.NewSafeHTTPClient(safehttp.ClientOptions{
-			Timeout:          cfg.RiskFetchTimeout,
-			AllowedPorts:     cfg.RiskAllowedPorts,
-			AllowedHostPorts: cliOpts.allowTestHosts,
-		})
-		scanner := risk.NewRuleScanner(risk.RuleScannerOptions{
-			HTTPClient:      httpClient,
-			BlockedHosts:    cfg.RiskBlockedHosts,
-			BlockedKeywords: cfg.RiskBlockedKeywords,
-		})
-		hostLimiter := safehttp.NewHostLimiter(cfg.RiskHostRateLimit)
-		riskHandler = risk.NewHandler(risk.HandlerOptions{
-			Scanner: scanner,
-			Banner:  banner,
-			Cache:   verdictCache,
-			Limiter: hostLimiter,
-			Logger:  logger,
-		})
-	} else {
-		logger.Info("risk scan worker disabled: FEATURE_RISK_SCAN=false")
-	}
-
-	var webhookHandler job.Handler
-	if cfg.WebhookSecretKey != "" {
-		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
-		if err != nil {
-			return fmt.Errorf("parse WEBHOOK_SECRET_KEY: %w", err)
-		}
-		webhookCipher, err := webhook.NewSecretCipher(key)
-		if err != nil {
-			return fmt.Errorf("init webhook cipher: %w", err)
-		}
-		webhookClient := safehttp.NewClient(safehttp.ClientOptions{
-			Timeout:          cfg.WebhookTimeout,
-			DisableRedirects: true,
-			AllowedPorts:     cfg.WebhookAllowedPorts,
-			AllowedHostPorts: cliOpts.allowTestHosts,
-		})
-		webhookThreshold := cfg.WebhookMaxConsecutiveFailures
-		if webhookThreshold == 0 {
-			webhookThreshold = -1 // 显式配置 0 关闭自动熔断（区分未配置零值默认 10）。
-		}
-		webhookHandler = webhook.NewHandler(webhook.HandlerOptions{
-			Store:                  pgStore,
-			HTTPClient:             webhookClient,
-			Limiter:                safehttp.NewHostLimiter(cfg.WebhookHostRateLimit),
-			Cipher:                 webhookCipher,
-			RetryBaseDelay:         cfg.WebhookRetryBaseDelay,
-			RetryMaxDelay:          cfg.WebhookRetryMaxDelay,
-			MaxConsecutiveFailures: webhookThreshold,
-			Registry:               registry,
-			Logger:                 logger,
-		})
-	} else {
-		logger.Info("webhooks disabled: WEBHOOK_SECRET_KEY is not set")
-	}
-
-	var invitationEmailHandler job.Handler
-	if cfg.SMTP.Enabled() {
-		smtpSender, err := mailer.NewSMTPSender(cfg.SMTP)
-		if err != nil {
-			return fmt.Errorf("init smtp sender: %w", err)
-		}
-		invitationEmailHandler = newInvitationEmailHandler(pgStore, smtpSender, cfg.ConsolePublicURL, logger)
-		logger.Info("invitation email sender enabled", "host", cfg.SMTP.Host, "port", cfg.SMTP.Port, "tls_mode", cfg.SMTP.TLSMode)
-	} else {
-		logger.Info("invitation email sender disabled: SMTP_HOST is not set")
 	}
 
 	assembled, err := assembleWorkerModules(
@@ -219,15 +128,45 @@ func runWorker(cliOpts workerCLIOptions) error {
 			invitationRetention: cfg.InvitationRetention,
 			auditRetentionDays:  cfg.AuditRetentionDays,
 		},
-		riskWorkerModule{enabled: cfg.Features.RiskScan, handler: riskHandler},
-		webhookWorkerModule{
-			enabled:         cfg.WebhookSecretKey != "",
-			handler:         webhookHandler,
+		phoneOTPWorkerModule{
 			cleaner:         pgStore,
 			cleanupInterval: cfg.CleanupInterval,
-			retention:       cfg.WebhookDeliveryRetention,
+			retention:       cfg.OTPRetention,
 		},
-		emailWorkerModule{enabled: cfg.SMTP.Enabled(), handler: invitationEmailHandler},
+		riskWorkerModule{
+			enabled:         cfg.Features.RiskScan,
+			banner:          banner,
+			redisClient:     rdb,
+			registry:        registry,
+			fetchTimeout:    cfg.RiskFetchTimeout,
+			allowedPorts:    cfg.RiskAllowedPorts,
+			allowTestHosts:  cliOpts.allowTestHosts,
+			blockedHosts:    cfg.RiskBlockedHosts,
+			blockedKeywords: cfg.RiskBlockedKeywords,
+			hostRateLimit:   cfg.RiskHostRateLimit,
+			logger:          logger,
+		},
+		webhookWorkerModule{
+			secretKey:              cfg.WebhookSecretKey,
+			store:                  pgStore,
+			timeout:                cfg.WebhookTimeout,
+			allowedPorts:           cfg.WebhookAllowedPorts,
+			allowTestHosts:         cliOpts.allowTestHosts,
+			hostRateLimit:          cfg.WebhookHostRateLimit,
+			retryBaseDelay:         cfg.WebhookRetryBaseDelay,
+			retryMaxDelay:          cfg.WebhookRetryMaxDelay,
+			maxConsecutiveFailures: cfg.WebhookMaxConsecutiveFailures,
+			cleanupInterval:        cfg.CleanupInterval,
+			retention:              cfg.WebhookDeliveryRetention,
+			registry:               registry,
+			logger:                 logger,
+		},
+		emailWorkerModule{
+			smtp:             cfg.SMTP,
+			store:            pgStore,
+			consolePublicURL: cfg.ConsolePublicURL,
+			logger:           logger,
+		},
 		cacheWorkerModule{reconciler: reconciler},
 		analyticsWorkerModule{
 			enabled:         cfg.Features.Analytics,

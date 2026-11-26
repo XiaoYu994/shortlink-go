@@ -21,9 +21,11 @@ const (
 
 // AuthMethodDescriptor 随 GET /api/v1/capabilities 下发，供前端动态渲染登录入口。
 type AuthMethodDescriptor struct {
-	ID       string       `json:"id"`
-	Kind     AuthFlowKind `json:"kind"`
-	LoginURL string       `json:"login_url,omitempty"`
+	ID            string       `json:"id"`
+	Kind          AuthFlowKind `json:"kind"`
+	LoginURL      string       `json:"login_url,omitempty"`
+	SendCodeURL   string       `json:"send_code_url,omitempty"`
+	VerifyCodeURL string       `json:"verify_code_url,omitempty"`
 }
 
 // IssueSessionOptions 控制认证成功后的会话 Cookie 安全属性与可选站内重定向。

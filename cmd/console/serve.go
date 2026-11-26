@@ -1,5 +1,5 @@
 /*
-serve 是 console 的 HTTP 模式：提供可选的 OIDC / GitHub OAuth 2.0 登录、短链增删改查、统计，
+serve 是 console 的 HTTP 模式：提供可选的 OIDC / GitHub OAuth 2.0 / 手机号 OTP 登录、短链增删改查、统计，
 并按 CONSOLE_OPS_ADDR 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
 创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
 密钥、租户和成员命令仍然走 admin.go 的路径，不加载 Redis。
@@ -16,15 +16,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
-	"shortlink/internal/cache"
 	"shortlink/internal/console"
 	"shortlink/internal/httpx"
 	"shortlink/internal/identity"
 	"shortlink/internal/identity/oauth"
 	"shortlink/internal/postgres"
-	"shortlink/internal/safehttp"
 	"shortlink/internal/storemetrics"
-	"shortlink/internal/webhook"
 )
 
 func runServe(cliOpts serveCLIOptions) error {
@@ -61,37 +58,29 @@ func runServe(cliOpts serveCLIOptions) error {
 	pgStore := newConfiguredPostgresStore(db, storeFeatures)
 	metricsStore := storemetrics.New(pgStore, registry)
 	var store console.Store = metricsStore
-	if cfg.RedisURL != "" {
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		rdb, err := cache.Open(ctx, cfg.RedisURL)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("connect redis: %w", err)
-		}
-		defer func() { _ = rdb.Close() }()
-		logger.Info("connected to redis")
-
-		store = cache.New(metricsStore, rdb, registry, cache.Options{
-			FetchTimeout: cfg.CacheFetchTimeout,
-			Logger:       logger,
-		})
-	} else {
-		logger.Info("redis cache disabled: REDIS_URL is not set")
+	cachedStore, _, closeRedis, err := openRedisCache(cfg.RedisURL, metricsStore, registry, cfg.CacheFetchTimeout, logger)
+	if err != nil {
+		return err
+	}
+	defer closeRedis()
+	if cachedStore != nil {
+		store = cachedStore
 	}
 
-	authMethods, err := initAuthMethods(cfg, logger)
+	authMethods, err := initAuthMethods(cfg, pgStore, cliOpts.allowTestHosts, logger)
 	if err != nil {
 		return err
 	}
 	if err := console.ValidateAuthMethods(authMethods); err != nil {
 		return fmt.Errorf("validate auth methods: %w", err)
 	}
+
 	var (
 		sessions console.SessionStore
 		modules  []console.Module
 	)
-	if cfg.Features.Analytics {
-		modules = append(modules, console.NewStatsModule(store))
+	if m := analyticsConsoleModule(cfg.Features.Analytics, store); m != nil {
+		modules = append(modules, m)
 	}
 	/*
 		以下均为仅限浏览器会话用户（ActorUser）调用的组织自助与治理模块（ADR 0018/0021/0023/0029）：
@@ -108,26 +97,12 @@ func runServe(cliOpts serveCLIOptions) error {
 			console.NewAuditModule(pgStore),
 		)
 	}
-	webhooksAPIEnabled := false
-	if cfg.WebhookSecretKey != "" && sessions != nil {
-		key, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey)
-		if err != nil {
-			return fmt.Errorf("parse WEBHOOK_SECRET_KEY: %w", err)
-		}
-		webhookCipher, err := webhook.NewSecretCipher(key)
-		if err != nil {
-			return fmt.Errorf("init webhook cipher: %w", err)
-		}
-		modules = append(modules, console.NewWebhooksModule(pgStore, webhookCipher, safehttp.URLValidationOptions{
-			AllowedPorts:     cfg.WebhookAllowedPorts,
-			AllowedHostPorts: cliOpts.allowTestHosts,
-		}))
-		webhooksAPIEnabled = true
-		logger.Info("webhooks api enabled")
-	} else if cfg.WebhookSecretKey == "" {
-		logger.Info("webhooks api disabled: WEBHOOK_SECRET_KEY is not set")
-	} else {
-		logger.Info("webhooks api disabled: at least one user auth method is required")
+	whModule, err := initWebhooksConsoleModule(cfg, cliOpts.allowTestHosts, pgStore, sessions != nil, logger)
+	if err != nil {
+		return err
+	}
+	if whModule != nil {
+		modules = append(modules, whModule)
 	}
 	if err := console.ValidateModules(modules); err != nil {
 		return fmt.Errorf("validate modules: %w", err)
@@ -140,7 +115,7 @@ func runServe(cliOpts serveCLIOptions) error {
 		logger.Info("serving web console static files", "dir", cfg.WebDistDir)
 	}
 
-	enabledFeatures, disabledFeatures := storeFeatures.consoleEnabledDisabled(webhooksAPIEnabled, cfg.WebDistDir != "")
+	enabledFeatures, disabledFeatures := storeFeatures.consoleEnabledDisabled(whModule != nil, cfg.WebDistDir != "")
 	enabledAuthMethods := make([]string, 0, len(authMethods))
 	for _, m := range authMethods {
 		enabledAuthMethods = append(enabledAuthMethods, m.Descriptor().ID)
@@ -199,9 +174,9 @@ func runServe(cliOpts serveCLIOptions) error {
 }
 
 /*
-initAuthMethods 按配置初始化已启用的登录方式插件（OIDC / GitHub / 未来手机号 OTP 等，ADR 0029）。
+initAuthMethods 按配置初始化已启用的登录方式插件（OIDC / GitHub / 手机号 OTP，ADR 0029、ADR 0030）。
 */
-func initAuthMethods(cfg ConsoleConfig, logger *slog.Logger) ([]console.AuthMethod, error) {
+func initAuthMethods(cfg ConsoleConfig, otpStore console.PhoneOTPStore, allowTestHosts []string, logger *slog.Logger) ([]console.AuthMethod, error) {
 	var methods []console.AuthMethod
 	if cfg.OIDC.Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -237,6 +212,13 @@ func initAuthMethods(cfg ConsoleConfig, logger *slog.Logger) ([]console.AuthMeth
 		}
 		methods = append(methods, m)
 		logger.Info("initialized github auth method")
+	}
+	phoneMethod, err := initPhoneOTPAuthMethod(cfg.PhoneOTP, otpStore, allowTestHosts, logger)
+	if err != nil {
+		return nil, err
+	}
+	if phoneMethod != nil {
+		methods = append(methods, phoneMethod)
 	}
 	return methods, nil
 }

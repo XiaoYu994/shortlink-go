@@ -11,11 +11,13 @@ import (
 
 	"shortlink/internal/cache"
 	"shortlink/internal/config"
+	"shortlink/internal/identity"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
 	"shortlink/internal/logx"
 	"shortlink/internal/mailer"
 	"shortlink/internal/risk"
+	"shortlink/internal/sms"
 	"shortlink/internal/webhook"
 )
 
@@ -39,6 +41,7 @@ type ConsoleConfig struct {
 	EmailEnabled        bool
 	OIDC                OIDCConfig
 	GitHub              GitHubConfig
+	PhoneOTP            PhoneOTPConfig
 	WebDistDir          string
 	PublicBaseURL       string
 	WebhookSecretKey    string
@@ -115,7 +118,47 @@ func (c GitHubConfig) String() string {
 	return c.LogValue().String()
 }
 
-// LogValue 掩码基础连接串及 OIDC/GitHub 客户端密钥。
+// PhoneOTPConfig 存放手机号短信验证码登录的通道与防刷参数（ADR 0030）。Provider 为空时关闭该登录方式。
+type PhoneOTPConfig struct {
+	Provider      string
+	WebhookURL    string
+	WebhookToken  string
+	AllowedPorts  []int
+	Timeout       time.Duration
+	TTL           time.Duration
+	Cooldown      time.Duration
+	MaxPerHour    int
+	MaxAttempts   int
+	SecureCookies bool
+}
+
+// Enabled 报告是否配置了手机号验证码登录。
+func (c PhoneOTPConfig) Enabled() bool {
+	return c.Provider != ""
+}
+
+// LogValue 掩码 WebhookToken，避免日志泄露短信网关凭据。
+func (c PhoneOTPConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("provider", c.Provider),
+		slog.String("webhook_url", c.WebhookURL),
+		slog.String("webhook_token", logx.RedactSecret(c.WebhookToken)),
+		slog.Int("allowed_ports_count", len(c.AllowedPorts)),
+		slog.Duration("timeout", c.Timeout),
+		slog.Duration("ttl", c.TTL),
+		slog.Duration("cooldown", c.Cooldown),
+		slog.Int("max_per_hour", c.MaxPerHour),
+		slog.Int("max_attempts", c.MaxAttempts),
+		slog.Bool("secure_cookies", c.SecureCookies),
+	)
+}
+
+// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出短信网关凭据。
+func (c PhoneOTPConfig) String() string {
+	return c.LogValue().String()
+}
+
+// LogValue 掩码基础连接串及 OIDC/GitHub/SMS 客户端密钥。
 func (cfg ConsoleConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
@@ -123,6 +166,7 @@ func (cfg ConsoleConfig) LogValue() slog.Value {
 		slog.Bool("email_enabled", cfg.EmailEnabled),
 		slog.Any("oidc", cfg.OIDC.LogValue()),
 		slog.Any("github", cfg.GitHub.LogValue()),
+		slog.Any("phone_otp", cfg.PhoneOTP.LogValue()),
 		slog.String("web_dist_dir", cfg.WebDistDir),
 		slog.String("public_base_url", cfg.PublicBaseURL),
 		slog.String("webhook_secret_key", logx.RedactSecret(cfg.WebhookSecretKey)),
@@ -158,6 +202,7 @@ type WorkerConfig struct {
 	DoneJobRetention              time.Duration
 	DeadJobRetention              time.Duration
 	InvitationRetention           time.Duration
+	OTPRetention                  time.Duration
 	StatsRetentionDays            int
 	AuditRetentionDays            int
 	RiskFetchTimeout              time.Duration
@@ -204,6 +249,7 @@ func (cfg WorkerConfig) LogValue() slog.Value {
 		slog.Duration("done_job_retention", cfg.DoneJobRetention),
 		slog.Duration("dead_job_retention", cfg.DeadJobRetention),
 		slog.Duration("invitation_retention", cfg.InvitationRetention),
+		slog.Duration("otp_retention", cfg.OTPRetention),
 		slog.Int("stats_retention_days", cfg.StatsRetentionDays),
 		slog.Int("audit_retention_days", cfg.AuditRetentionDays),
 		slog.Duration("risk_fetch_timeout", cfg.RiskFetchTimeout),
@@ -267,6 +313,16 @@ func loadConsoleConfig() (ConsoleConfig, error) {
 			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 			RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
 		},
+		PhoneOTP: PhoneOTPConfig{
+			Provider:     strings.ToLower(strings.TrimSpace(os.Getenv("SMS_PROVIDER"))),
+			WebhookURL:   strings.TrimSpace(os.Getenv("SMS_WEBHOOK_URL")),
+			WebhookToken: strings.TrimSpace(os.Getenv("SMS_WEBHOOK_TOKEN")),
+			Timeout:      sms.DefaultTimeout,
+			TTL:          identity.DefaultOTPTTL,
+			Cooldown:     identity.DefaultOTPCooldown,
+			MaxPerHour:   identity.DefaultOTPMaxPerHour,
+			MaxAttempts:  identity.DefaultOTPMaxAttempts,
+		},
 		WebDistDir:       strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
 		PublicBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
 		WebhookSecretKey: strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
@@ -292,6 +348,34 @@ func loadConsoleConfig() (ConsoleConfig, error) {
 		return ConsoleConfig{}, err
 	}
 	if err := validateGitHub(cfg.GitHub); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if raw := os.Getenv("SMS_ALLOWED_PORTS"); raw != "" {
+		ports, err := config.ParsePorts(raw)
+		if err != nil {
+			return ConsoleConfig{}, fmt.Errorf("SMS_ALLOWED_PORTS: %w", err)
+		}
+		cfg.PhoneOTP.AllowedPorts = ports
+	}
+	if cfg.PhoneOTP.Timeout, err = config.EnvDuration("SMS_TIMEOUT", cfg.PhoneOTP.Timeout); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if cfg.PhoneOTP.TTL, err = config.EnvDuration("SMS_OTP_TTL", cfg.PhoneOTP.TTL); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if cfg.PhoneOTP.Cooldown, err = config.EnvDuration("SMS_OTP_COOLDOWN", cfg.PhoneOTP.Cooldown); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if cfg.PhoneOTP.MaxPerHour, err = config.EnvInt("SMS_OTP_MAX_PER_HOUR", cfg.PhoneOTP.MaxPerHour); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if cfg.PhoneOTP.MaxAttempts, err = config.EnvInt("SMS_OTP_MAX_ATTEMPTS", cfg.PhoneOTP.MaxAttempts); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if cfg.PhoneOTP.SecureCookies, err = config.EnvBool("SMS_SECURE_COOKIES", false); err != nil {
+		return ConsoleConfig{}, err
+	}
+	if err := validatePhoneOTP(cfg.PhoneOTP); err != nil {
 		return ConsoleConfig{}, err
 	}
 	if cfg.PublicBaseURL != "" {
@@ -362,6 +446,7 @@ func loadWorkerConfig() (WorkerConfig, error) {
 		DoneJobRetention:              defaultWorkerRetention,
 		DeadJobRetention:              defaultWorkerLongRetention,
 		InvitationRetention:           defaultWorkerLongRetention,
+		OTPRetention:                  identity.DefaultOTPRetention,
 		StatsRetentionDays:            defaultStatsRetentionDays,
 		AuditRetentionDays:            defaultAuditRetentionDays,
 		RiskFetchTimeout:              risk.DefaultFetchTimeout,
@@ -416,6 +501,9 @@ func loadWorkerConfig() (WorkerConfig, error) {
 		return WorkerConfig{}, err
 	}
 	if cfg.InvitationRetention, err = config.EnvDuration("WORKER_INVITATION_RETENTION", cfg.InvitationRetention); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.OTPRetention, err = config.EnvDuration("WORKER_OTP_RETENTION", cfg.OTPRetention); err != nil {
 		return WorkerConfig{}, err
 	}
 	if cfg.StatsRetentionDays, err = config.EnvInt("WORKER_STATS_RETENTION_DAYS", cfg.StatsRetentionDays); err != nil {
@@ -514,6 +602,37 @@ func validateGitHub(c GitHubConfig) error {
 	return config.ValidateRedirectURL("GITHUB_REDIRECT_URL", c.RedirectURL)
 }
 
+func validatePhoneOTP(c PhoneOTPConfig) error {
+	if c.Provider == "" {
+		if c.WebhookURL != "" || c.WebhookToken != "" {
+			return errors.New("SMS_PROVIDER is required when SMS_WEBHOOK_URL or SMS_WEBHOOK_TOKEN is set")
+		}
+		return nil
+	}
+	if !sms.ValidProvider(c.Provider) {
+		return fmt.Errorf("SMS_PROVIDER must be %q or %q, got %q", sms.ProviderWebhook, sms.ProviderLog, c.Provider)
+	}
+	if c.Provider == sms.ProviderWebhook && c.WebhookURL == "" {
+		return errors.New("SMS_WEBHOOK_URL is required when SMS_PROVIDER=webhook")
+	}
+	if c.Timeout <= 0 {
+		return errors.New("SMS_TIMEOUT must be positive")
+	}
+	if c.TTL <= 0 {
+		return errors.New("SMS_OTP_TTL must be positive")
+	}
+	if c.Cooldown <= 0 {
+		return errors.New("SMS_OTP_COOLDOWN must be positive")
+	}
+	if c.MaxPerHour <= 0 {
+		return errors.New("SMS_OTP_MAX_PER_HOUR must be positive")
+	}
+	if c.MaxAttempts <= 0 {
+		return errors.New("SMS_OTP_MAX_ATTEMPTS must be positive")
+	}
+	return nil
+}
+
 func validateWorker(cfg WorkerConfig) error {
 	if cfg.Concurrency <= 0 {
 		return errors.New("WORKER_CONCURRENCY must be positive")
@@ -550,6 +669,9 @@ func validateWorker(cfg WorkerConfig) error {
 	}
 	if cfg.InvitationRetention < 0 {
 		return errors.New("WORKER_INVITATION_RETENTION must not be negative")
+	}
+	if cfg.OTPRetention < 0 {
+		return errors.New("WORKER_OTP_RETENTION must not be negative")
 	}
 	if cfg.StatsRetentionDays <= 0 {
 		return errors.New("WORKER_STATS_RETENTION_DAYS must be positive")
