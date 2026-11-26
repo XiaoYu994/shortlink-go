@@ -131,7 +131,7 @@ curl -s localhost:8081/metrics | grep -E '^(go_goroutines|process_|shortlink_htt
 - `process_*`：进程 CPU、内存、文件描述符，一启动就有
 - `go_sql_*`：连接池使用中连接数、等待时长等（`db_name="shortlink"`），每个进程各一份，一启动就有
 - `shortlink_http_*`：HTTP 请求数和耗时。`method` 为 `GET`、`HEAD`、`POST`、`PATCH`、`DELETE`，其余记成 `other`
-- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`；`result` 为 `success`、`not_found`、`quota_exceeded`、`banned`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 的 HTTP 进程调过管理接口后出现对应操作；管理写写完正缓存后的复查也会多出 `operation="get"`。`ban`、`unban` 是装饰器的标签，`console link` 不经过它，也不会出现在 `/metrics` 里
+- `shortlink_store_*`：存储操作的耗时和结果（`operation` 为 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`；`result` 为 `success`、`not_found`、`quota_exceeded`、`banned`、`canceled`、`timeout`、`error`）。redirector 要回源过才出现，console 的 HTTP 进程调过管理接口后出现对应操作；`ban`、`unban` 是装饰器的标签，`console link` 不经过它，也不会出现在 `/metrics` 里
 - `shortlink_rate_limited_total`：被按租户限流拒绝的管理请求数，没有 label。两个进程都暴露，只有 console 会累加；对照 `shortlink_http_requests_total{status="429"}` 看是哪个接口
 - `shortlink_cache_gets_total`：缓存查找结果（`hit`、`miss`、`fallback`）。`hit` 含负缓存。只有 redirector 读取，发生过跳转才出现
 - `shortlink_cache_shed_total`：回源并发已满被拒绝的请求数，`path` 为 `miss` 或 `fallback`。只有 redirector 有；按请求计数，singleflight 的等待者也各算一次；出现就表示回源上限正在生效
@@ -147,11 +147,10 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 ## 缓存
 
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
-- 正缓存 TTL 取剩余寿命和 1 小时里更短的那个；没有到期时间时是 1 小时。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
+- 正缓存 TTL 取剩余寿命和 5 分钟里更短的那个；没有到期时间时是 5 分钟（[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
 - 回源写缓存（正、负）都用 `SET NX`，只有 key 不存在时才写。console 在创建、修改、删除、封禁、解封提交后无条件覆盖缓存；删除和封禁写负缓存，修改后的链接不可跳转也写负缓存，解封后如果仍然停用或过期同样写负缓存。这样在途旧回源不会盖掉管理写的新值。
-- 写完正缓存后 console 会按跳转查询复查一次库：读不到就补写负缓存，读库失败也补写并记日志（复查偏向不跳转），盖掉下架和管理写交错时晚到的正缓存。
 - 并发未命中用 singleflight 合并回源。普通未命中和 Redis 读失败（fallback）各有一条回源限流：许可数分别是 `CACHE_MISS_CONCURRENCY`（默认 8）和固定 8，拿不到许可立即返回 503。单次回源超时由 `CACHE_FETCH_TIMEOUT`（默认 1s）控制，独立于 `REQUEST_TIMEOUT`。启动时 Ping 失败进程会退出，属于部署配置错误。
-- 修改或删除后 Redis 写失败只影响一致性：旧值可能保留到 TTL，下一次写路径会自愈。删除不是强撤销，已经在途的跳转仍可能返回 302。封禁和解封例外：缓存没写上会返回错误，命令退出码非 0，按「封禁和解封链接」一节重跑。
+- 修改或删除后 Redis 写失败只影响一致性：旧值最多保留到正缓存 TTL（5 分钟）。删除不是强撤销，已经在途的跳转仍可能返回 302。封禁和解封例外：缓存没写上会返回错误，命令退出码非 0，按「封禁和解封链接」一节重跑。
 - 查看某个短码的缓存：
 
 ```bash
@@ -169,7 +168,7 @@ make prometheus
 
 Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程的 `/metrics`，端口来自 `ADDR` 和 `CONSOLE_ADDR`（默认 `8080` 和 `8081`，job 分别是 `redirector` 和 `console`）。两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。改了端口要重新执行 `make prometheus`，容器才会换上新的抓取配置。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
-告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次，当前共配置 12 条告警规则：`ShortlinkClicksLost`、`ShortlinkClickRecorderStopped`（写入协程 panic 停摆）、`ShortlinkHigh5xxRate`（>1%）、`ShortlinkRedirectHighLatency`（P99 > 200ms）、`ShortlinkCacheFallback`、`ShortlinkCacheShedding`、`ShortlinkJobsBacklog`、`ShortlinkJobsDead`、`ShortlinkJobsFeatureDisabledSkipped`（跨进程特性开关漂移导致任务持续被跳过）、`ShortlinkWebhookHighFailureRate`、`ShortlinkWebhookAutoDisabled` 与 `ShortlinkWorkerDown`。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
+告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次，当前共配置 11 条告警规则：`ShortlinkClicksLost`、`ShortlinkClickRecorderStopped`（写入协程 panic 停摆）、`ShortlinkHigh5xxRate`（>1%）、`ShortlinkRedirectHighLatency`（P99 > 200ms）、`ShortlinkCacheFallback`、`ShortlinkCacheShedding`、`ShortlinkJobsBacklog`、`ShortlinkJobsDead`、`ShortlinkWebhookHighFailureRate`、`ShortlinkWebhookAutoDisabled` 与 `ShortlinkWorkerDown`。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
 
 ## 基线压测（无缓存）
 
@@ -802,7 +801,7 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 - 用量不能再从 `links` 重算：删除是硬删除，本月创建后又删掉的链接数不回来，绕过应用直接往 `links` 插行也不会计入。不要手工改 `link_usage` 对账。
 - 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
-- 限流在鉴权之后，格式合法但不存在的密钥每次都会查一次 `api_keys`（走 `key_hash` 唯一索引）。256 位密钥无法被猜中，但这是一个能放大数据库查询的入口；防护放在入口层（nginx `limit_req` 或云厂商的 WAF），应用内不做按 IP 的未鉴权限流。
+- 鉴权前按源 IP 设有有界进程内限流（`CONSOLE_IP_RATE_LIMIT` / `CONSOLE_IP_RATE_BURST`，默认 `60`/s、突发 `120`，`0` 关闭），配合入口层 nginx `limit_req` 防止大量伪造密钥穿透查询 `api_keys`（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。
 
 ## 最小前端控制台（`web/`）
 
@@ -841,9 +840,9 @@ make web-dev
 WORKER_ADDR=127.0.0.1:8082 make run-worker
 ```
 
-- 写库路径通过 `postgres.TxHook`（[ADR 0029](adr/0029-modular-feature-plugins.md)）在核心租户事务内按已启用特性分发异步任务：`FEATURE_RISK_SCAN=true` 时创建短链与改 URL 入队 `link.risk_scan`；配置 `REDIS_URL` 时 `Update`/`Delete`/`Ban`/`BanIfURL`/`Unban` 入队 `cache.reconcile`（[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)）；`FEATURE_ANALYTICS=true` 时 `Delete` 入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行；配置 `WEBHOOK_SECRET_KEY` 时扇出 `webhook.deliver`；配置 `SMTP_HOST` 时邀请入队 `invitation.email`。
+- 写库路径通过 `postgres.TxHook`（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）在核心租户事务内按已启用特性分发异步任务：`FEATURE_RISK_SCAN=true` 时创建短链与改 URL 入队 `link.risk_scan`；`FEATURE_ANALYTICS=true` 时 `Delete` 入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行；配置 `WEBHOOK_SECRET_KEY` 时扇出 `webhook.deliver`；配置 `SMTP_HOST` 时邀请入队 `invitation.email`。
 - `console worker` 按 `WorkerModule` 装配各特性消费者与周期维护任务，通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`）；已关闭特性的历史残留任务由 `disabledSkipHandler` 自动按 `job.Skip` 归档，不污染 `dead` 队列。抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据及 NAT64（`64:ff9b::/96`）/6to4（`2002::/16`）地址并支持出口端口白名单（`RISK_ALLOWED_PORTS`），命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
-- Redis 可选：配置 `REDIS_URL` 时只存扫描结果短时缓存（fail-open，且不缓存 4xx 响应），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，由同事务入队的 `cache.reconcile` 自动退避对账自愈；未配置 `REDIS_URL` 时直接跳过缓存。
+- Redis 可选：配置 `REDIS_URL` 时只存扫描结果短时缓存（fail-open，且不缓存 4xx 响应），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，不重抓外网 URL，旧正缓存按 5 分钟 TTL 自然失效（[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）；未配置 `REDIS_URL` 时直接跳过缓存。
 - worker 启动时始终调用 `EnsureAuditPartitions` 预建 `audit_logs` 未来 2 个月分区，仅在 `FEATURE_ANALYTICS=true` 时调用 `EnsureStatsPartitions` 预建三张统计表未来分区；后台按 `WORKER_CLEANUP_INTERVAL`（默认 1 小时）分批清理过期 `sessions`、`done`/`dead` 任务（`dead` 默认 30 天）、过期/撤销/被取代 `invitations`（默认 30 天），运行 `audit_partitions.maintain`（`WORKER_AUDIT_RETENTION_DAYS=180`），并按开关运行 `stats_partitions.maintain`（`WORKER_STATS_RETENTION_DAYS=90`）与 `webhooks.cleanup_deliveries`（永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
 - 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站（编译期隔离在 `//go:build devtest`），不提供关闭 SSRF 检查的全局环境变量。
 
@@ -894,10 +893,10 @@ make console ARGS="link unban --code abc12345"
 缓存没更新时命令退出码是 1，stderr 会说明数据库已经写成功：
 
 ```txt
-console: 封禁 abc12345 已经写入数据库，但缓存没有更新：旧的正缓存最长还能跳转 1 小时；重跑同一条命令即可，操作幂等: ban link: cache not updated after successful write: set cache: ...
+console: 封禁 abc12345 已经写入数据库，但缓存没有更新：旧的正缓存最长还能跳转 5 分钟；重跑同一条命令即可，操作幂等: ban link: cache not updated after successful write: set cache: ...
 ```
 
-这时数据库已经封禁成功，只是 Redis 没写进去。重跑同一条命令即可，封禁幂等，重跑只是再写一次缓存。Redis 整个不可用时封禁照样落库，redirector 读缓存失败会回源数据库，回源查询已经过滤了封禁；但 Redis 恢复后旧的正缓存可能还在，必须重跑一次命令。没人重跑的最坏情况是旧正缓存活到 TTL，最长 1 小时。解封的提示和重跑方式相同。
+这时数据库已经封禁成功，只是 Redis 没写进去。重跑同一条命令即可，封禁幂等，重跑只是再写一次缓存。Redis 整个不可用时封禁照样落库，redirector 读缓存失败会回源数据库，回源查询已经过滤了封禁；但 Redis 恢复后旧的正缓存可能还在，必须重跑一次命令。没人重跑的最坏情况是旧正缓存活到 TTL，最长 5 分钟。解封的提示和重跑方式相同。
 
 命令本身没有 `/metrics`：成败看退出码和上面的输出，不看 console 进程的指标。缓存写入记在命令自己的 Registry 里，进程退出就没了。
 
@@ -1057,7 +1056,7 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `OIDC_*`；要么四个全配（参考上面的 Dex 示例），要么全部留空 |
 | `GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `GITHUB_*`；要么三个全配，要么全部留空 |
 | 统计里 `unique_visitors` 一直是 0 | 检查 redirector 是否配置了 `VISITOR_SALT`；代理后面还需要 `TRUST_PROXY_HEADERS=true`，否则所有请求的 IP 都一样 |
-| `PATCH` 成功后仍跳旧地址 | 看 console 的 `shortlink_cache_writes_total{result="error"}`；Redis 写失败时旧值最多保留到 TTL（1 小时） |
+| `PATCH` 成功后仍跳旧地址 | 看 console 的 `shortlink_cache_writes_total{result="error"}`；Redis 写失败时旧值最多保留到 TTL（5 分钟） |
 | 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `CACHE_MISS_CONCURRENCY` |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 在仓库根目录执行 `make migrate` |

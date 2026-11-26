@@ -212,7 +212,7 @@ func explainTakedownError(action, code string, err error) error {
 	if !errors.Is(err, cache.ErrNotUpdated) {
 		return err
 	}
-	return fmt.Errorf("%s %s 已经写入数据库，但缓存没有更新：旧的正缓存最长还能跳转 1 小时；"+
+	return fmt.Errorf("%s %s 已经写入数据库，但缓存没有更新：旧的正缓存最长还能跳转 5 分钟；"+
 		"重跑同一条命令即可，操作幂等: %w", action, code, err)
 }
 

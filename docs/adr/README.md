@@ -47,6 +47,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0028](0028-postgres-rls-tenant-isolation.md) | PostgreSQL 行级安全（RLS）作为租户隔离第二道防线 | Accepted |
 | [0029](0029-modular-feature-plugins.md) | 模块化特性插件架构：核心内核与可开关外围能力 | Accepted |
 | [0030](0030-phone-otp-and-vertical-console-assembly.md) | 手机号短信验证码登录（Phone OTP）与 `cmd/console` 垂直特性装配演进 | Accepted |
+| [0031](0031-cache-and-worker-assembly-simplification.md) | 缓存写路径与 Worker 模块装配做减法 | Accepted |
 
 ## 模板
 

@@ -57,7 +57,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 
-	// 只修改 disabled 或 expires_at 应入队 cache.reconcile，不入队 link.risk_scan。
+	// 只修改 disabled 或 expires_at 不应入队任何后台任务（ADR 0031）。
 	disabled := true
 	if _, err := store.Update(ctx, tenantID, l.Code, link.Update{Disabled: &disabled}); err != nil {
 		t.Fatalf("Update disabled: %v", err)
@@ -66,14 +66,11 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim after Update disabled: %v", err)
 	}
-	if len(claimed) != 1 || claimed[0].Kind != job.KindCacheReconcile {
-		t.Fatalf("claimed after disabled-only Update = %+v, want 1 cache.reconcile", claimed)
-	}
-	if err := store.Complete(ctx, claimed[0].ID, "test-worker", claimed[0].LockVersion); err != nil {
-		t.Fatalf("Complete disabled reconcile: %v", err)
+	if len(claimed) != 0 {
+		t.Fatalf("claimed after disabled-only Update = %+v, want 0", claimed)
 	}
 
-	// 修改 URL 应同语句入队一条 link.risk_scan 与一条 cache.reconcile。
+	// 修改 URL 应同事务入队一条 link.risk_scan。
 	newURL := "https://example.com/updated-url"
 	if _, err := store.Update(ctx, tenantID, l.Code, link.Update{URL: &newURL}); err != nil {
 		t.Fatalf("Update url: %v", err)
@@ -82,26 +79,17 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim after Update url: %v", err)
 	}
-	if len(claimed) != 2 {
-		t.Fatalf("claimed after url Update = %d, want 2", len(claimed))
+	if len(claimed) != 1 || claimed[0].Kind != job.KindLinkRiskScan {
+		t.Fatalf("claimed after url Update = %+v, want 1 link.risk_scan", claimed)
 	}
-	var foundRisk bool
-	for _, j := range claimed {
-		if j.Kind == job.KindLinkRiskScan {
-			foundRisk = true
-			if err := json.Unmarshal(j.Payload, &payload); err != nil {
-				t.Fatalf("unmarshal updated payload: %v", err)
-			}
-			if payload.URL != newURL {
-				t.Errorf("payload.URL = %q, want %q", payload.URL, newURL)
-			}
-		}
-		if err := store.Complete(ctx, j.ID, "test-worker", j.LockVersion); err != nil {
-			t.Fatalf("Complete url job %s: %v", j.Kind, err)
-		}
+	if err := json.Unmarshal(claimed[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal updated payload: %v", err)
 	}
-	if !foundRisk {
-		t.Fatalf("missing link.risk_scan after url Update in %+v", claimed)
+	if payload.URL != newURL {
+		t.Errorf("payload.URL = %q, want %q", payload.URL, newURL)
+	}
+	if err := store.Complete(ctx, claimed[0].ID, "test-worker", claimed[0].LockVersion); err != nil {
+		t.Fatalf("Complete url job %s: %v", claimed[0].Kind, err)
 	}
 
 	// 配额不足时回滚，不留孤儿任务。

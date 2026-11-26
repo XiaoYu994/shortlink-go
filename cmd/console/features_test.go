@@ -40,19 +40,17 @@ func TestLoadLinkCLIStoreFeatures(t *testing.T) {
 	// 无关的半残 SMTP 配置不应阻塞 link ban/unban 命令。
 	t.Setenv("SMTP_HOST", "smtp.example.com")
 	t.Setenv("SMTP_FROM", "")
-	t.Setenv("REDIS_URL", "redis://localhost:6379/0")
 	t.Setenv("WEBHOOK_SECRET_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
 
 	got, err := loadLinkCLIStoreFeatures()
 	if err != nil {
 		t.Fatalf("loadLinkCLIStoreFeatures: %v", err)
 	}
-	want := StoreFeatures{Cache: true, Webhooks: true}
-	if got != want {
-		t.Fatalf("StoreFeatures = %+v, want %+v", got, want)
+	if got != (StoreFeatures{Webhooks: true}) {
+		t.Fatalf("StoreFeatures = %+v, want Webhooks=true", got)
 	}
 
-	enabled, disabled := (StoreFeatures{Cache: true, RiskScan: true, Webhooks: true, Email: true}).enabledDisabled()
+	enabled, disabled := (StoreFeatures{RiskScan: true, Webhooks: true, Email: true}).enabledDisabled(true)
 	if !slices.Equal(enabled, []string{"cache", "risk_scan", "webhooks", "email"}) {
 		t.Fatalf("enabled = %v", enabled)
 	}
@@ -60,56 +58,16 @@ func TestLoadLinkCLIStoreFeatures(t *testing.T) {
 		t.Fatalf("disabled = %v", disabled)
 	}
 
+	enabled, disabled = (StoreFeatures{Analytics: true}).consoleEnabledDisabled(false, true)
+	if !slices.Equal(enabled, []string{"analytics", "web"}) {
+		t.Fatalf("console enabled = %v", enabled)
+	}
+	if !slices.Equal(disabled, []string{"cache", "risk_scan", "webhooks", "email"}) {
+		t.Fatalf("console disabled = %v", disabled)
+	}
+
 	t.Setenv("WEBHOOK_SECRET_KEY", "bad-hex")
 	if _, err := loadLinkCLIStoreFeatures(); err == nil {
 		t.Fatal("expected error for invalid WEBHOOK_SECRET_KEY")
-	}
-}
-
-func TestConsoleEnabledDisabled(t *testing.T) {
-	tests := []struct {
-		name               string
-		features           StoreFeatures
-		webhooksAPIEnabled bool
-		webEnabled         bool
-		wantEnabled        []string
-		wantDisabled       []string
-	}{
-		{
-			name:               "webhooks api and web enabled",
-			features:           StoreFeatures{Cache: true, Analytics: true, RiskScan: true, Webhooks: true, Email: true},
-			webhooksAPIEnabled: true,
-			webEnabled:         true,
-			wantEnabled:        []string{"cache", "analytics", "risk_scan", "webhooks", "email", "web"},
-			wantDisabled:       nil,
-		},
-		{
-			name:               "webhooks fanout only without auth methods",
-			features:           StoreFeatures{Webhooks: true},
-			webhooksAPIEnabled: false,
-			webEnabled:         false,
-			wantEnabled:        []string{"webhooks_fanout"},
-			wantDisabled:       []string{"cache", "analytics", "risk_scan", "webhooks_api", "email", "web"},
-		},
-		{
-			name:               "webhooks disabled",
-			features:           StoreFeatures{Analytics: true},
-			webhooksAPIEnabled: false,
-			webEnabled:         true,
-			wantEnabled:        []string{"analytics", "web"},
-			wantDisabled:       []string{"cache", "risk_scan", "webhooks", "email"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			enabled, disabled := tt.features.consoleEnabledDisabled(tt.webhooksAPIEnabled, tt.webEnabled)
-			if !slices.Equal(enabled, tt.wantEnabled) {
-				t.Errorf("enabled = %v, want %v", enabled, tt.wantEnabled)
-			}
-			if !slices.Equal(disabled, tt.wantDisabled) {
-				t.Errorf("disabled = %v, want %v", disabled, tt.wantDisabled)
-			}
-		})
 	}
 }

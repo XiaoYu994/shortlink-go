@@ -29,9 +29,9 @@ func TestStoreUpdateWritesThrough(t *testing.T) {
 				Clicks: 3,
 			}, nil
 		},
-		// 写了正缓存之后的复查；链接还在，保留正缓存。
 		get: func(context.Context, string) (*link.Link, error) {
-			return &link.Link{ID: 7, Code: code, URL: newURL}, nil
+			t.Error("Update must not issue an extra GetByCode recheck")
+			return nil, link.ErrNotFound
 		},
 	}
 	s := newTestStore(t, next, rdb)
@@ -43,6 +43,9 @@ func TestStoreUpdateWritesThrough(t *testing.T) {
 	}
 	if updated.URL != newURL {
 		t.Errorf("updated URL = %q, want %q", updated.URL, newURL)
+	}
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store GetByCode calls after Update = %d, want 0", n)
 	}
 
 	want := &link.Link{ID: 7, Code: code, URL: newURL}
@@ -292,14 +295,17 @@ func TestStoreUpdateEnabledWritesPositive(t *testing.T) {
 				Link: link.Link{ID: 7, Code: code, URL: "https://example.com/enabled"},
 			}, nil
 		},
-		// 写了正缓存之后的复查；链接还在，保留正缓存。
 		get: func(context.Context, string) (*link.Link, error) {
-			return &link.Link{ID: 7, Code: code, URL: "https://example.com/enabled"}, nil
+			t.Error("Update must not issue an extra GetByCode recheck")
+			return nil, link.ErrNotFound
 		},
 	}
 	s := newTestStore(t, next, rdb)
 	if _, err := s.Update(ctx, 1, code, link.Update{Disabled: ptrBool(false)}); err != nil {
 		t.Fatalf("Update: %v", err)
+	}
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store GetByCode calls after Update = %d, want 0", n)
 	}
 
 	next.get = func(context.Context, string) (*link.Link, error) {
@@ -398,19 +404,10 @@ func TestStoreUnbanWritesCachedState(t *testing.T) {
 					}
 					return unbanned, nil
 				},
-				get: func(_ context.Context, gotCode string) (*link.Link, error) {
-					t.Error("Unban rechecked a link that should have been written as a negative cache")
+				get: func(context.Context, string) (*link.Link, error) {
+					t.Error("Unban must not issue an extra GetByCode recheck")
 					return nil, link.ErrNotFound
 				},
-			}
-			if !tt.wantNegative {
-				// 可跳转的分支会写正缓存，然后复查一次。
-				next.get = func(_ context.Context, gotCode string) (*link.Link, error) {
-					if gotCode != code {
-						t.Errorf("recheck code = %q, want %q", gotCode, code)
-					}
-					return unbanned, nil
-				}
 			}
 			s := newTestStore(t, next, rdb)
 			_ = s.writeCache(ctx, keyPrefix+code, &link.Link{
@@ -420,6 +417,9 @@ func TestStoreUnbanWritesCachedState(t *testing.T) {
 			got, err := s.Unban(ctx, code)
 			if err != nil {
 				t.Fatalf("Unban: %v", err)
+			}
+			if n := next.calls.Load(); n != 0 {
+				t.Errorf("store GetByCode calls after Unban = %d, want 0", n)
 			}
 			if got != unbanned {
 				t.Fatalf("Unban link = %+v, want %+v", got, unbanned)
@@ -577,219 +577,35 @@ func TestStoreBanAndUnbanReturnDownstreamNotFound(t *testing.T) {
 	}
 }
 
-/*
-TestStoreUpdateRechecksAfterPositiveWrite 重放 ADR 0016 的复查：
-正缓存写完再读一次库，读不到（或读库失败）就补写负缓存，读到链接就保留正缓存。
-*/
-func TestStoreUpdateRechecksAfterPositiveWrite(t *testing.T) {
-	newURL := "https://example.com/rechecked"
-	boom := errors.New("database down")
-	tests := []struct {
-		name         string
-		get          func(ctx context.Context, code string) (*link.Link, error)
-		wantNegative bool
-	}{
-		{
-			name: "not found after write",
-			get: func(context.Context, string) (*link.Link, error) {
-				return nil, link.ErrNotFound
-			},
-			wantNegative: true,
-		},
-		{
-			name: "recheck error",
-			get: func(context.Context, string) (*link.Link, error) {
-				return nil, boom
-			},
-			wantNegative: true,
-		},
-		{
-			name: "still found",
-			get: func(_ context.Context, code string) (*link.Link, error) {
-				return &link.Link{ID: 7, Code: code, URL: newURL}, nil
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rdb := newTestRedis(t)
-			code := newTestCode(t)
-			cleanupTestKey(t, rdb, code)
-			ctx := context.Background()
+// TestStoreUnbanReportsCacheFailure 验证 Redis 不可用时 Unban 返回 ErrNotUpdated，同时不触发多余查库。
+func TestStoreUnbanReportsCacheFailure(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	_ = rdb.Close()
 
-			next := &fakeStore{
-				update: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
-					return &link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: newURL}}, nil
-				},
-				get: tt.get,
-			}
-			s := newTestStore(t, next, rdb)
-
-			if _, err := s.Update(ctx, 1, code, link.Update{URL: &newURL}); err != nil {
-				t.Fatalf("Update: %v", err)
-			}
-			if n := next.calls.Load(); n != 1 {
-				t.Errorf("recheck GetByCode calls = %d, want 1", n)
-			}
-
-			if tt.wantNegative {
-				if value := rdb.Get(ctx, keyPrefix+code).Val(); value != "null" {
-					t.Errorf("cached value = %q, want null", value)
-				}
-				if n := testutil.ToFloat64(s.writes.WithLabelValues(writeSuccess)); n != 2 {
-					t.Errorf("writes{result=%q} = %v, want 2", writeSuccess, n)
-				}
-				return
-			}
-			data, err := rdb.Get(ctx, keyPrefix+code).Bytes()
-			if err != nil {
-				t.Fatalf("get cached value: %v", err)
-			}
-			var cached *link.Link
-			if err := json.Unmarshal(data, &cached); err != nil {
-				t.Fatalf("decode cached value: %v", err)
-			}
-			if cached == nil || cached.URL != newURL {
-				t.Errorf("cached value = %+v, want URL %q", cached, newURL)
-			}
-		})
-	}
-}
-
-// TestStoreUnbanRecheckNotFoundWritesNegative 解封复查发现链接已经找不到时，补写负缓存。
-func TestStoreUnbanRecheckNotFoundWritesNegative(t *testing.T) {
-	rdb := newTestRedis(t)
-	code := newTestCode(t)
-	cleanupTestKey(t, rdb, code)
-	ctx := context.Background()
-
-	unbanned := &link.Link{ID: 7, Code: code, URL: "https://example.com/unbanned"}
+	unbanned := &link.Link{ID: 7, Code: "down", URL: "https://example.com/unban"}
 	next := &fakeStore{
 		unban: func(context.Context, string) (*link.Link, error) {
 			return unbanned, nil
 		},
 		get: func(context.Context, string) (*link.Link, error) {
+			t.Error("Unban must not issue an extra GetByCode recheck")
 			return nil, link.ErrNotFound
 		},
 	}
 	s := newTestStore(t, next, rdb)
 
-	got, err := s.Unban(ctx, code)
-	if err != nil {
-		t.Fatalf("Unban: %v", err)
+	got, err := s.Unban(context.Background(), "down")
+	if !errors.Is(err, ErrNotUpdated) {
+		t.Fatalf("Unban error = %v, want ErrNotUpdated", err)
 	}
 	if got != unbanned {
 		t.Fatalf("Unban link = %+v, want %+v", got, unbanned)
 	}
-	if value := rdb.Get(ctx, keyPrefix+code).Val(); value != "null" {
-		t.Errorf("cached value = %q, want null", value)
+	if n := next.calls.Load(); n != 0 {
+		t.Errorf("store GetByCode calls = %d, want 0", n)
 	}
-}
-
-// TestUpdateRechecksWhenRequestAlreadyCanceled 复查和补写不跟随请求取消。
-func TestUpdateRechecksWhenRequestAlreadyCanceled(t *testing.T) {
-	rdb := newTestRedis(t)
-	code := newTestCode(t)
-	cleanupTestKey(t, rdb, code)
-	newURL := "https://example.com/canceled"
-
-	next := &fakeStore{
-		update: func(context.Context, int64, string, link.Update) (*link.AdminLink, error) {
-			return &link.AdminLink{Link: link.Link{ID: 7, Code: code, URL: newURL}}, nil
-		},
-		get: func(ctx context.Context, _ string) (*link.Link, error) {
-			if err := ctx.Err(); err != nil {
-				t.Errorf("recheck used the canceled request ctx: %v", err)
-			}
-			return nil, link.ErrNotFound
-		},
-	}
-	s := newTestStore(t, next, rdb)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := s.Update(ctx, 1, code, link.Update{URL: &newURL}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if n := next.calls.Load(); n != 1 {
-		t.Errorf("recheck GetByCode calls = %d, want 1", n)
-	}
-	if value := rdb.Get(context.Background(), keyPrefix+code).Val(); value != "null" {
-		t.Errorf("cached value = %q, want null", value)
-	}
-}
-
-// TestStoreCreateRechecksAfterPositiveWrite 异步风控上线后，Create 写完正缓存必须复查（ADR 0016、ADR 0020）。
-func TestStoreCreateRechecksAfterPositiveWrite(t *testing.T) {
-	boom := errors.New("database down")
-	tests := []struct {
-		name         string
-		get          func(ctx context.Context, code string) (*link.Link, error)
-		wantNegative bool
-	}{
-		{
-			name: "banned right after create",
-			get: func(context.Context, string) (*link.Link, error) {
-				return nil, link.ErrNotFound
-			},
-			wantNegative: true,
-		},
-		{
-			name: "recheck error falls back to negative",
-			get: func(context.Context, string) (*link.Link, error) {
-				return nil, boom
-			},
-			wantNegative: true,
-		},
-		{
-			name: "still active",
-			get: func(_ context.Context, code string) (*link.Link, error) {
-				return &link.Link{ID: 7, Code: code, URL: "https://example.com/created"}, nil
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rdb := newTestRedis(t)
-			code := newTestCode(t)
-			cleanupTestKey(t, rdb, code)
-			ctx := context.Background()
-
-			next := &fakeStore{
-				create: func(l *link.Link) error {
-					l.ID = 7
-					l.Code = code
-					return nil
-				},
-				get: tt.get,
-			}
-			s := newTestStore(t, next, rdb)
-			l := &link.Link{URL: "https://example.com/created"}
-			if err := s.Create(ctx, l); err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-			if n := next.calls.Load(); n != 1 {
-				t.Errorf("recheck GetByCode calls = %d, want 1", n)
-			}
-
-			if tt.wantNegative {
-				if value := rdb.Get(ctx, keyPrefix+code).Val(); value != "null" {
-					t.Errorf("cached value = %q, want null", value)
-				}
-				return
-			}
-			next.get = func(context.Context, string) (*link.Link, error) {
-				t.Error("GetByCode fell through to store after positive cache")
-				return nil, link.ErrNotFound
-			}
-			got, err := s.GetByCode(ctx, code)
-			if err != nil {
-				t.Fatalf("GetByCode: %v", err)
-			}
-			if got.URL != l.URL {
-				t.Errorf("GetByCode URL = %q, want %q", got.URL, l.URL)
-			}
-		})
+	if n := testutil.ToFloat64(s.writes.WithLabelValues(writeError)); n != 1 {
+		t.Errorf("writes{result=%q} = %v, want 1", writeError, n)
 	}
 }
 
@@ -838,59 +654,6 @@ func TestStoreBanIfURLCacheBehavior(t *testing.T) {
 		}
 		if n := rdb.Exists(ctx, keyPrefix+code).Val(); n != 0 {
 			t.Errorf("BanIfURL wrote cache on ErrURLChanged")
-		}
-	})
-}
-
-func TestReaderReconcile(t *testing.T) {
-	t.Run("active link writes positive cache", func(t *testing.T) {
-		rdb := newTestRedis(t)
-		code := newTestCode(t)
-		cleanupTestKey(t, rdb, code)
-		ctx := context.Background()
-
-		if err := rdb.Set(ctx, keyPrefix+code, "null", time.Minute).Err(); err != nil {
-			t.Fatalf("seed stale negative cache: %v", err)
-		}
-		want := &link.Link{ID: 11, Code: code, URL: "https://example.com/reconcile-live"}
-		next := &fakeStore{
-			get: func(context.Context, string) (*link.Link, error) { return want, nil },
-		}
-		r := newTestStore(t, next, rdb)
-		if err := r.Reconcile(ctx, code); err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-		var cached *link.Link
-		if err := json.Unmarshal([]byte(rdb.Get(ctx, keyPrefix+code).Val()), &cached); err != nil {
-			t.Fatalf("unmarshal positive cache: %v", err)
-		}
-		if cached == nil || cached.URL != want.URL {
-			t.Fatalf("cached = %+v, want %+v", cached, want)
-		}
-	})
-
-	t.Run("deleted or unservable link writes negative cache", func(t *testing.T) {
-		rdb := newTestRedis(t)
-		code := newTestCode(t)
-		cleanupTestKey(t, rdb, code)
-		ctx := context.Background()
-
-		staleBody, err := json.Marshal(&link.Link{ID: 12, Code: code, URL: "https://example.com/stale"})
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		if err := rdb.Set(ctx, keyPrefix+code, staleBody, time.Hour).Err(); err != nil {
-			t.Fatalf("seed stale positive cache: %v", err)
-		}
-		next := &fakeStore{
-			get: func(context.Context, string) (*link.Link, error) { return nil, link.ErrNotFound },
-		}
-		r := newTestStore(t, next, rdb)
-		if err := r.Reconcile(ctx, code); err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-		if got := rdb.Get(ctx, keyPrefix+code).Val(); got != "null" {
-			t.Fatalf("cached = %q, want null", got)
 		}
 	})
 }

@@ -27,7 +27,6 @@ func allBuiltinTestTxHooks() []StoreOption {
 			RiskScanHook(),
 			WebhookFanoutHook(),
 			InvitationEmailHook(),
-			CacheReconcileHook(),
 			StatsPurgeHook(),
 		),
 	}

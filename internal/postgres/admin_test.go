@@ -370,8 +370,8 @@ func TestAdminDeleteRemovesStats(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate delete jobs: %v", err)
 	}
-	if !slices.Contains(jobKinds, job.KindCacheReconcile) || !slices.Contains(jobKinds, job.KindLinkPurgeStats) {
-		t.Fatalf("delete jobs = %v, want cache.reconcile and link.purge_stats", jobKinds)
+	if len(jobKinds) != 2 || !slices.Contains(jobKinds, job.KindLinkRiskScan) || !slices.Contains(jobKinds, job.KindLinkPurgeStats) {
+		t.Fatalf("delete jobs = %v, want link.risk_scan and link.purge_stats only", jobKinds)
 	}
 	for {
 		n, err := store.PurgeLinkStatsBatch(ctx, l.ID, 100)

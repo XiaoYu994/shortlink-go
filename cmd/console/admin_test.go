@@ -460,7 +460,7 @@ func TestConsoleLinkCacheNotUpdated(t *testing.T) {
 	if !errors.Is(err, cache.ErrNotUpdated) {
 		t.Fatalf("run error = %v, want cache.ErrNotUpdated", err)
 	}
-	for _, want := range []string{"已经写入数据库", "缓存没有更新", "1 小时", "重跑"} {
+	for _, want := range []string{"已经写入数据库", "缓存没有更新", "5 分钟", "重跑"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want containing %q", err.Error(), want)
 		}

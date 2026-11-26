@@ -174,7 +174,6 @@ func openLinkStore(ctx context.Context) (linkStore, io.Closer, error) {
 		return nil, nil, err
 	}
 	store := cache.New(newConfiguredPostgresStore(db, features), rdb, prometheus.NewRegistry(), cache.Options{
-		// 复查读库失败要留一条日志；标准错误和命令结果分开。
 		Logger: logx.NewFallback(os.Stderr, "console-cli"),
 	})
 	return store, multiCloser{db, rdb}, nil

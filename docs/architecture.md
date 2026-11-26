@@ -13,8 +13,8 @@
 | 进程 | 路由 | 依赖 |
 | --- | --- | --- |
 | `redirector` | `GET /r/{code}`；配置 `OPS_ADDR` 时 `/healthz`、`/readyz`、`/metrics` 隔离到运维端口，未配置时共端口 | PostgreSQL（只读 `pgredirect`）、可选 Redis（只读 `cache.Reader`，`REDIS_URL` 为空时直连 PG）、可选 `ClickRecorder`（`FEATURE_ANALYTICS=false` 时不启动）；不含 `identity`、`risk`、`job`、`audit` |
-| `console` | 始终挂载核心路由：`GET /api/v1/capabilities`、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`；按需挂载认证插件 `AuthMethod`（跳转型 `GET /api/v1/auth/{id}/login`·`callback` 与交互型 `POST /api/v1/auth/{id}/send-code`·`verify`，涵盖 OIDC、GitHub 与手机号 OTP）、会话底座（`POST /api/v1/auth/logout`、`GET /api/v1/me`）与 `console.Module` 业务模块（`analytics` -> `/links/{code}/stats`、`orgs`、`members`、`invitations`、`api_keys`、`audit`、`webhooks`）、可选 `WEB_DIST_DIR` 前端静态页面（`/`）；`CONSOLE_OPS_ADDR` 可独立隔离运维端点 | PostgreSQL、可选 Redis（配置 `REDIS_URL` 时写穿维护缓存并入队 `cache.reconcile`）、可选 OIDC / GitHub / Phone OTP（`internal/sms`）登录插件、`WEBHOOK_SECRET_KEY`（可选）、`SMTP_HOST`（可选，决定是否入队邀请邮件）；`key`、`tenant`、`member` 与无 Redis 时的 `link` 命令仅连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)） |
-| `console worker` | 无公开业务路由；配置 `WORKER_ADDR` 时暴露 `/healthz`、`/readyz`、`/metrics` | PostgreSQL（核心维护 `sessions`/`jobs`/`invitations`/`phone_otp_challenges` 清理与 `audit_logs` 分区维护）；在 `cmd/console/feature_*.go` 按垂直特性自包含装配 `WorkerModule` 消费 `link.risk_scan`、`webhook.deliver`（+投递清理）、`invitation.email`、`cache.reconcile`、`link.purge_stats`（+统计表分区维护），关闭的特性自动注册 `disabledSkipHandler` 按 `job.Skip` 收尾（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）；可选 Redis 与 SMTP |
+| `console` | 始终挂载核心路由：`GET /api/v1/capabilities`、`POST/GET /api/v1/links`、`GET/PATCH/DELETE /api/v1/links/{code}`；按需挂载认证插件 `AuthMethod`（跳转型 `GET /api/v1/auth/{id}/login`·`callback` 与交互型 `POST /api/v1/auth/{id}/send-code`·`verify`，涵盖 OIDC、GitHub 与手机号 OTP）、会话底座（`POST /api/v1/auth/logout`、`GET /api/v1/me`）与 `console.Module` 业务模块（`analytics` -> `/links/{code}/stats`、`orgs`、`members`、`invitations`、`api_keys`、`audit`、`webhooks`）、可选 `WEB_DIST_DIR` 前端静态页面（`/`）；`CONSOLE_OPS_ADDR` 可独立隔离运维端点 | PostgreSQL、可选 Redis（配置 `REDIS_URL` 时同步覆盖写缓存，正缓存 5 分钟 TTL 兜底，[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）、可选 OIDC / GitHub / Phone OTP（`internal/sms`）登录插件、`WEBHOOK_SECRET_KEY`（可选）、`SMTP_HOST`（可选，决定是否入队邀请邮件）；`key`、`tenant`、`member` 与无 Redis 时的 `link` 命令仅连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)） |
+| `console worker` | 无公开业务路由；配置 `WORKER_ADDR` 时暴露 `/healthz`、`/readyz`、`/metrics` | PostgreSQL（核心维护 `sessions`/`jobs`/`invitations`/`phone_otp_challenges` 清理与 `audit_logs` 分区维护）；在 `cmd/console/feature_*.go` 按垂直特性自包含装配 `WorkerModule` 消费 `link.risk_scan`、`webhook.deliver`（+投递清理）、`invitation.email`、`link.purge_stats`（+统计表分区维护），关闭的特性自动注册 `disabledSkipHandler` 按 `job.Skip` 收尾（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）；可选 Redis 与 SMTP |
 
 `redirector` 不注册管理路由，API Key 鉴权只在 `console`。反向代理把 `/r/` 转到 redirector、把 `/api/v1/` 转到 console：`deploy/nginx.conf`（宿主机进程）、`deploy/nginx.stack.conf`（容器栈）。
 
@@ -51,9 +51,9 @@ shortlink/
 │   ├── memorystore/     # 内存存储，仅测试和本地开发；只实现跳转和创建
 │   ├── pgdb/            # PostgreSQL 公共连接池参数、约束错误判断与测试库 advisory lock 底座（零业务依赖）
 │   ├── pgredirect/      # 跳转数据面专属 PostgreSQL 存储：只读 GetByCode 与 ClickRecorder 批量写出（零管理/身份/风控依赖）
-│   ├── postgres/        # PostgreSQL 控制面与存储门面：内嵌 pgredirect.Store，提供带 RLS 事务隔离（tenanttx）的管理查询/CRUD、TxHook 事务内扩展点（风控/Webhook/邀请邮件/缓存对账/统计清理，ADR 0029）、统计与审计拆分的分区治理、会话、成员邀请、fail-closed 审计写入与 jobs Outbox 队列
+│   ├── postgres/        # PostgreSQL 控制面与存储门面：内嵌 pgredirect.Store，提供带 RLS 事务隔离（tenanttx）的管理查询/CRUD、TxHook 事务内扩展点（风控/Webhook/邀请邮件/统计清理，ADR 0029、ADR 0031）、统计与审计拆分的分区治理、会话、成员邀请、fail-closed 审计写入与 jobs Outbox 队列
 │   ├── storemetrics/    # 存储指标装饰器（透传完整读写 Store 与只读 Reader）
-│   ├── cache/           # Redis 客户端、读写 Store 与只读 Reader、Reconcile 电平对账
+│   ├── cache/           # Redis 客户端、读写 Store 与只读 Reader（5 分钟短 TTL 写穿 + 压测验证读路径保护，ADR 0031）
 │   ├── click/           # 点击元数据分类和异步批量记录（ClickRecorder、含 recorder_stopped 故障指标）
 │   └── config/          # 共用基础配置与内置功能开关（FeatureFlags）加载（零业务包依赖；各进程专属配置在 cmd/*/config.go）
 ├── migrations/          # golang-migrate 的 up/down SQL
@@ -155,7 +155,7 @@ GET/PATCH/DELETE /api/v1/links/{code}
   -> GetForTenant / Update / Delete，全部带 tenant_id，找不到一律 404
   -> PATCH：RawMessage 区分「没传」和「传了 null」，校验 URL、将来时间和 disabled 布尔值
   -> 被封禁的链接 Update/Delete 返回 403 link is banned，其他租户仍然是 404
-  -> Update/Delete/Ban/Unban 提交后除同步写穿外，同事务原子入队 cache.reconcile（ADR 0025）
+  -> Update/Delete/Ban/Unban 提交后同步覆盖写缓存（失败按 5 分钟正缓存 TTL 自然收敛，ADR 0031）
   -> Delete 在同一事务内删除 links 主行、写审计日志并入队 link.purge_stats；三张日统计表残余行由 worker 按 PK 元组异步分批清理，不返还本月配额（ADR 0025）
 
 GET /api/v1/links/{code}/stats
@@ -172,8 +172,8 @@ GET /api/v1/links/{code}/stats
 
 - `internal/memorystore`：map + `sync.RWMutex`，只用于测试和本地开发（[ADR 0004](adr/0004-storage-package-layout.md)）。
 - `internal/postgres`：`database/sql` + pgx，生产使用。连接池和迁移见 [ADR 0003](adr/0003-postgres-and-pool-config.md)。
-- `internal/storemetrics`：存储耗时装饰器。组装顺序和结果分类见 [ADR 0005](adr/0005-prometheus-before-tracing.md)、[ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0016](adr/0016-link-states-and-takedown.md)。操作有 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`。管理写复查也会记一次 `get`。
-- `internal/cache`：`GetByCode` 的 Redis 读缓存。值、TTL、singleflight、故障降级和指标见 [ADR 0006](adr/0006-redis-cache-design.md)，冷缓存回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写和回源的两种 `SET` 见 [ADR 0011](adr/0011-link-crud-api.md)，下架后的缓存和复查见 [ADR 0016](adr/0016-link-states-and-takedown.md)。
+- `internal/storemetrics`：存储耗时装饰器。组装顺序和结果分类见 [ADR 0005](adr/0005-prometheus-before-tracing.md)、[ADR 0014](adr/0014-per-tenant-rate-limit-and-quota.md)、[ADR 0016](adr/0016-link-states-and-takedown.md)。操作有 `create`、`get`、`list`、`get_tenant`、`update`、`delete`、`stats`、`ban`、`unban`。
+- `internal/cache`：`GetByCode` 的 Redis 读缓存。值、TTL（正缓存 5 分钟 / 负缓存 1 分钟）、singleflight、故障降级和指标见 [ADR 0006](adr/0006-redis-cache-design.md)，冷缓存回源保护见 [ADR 0008](adr/0008-cold-cache-read-path.md)，管理写和回源的两种 `SET` 见 [ADR 0011](adr/0011-link-crud-api.md)，写路径减法与短 TTL 取舍见 [ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)。
 - `internal/click`：点击分类和异步批量写出。投递和关停见 [ADR 0007](adr/0007-async-click-recording.md)，日聚合、维度和访客哈希见 [ADR 0012](adr/0012-click-analytics.md)。
 - 进程指标和连接池指标见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。
 - 表 `links`、`tenants`、`api_keys`、`users`、`user_identities`、`memberships`、`sessions`、`invitations`、`phone_otp_challenges`、`jobs`、`webhooks`、`webhook_deliveries`、按月范围分区表 `link_clicks_daily` / `link_dimension_daily` / `link_visitors_daily` / `audit_logs` 的列与分区定义以 `migrations/` 为准。短码见 [ADR 0002](adr/0002-random-short-codes.md)，不建外键见 [ADR 0010](adr/0010-app-level-referential-integrity.md)，API Key 和运维命令见 [ADR 0009](adr/0009-process-split-and-credentials.md)，停用和封禁见 [ADR 0016](adr/0016-link-states-and-takedown.md)，用户、组织和权限见 [ADR 0018](adr/0018-users-orgs-and-rbac.md)，可靠后台任务与异步 URL 风控见 [ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)，审计日志与 fail-closed 元数据约束见 [ADR 0023](adr/0023-audit-logs.md)、[ADR 0025](adr/0025-reconcile-cache-async-purge-and-audit-hardening.md)，时序按月分区与自动淘汰见 [ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)，Webhook 订阅投递与异步邀请邮件见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)，PostgreSQL 行级安全（RLS）第二道租户隔离防线（`shortlink_tenant` 角色与 `SET LOCAL` 事务上下文）见 [ADR 0028](adr/0028-postgres-rls-tenant-isolation.md)。
@@ -194,8 +194,8 @@ GET /api/v1/links/{code}/stats
 - `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
 - `DRAIN_DELAY`：默认 `5s`，关闭监听前 `/readyz` 返回 503 的等待，盖住编排器的一个探测周期；`0s` 表示不等
 - `CACHE_MISS_CONCURRENCY`：默认 `8`，仅 redirector 使用，普通缓存未命中时进程内同时回源数据库的最大请求数，超出返回 503
-- `CACHE_FETCH_TIMEOUT`：默认 `1s`，单次回源或写后复查超时；必须为正且不超过 `REQUEST_TIMEOUT`
-- `REDIS_URL`：可选，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；配置时启动 Ping，连不上则退出；留空时跳过缓存层直连 PostgreSQL 并关闭 `cache.reconcile` 任务（[ADR 0029](adr/0029-modular-feature-plugins.md)）
+- `CACHE_FETCH_TIMEOUT`：默认 `1s`，单次回源超时；必须为正且不超过 `REQUEST_TIMEOUT`
+- `REDIS_URL`：可选，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；配置时启动 Ping，连不上则退出；留空时跳过缓存层直连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）
 - `FEATURE_ANALYTICS` / `FEATURE_RISK_SCAN`：内置功能布尔开关（均默认 `true`，[ADR 0029](adr/0029-modular-feature-plugins.md)）。关闭 `FEATURE_ANALYTICS` 时 `redirector` 不启动 `ClickRecorder` 也不要求 `VISITOR_SALT`，`console` 不挂 `/stats`、响应省略 `clicks`/`clicks_today` 并对点击排序返回 400，`postgres` 跳过 `link_clicks_daily` 关联查询，`worker` 跳过统计表分区维护与清理；关闭 `FEATURE_RISK_SCAN` 时写库不入队 `link.risk_scan`，`worker` 跳过历史残留风控任务。跨进程部署时 `redirector`、`console serve`、`console worker` 与运维 CLI 应保持开关与外围配置一致
 - `VISITOR_SALT`：访客哈希的 HMAC 密钥。`FEATURE_ANALYTICS=true` 时 redirector 启动必填，关闭统计时可留空；console 不用。生产从密钥管理注入，不能提交真实值
 - `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_CIDRS`：默认 `false`；设为 `true` 时结合可信代理 CIDR 从右往左剥离可信代理跳数读取真实客户端 IP，既防客户端伪造，也防多层代理导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）

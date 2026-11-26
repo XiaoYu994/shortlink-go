@@ -113,44 +113,7 @@ func TestStoreIndividualTxHooks(t *testing.T) {
 			t.Fatalf("risk_scan jobs = %d, want 2", got)
 		}
 		if got := countJobsByKind(t, store, ""); got != 2 {
-			t.Fatalf("total jobs = %d, want 2 (no reconcile/purge/webhook)", got)
-		}
-	})
-
-	t.Run("only cache reconcile hook", func(t *testing.T) {
-		store, tenantID := newTestStoreWithOptions(t, WithTxHooks(CacheReconcileHook()))
-		ctx := testAuditCtx(context.Background())
-
-		l := mustLink(t, "https://example.com/reconcile-only", tenantID)
-		if err := store.Create(ctx, l); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		if got := countJobsByKind(t, store, ""); got != 0 {
-			t.Fatalf("jobs after Create = %d, want 0", got)
-		}
-		disabled := true
-		if _, err := store.Update(ctx, tenantID, l.Code, link.Update{Disabled: &disabled}); err != nil {
-			t.Fatalf("Update: %v", err)
-		}
-		if _, err := store.Ban(ctx, l.Code, link.BanReasonSpam, link.BanSourceOperator); err != nil {
-			t.Fatalf("Ban: %v", err)
-		}
-		// 幂等重复封禁仍入队 cache.reconcile 保证自愈语义。
-		if _, err := store.Ban(ctx, l.Code, link.BanReasonSpam, link.BanSourceOperator); err != nil {
-			t.Fatalf("Ban repeat: %v", err)
-		}
-		if _, err := store.Unban(ctx, l.Code); err != nil {
-			t.Fatalf("Unban: %v", err)
-		}
-		if err := store.Delete(ctx, tenantID, l.Code); err != nil {
-			t.Fatalf("Delete: %v", err)
-		}
-
-		if got := countJobsByKind(t, store, job.KindCacheReconcile); got != 5 {
-			t.Fatalf("cache.reconcile jobs = %d, want 5", got)
-		}
-		if got := countJobsByKind(t, store, ""); got != 5 {
-			t.Fatalf("total jobs = %d, want 5", got)
+			t.Fatalf("total jobs = %d, want 2 (no purge/webhook)", got)
 		}
 	})
 
@@ -229,11 +192,20 @@ func TestStoreFailingTxHookRollsBackTransaction(t *testing.T) {
 
 	t.Run("ban rollback", func(t *testing.T) {
 		store, tenantID := newTestStoreWithOptions(t, WithTxHooks(
-			CacheReconcileHook(),
+			WebhookFanoutHook(),
 			failOnEvent(func(ev TxEvent) bool { _, ok := ev.(LinkBannedEvent); return ok }),
 		))
 		ctx := testAuditCtx(context.Background())
 
+		if _, err := store.CreateWebhook(ctx, webhook.CreateParams{
+			TenantID:         tenantID,
+			URL:              "https://hooks.example.com/ban-rollback",
+			Events:           []webhook.EventType{webhook.EventLinkBanned},
+			SecretCiphertext: bytes.Repeat([]byte{0xcd}, 64),
+			SecretPrefix:     "whsec_ban",
+		}); err != nil {
+			t.Fatalf("CreateWebhook: %v", err)
+		}
 		l := mustLink(t, "https://example.com/fail-ban", tenantID)
 		if err := store.Create(ctx, l); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -249,8 +221,8 @@ func TestStoreFailingTxHookRollsBackTransaction(t *testing.T) {
 		if got.Ban != nil {
 			t.Fatalf("Ban = %+v after rolled back Ban, want nil", got.Ban)
 		}
-		if gotJobs := countJobsByKind(t, store, job.KindCacheReconcile); gotJobs != 0 {
-			t.Fatalf("cache.reconcile jobs after rolled back Ban = %d, want 0", gotJobs)
+		if gotJobs := countJobsByKind(t, store, job.KindWebhookDeliver); gotJobs != 0 {
+			t.Fatalf("webhook.deliver jobs after rolled back Ban = %d, want 0", gotJobs)
 		}
 	})
 

@@ -182,3 +182,8 @@
 - [x] `internal/console` `PhoneOTPAuthMethod`（`POST /api/v1/auth/phone/send-code`·`verify`）直插 `AuthMethod` + `SessionIssuer` 与 `/api/v1/capabilities` 动态路径下发
 - [x] `cmd/console/` 演进为 `feature_*.go` 垂直特性自包含装配（收口 `serve.go`、`worker.go`、`workermodule.go`）并接入 `phone_otp.cleanup`
 - [x] 前端 `LoginPage` + `PhoneOTPLoginForm` 能力驱动渲染与 `make smoke` 本地 SMS Webhook 桩端到端闭环验证
+
+## 缓存写路径与 Worker 模块装配做减法（[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)，已完成）
+
+- [x] `internal/cache` 正缓存 TTL 收窄至 5 分钟，移除 `recheckAfterPositiveWrite` 写后查库复查与 `cache.reconcile` Outbox 全链路（`KindCacheReconcile`、`CacheReconcileHook`、`Reader.Reconcile`、`cacheWorkerModule`），保留压测验证的读路径保护与 `Ban`/`Unban` 的 `ErrNotUpdated` 幂等重跑提示
+- [x] `cmd/console/workermodule.go` 与 `cmd/console/features.go` 移除私有模块泛型校验框架、冗余 `shortlink_jobs_feature_disabled_skipped_total` 指标、`ShortlinkJobsFeatureDisabledSkipped` 告警及 `webhooks_fanout` 启动日志细分，复用 `job.Runner` 原生 `shortlink_jobs_processed_total{result="skipped"}` 指标

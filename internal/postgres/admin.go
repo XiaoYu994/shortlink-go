@@ -521,7 +521,7 @@ func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.
 
 /*
 Delete 在事务内先锁并删除 links 主行、写必选审计日志，再经 TxHook 分发 LinkDeletedEvent
-（按已启用特性同事务入队 cache.reconcile、link.purge_stats 或扇出 Webhook，ADR 0025、ADR 0029）。
+（按已启用特性同事务入队 link.purge_stats 或扇出 Webhook，ADR 0025、ADR 0029、ADR 0031）。
 三张日统计表的残留行由 worker 分批异步回收，避免热点短链删表拉长数据库行锁。
 已封禁的链接返回 link.ErrBanned，不删任何东西：链接这一行就是封禁记录，
 删掉之后违规 URL、原因和归属租户都没有依据。其他租户的链接仍是 link.ErrNotFound。

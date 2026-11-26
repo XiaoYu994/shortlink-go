@@ -115,7 +115,7 @@ func runServe(cliOpts serveCLIOptions) error {
 		logger.Info("serving web console static files", "dir", cfg.WebDistDir)
 	}
 
-	enabledFeatures, disabledFeatures := storeFeatures.consoleEnabledDisabled(whModule != nil, cfg.WebDistDir != "")
+	enabledFeatures, disabledFeatures := storeFeatures.consoleEnabledDisabled(cfg.RedisURL != "", cfg.WebDistDir != "")
 	enabledAuthMethods := make([]string, 0, len(authMethods))
 	for _, m := range authMethods {
 		enabledAuthMethods = append(enabledAuthMethods, m.Descriptor().ID)

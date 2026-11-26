@@ -45,7 +45,7 @@ NewHandler 返回处理 link.risk_scan 任务的 job.Handler（ADR 0020）：
 4. 调用 Scanner 扫描，命中 SSRF 拦截（ErrBlockedAddress）或非法协议直接标为 Permanent；
 5. 违规时调用 BanIfURL(code, expectedURL, reason, risk)：
   - link.ErrNotFound / link.ErrURLChanged 标为 job.Skip（链接已删或已改成新 URL）；
-  - cache.ErrNotUpdated 当作可重试错误退避重跑，借 Ban 幂等自愈 Redis 负缓存。
+  - cache.ErrNotUpdated 记 Warn 日志返回 nil：数据库封禁已提交，不重抓外网 URL，旧正缓存按 5 分钟 TTL 自然失效（ADR 0031）。
 */
 func NewHandler(opts HandlerOptions) job.Handler {
 	logger := opts.Logger
@@ -102,7 +102,7 @@ func NewHandler(opts HandlerOptions) job.Handler {
 			return job.Skip("link url changed before ban")
 		}
 		if errors.Is(err, cache.ErrNotUpdated) {
-			logger.WarnContext(ctx, "risk ban committed; cache sync deferred to reconcile job",
+			logger.WarnContext(ctx, "risk ban committed; cache write failed and will expire within ttl",
 				"code", p.Code, "reason", verdict.Reason, "err", err)
 			return nil
 		}

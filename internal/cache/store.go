@@ -20,8 +20,14 @@ import (
 
 const (
 	// keyPrefix 把缓存 key 和 Redis 里其他应用的 key 隔开。
-	keyPrefix   = "shortlink:link:"
-	positiveTTL = time.Hour
+	keyPrefix = "shortlink:link:"
+	/*
+		positiveTTL 是正缓存上限（5 分钟，见 ADR 0031）。
+		相比早期的 1 小时，短 TTL 把管理写瞬间 Redis 闪断或微秒级并发写交错的最坏陈旧窗口
+		自然收窄到 <= 5 分钟，从而免去写后同步回查 DB 与 Outbox 异步对账两层复杂状态机；
+		热链每 5 分钟仅多 1 次经 singleflight 合并的回源，对数据库几乎无感。
+	*/
+	positiveTTL = 5 * time.Minute
 	// negativeTTL 更短：不存在的短码不该久占内存，又要挡住随机短码打数据库。
 	negativeTTL = time.Minute
 
@@ -47,7 +53,7 @@ const (
 	/*
 		committedWriteTimeout 是管理写提交之后更新缓存的上限。
 		这段不跟请求取消走：客户端断开或请求超时的时候，数据库已经提交。
-		若这时跳过 SET，删除的链接会继续跳转，直到正缓存 TTL（最长 1 小时）。
+		若这时跳过 SET，删除的链接会继续跳转，直到正缓存 TTL（最长 5 分钟）。
 	*/
 	committedWriteTimeout = time.Second
 
@@ -253,23 +259,18 @@ func New(next LinkStore, rdb *redis.Client, registry *prometheus.Registry, opts 
 }
 
 /*
-Create 成功后写穿正缓存，盖掉负缓存；写完后再按跳转查询复查一次数据库。
-异步风控上线后（ADR 0016、ADR 0020），创建提交后 worker 可能立刻封禁并写负缓存，
-复查确保晚到的正缓存不会把风控负缓存盖回去。写失败不影响创建结果。
+Create 成功后同步覆盖写缓存：可跳转写正缓存（盖掉负缓存），否则写负缓存。
+写失败不影响创建结果，最坏陈旧窗口由 positiveTTL（5 分钟）兜底（ADR 0031）。
 */
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
 	if err := s.next.Create(ctx, l); err != nil {
 		return err
 	}
-	key := keyPrefix + l.Code
+	val := l
 	if !l.Servable(time.Now()) {
-		s.writeCommitted(ctx, key, nil)
-		return nil
+		val = nil
 	}
-	s.writeCommitted(ctx, key, l)
-	if _, err := s.recheckAfterPositiveWrite(ctx, key, l.Code); err != nil {
-		s.logger.WarnContext(ctx, "write negative cache after recheck", "code", l.Code, "err", err)
-	}
+	s.writeCommitted(ctx, keyPrefix+l.Code, val)
 	return nil
 }
 
@@ -353,30 +354,20 @@ func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (
 }
 
 /*
-Update 先提交数据库，再无条件覆盖缓存。
-
-修改后的链接如果不可跳转（已过期、已停用或已封禁），写负缓存，
-让 redirector 直接 404；否则写新的正缓存。停用因而写负缓存，启用写正缓存。
-无条件 SET 会覆盖在途回源；同时回源改用 SET NX，旧快照不会反过来盖掉这里的新值。
-Redis 写失败只影响一致性，旧值最多保留到 TTL，见 ADR 0011。
-
-写了正缓存之后还要复查一次数据库：删除、停用、封禁可能和这次修改并发，
-晚到的正缓存会盖掉它们的负缓存。复查偏向不跳转，见 ADR 0016、ADR 0020。
+Update 先提交数据库，再无条件覆盖缓存：
+不可跳转（已过期、已停用或已封禁）写负缓存，可跳转写正缓存。
+回源使用 SET NX 防止在途旧快照回盖；Redis 写失败只影响一致性，最长保留到 positiveTTL（5 分钟，ADR 0031）。
 */
 func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
 	updated, err := s.next.Update(ctx, tenantID, code, u)
 	if err != nil {
 		return nil, err
 	}
-	key := keyPrefix + code
-	if !updated.Servable(time.Now()) {
-		s.writeCommitted(ctx, key, nil)
-		return updated, nil
+	var val *link.Link
+	if updated.Servable(time.Now()) {
+		val = &updated.Link
 	}
-	s.writeCommitted(ctx, key, &updated.Link)
-	if _, err := s.recheckAfterPositiveWrite(ctx, key, code); err != nil {
-		s.logger.WarnContext(ctx, "write negative cache after recheck", "code", code, "err", err)
-	}
+	s.writeCommitted(ctx, keyPrefix+code, val)
 	return updated, nil
 }
 
@@ -429,80 +420,26 @@ func (s *Store) BanIfURL(ctx context.Context, code, expectedURL string, reason l
 /*
 Unban 先解封数据库，再按返回链接的 Servable 决定写正缓存还是负缓存：
 解封了但仍然停用或已过期时写负缓存。
-
-写正缓存的分支和 Update 一样要复查：解封可能和停用、删除、封禁交错。
-下游错误原样返回，缓存不动；数据库写成功但缓存没有落到正确的值上时，
-返回数据库里的 Link 和一个包装 ErrNotUpdated 的错误。
-如果复查确认链接已经找不到，补写的负缓存就是当时正确的值，不算失败。
+数据库写成功但缓存没写上时返回数据库里的 Link 和包装 ErrNotUpdated 的错误（ADR 0016、ADR 0031）。
 */
 func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
 	unbanned, err := s.next.Unban(ctx, code)
 	if err != nil {
 		return nil, err
 	}
-	key := keyPrefix + code
+	val := unbanned
 	if !unbanned.Servable(time.Now()) {
-		if err := s.writeCommittedResult(ctx, key, nil); err != nil {
-			return unbanned, notUpdated("unban link", err)
-		}
-		return unbanned, nil
+		val = nil
 	}
-
-	writeErr := s.writeCommittedResult(ctx, key, unbanned)
-	wroteNegative, recheckErr := s.recheckAfterPositiveWrite(ctx, key, code)
-	switch {
-	case recheckErr != nil:
-		return unbanned, notUpdated("unban link", errors.Join(writeErr, recheckErr))
-	case !wroteNegative && writeErr != nil:
-		// 复查读到了链接，正缓存那次写失败就没被负缓存盖掉，缓存状态不确定。
-		return unbanned, notUpdated("unban link", writeErr)
-	default:
-		// 复查补写了负缓存：它排在正缓存之后，最终值符合复查结论。
-		return unbanned, nil
+	if err := s.writeCommittedResult(ctx, keyPrefix+code, val); err != nil {
+		return unbanned, notUpdated("unban link", err)
 	}
+	return unbanned, nil
 }
 
 // Stats 直接查 PostgreSQL，不经过缓存；管理接口流量低，先不做结果缓存。
 func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error) {
 	return s.next.Stats(ctx, tenantID, code, from, to)
-}
-
-/*
-Reconcile 供后台 Outbox worker 幂等对齐单条短码缓存，消除异步写失配的 1 小时窗口（ADR 0025）。
-先走 r.next.GetByCode 回源（用 fetchTimeout，不占跳转路径的 missSlots/fallbackSlots）：
-- 未找到或不可跳转 -> 无条件写负缓存；
-- 可跳转 -> 无条件写正缓存并执行 recheckAfterPositiveWrite，防止并发下架写与正缓存交错。
-失败返回错误，由 jobs runner 按退避重试。
-*/
-func (r *Reader) Reconcile(ctx context.Context, code string) error {
-	if code == "" {
-		return nil
-	}
-	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.fetchTimeout)
-	defer cancel()
-
-	key := keyPrefix + code
-	found, err := r.next.GetByCode(readCtx, code)
-	if errors.Is(err, link.ErrNotFound) {
-		return r.writeCommittedResult(ctx, key, nil)
-	}
-	if err != nil {
-		return fmt.Errorf("reconcile cache read: %w", err)
-	}
-	if !found.Servable(time.Now()) {
-		return r.writeCommittedResult(ctx, key, nil)
-	}
-
-	writeErr := r.writeCommittedResult(ctx, key, found)
-	wroteNegative, recheckErr := r.recheckAfterPositiveWrite(ctx, key, code)
-	switch {
-	case recheckErr != nil:
-		return errors.Join(writeErr, recheckErr)
-	case !wroteNegative && writeErr != nil:
-		return writeErr
-	default:
-		return nil
-	}
 }
 
 /*
@@ -671,41 +608,6 @@ func (r *Reader) writeCache(ctx context.Context, key string, l *link.Link, mode 
 	return nil
 }
 
-/*
-recheckAfterPositiveWrite 在写完正缓存之后，按跳转查询复查一次数据库。
-
-原因见 ADR 0016「下架和管理写交错」：删除、停用、封禁可能和这次管理写并发，
-它们的负缓存先写，晚到的正缓存又盖回去，不可跳转的链接会继续跳最长 1 小时。
-读完再补写负缓存，负缓存就排在自己的正缓存之后；如果复查时已经读不到封禁，
-说明封禁在复查之后才提交，封禁自己的负缓存写入更晚，同样排在正缓存之后。
-
-读到链接就结束；读到 link.ErrNotFound 就补写负缓存。
-读库失败（超时、库故障）同样补写负缓存并记日志：ADR 0016 的复查偏向不跳转，
-宁可让这条链接最多多 404 一分钟（负缓存过期后回源自愈），
-也不让可能已经被下架或删除的链接继续跳。这是有意的取舍。
-
-直接调 s.next.GetByCode，不走 readStore 的 missSlots/fallbackSlots：
-那是跳转路径的回源保护，管理写频率低，用不上也不该占它的配额。
-读库、正缓存写入和负缓存补写各自用独立的超时，不共用会被前一步耗尽的 deadline。
-
-返回 wroteNegative 表示走了补写负缓存的分支；err 只在补写失败时非 nil。
-读库失败本身只记日志，不算补写失败：负缓存已经写上就是复查选择的最终值。
-*/
-func (r *Reader) recheckAfterPositiveWrite(ctx context.Context, key, code string) (wroteNegative bool, err error) {
-	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.fetchTimeout)
-	defer cancel()
-	_, readErr := r.next.GetByCode(readCtx, code)
-	switch {
-	case readErr == nil:
-		return false, nil
-	case errors.Is(readErr, link.ErrNotFound):
-		return true, r.writeCommittedResult(ctx, key, nil)
-	default:
-		r.logger.WarnContext(ctx, "recheck link after cache write", "code", code, "err", readErr)
-		return true, r.writeCommittedResult(ctx, key, nil)
-	}
-}
-
 // notUpdated 给「库写成功、缓存没更新」的错误加上操作名和哨兵。
 func notUpdated(operation string, err error) error {
 	return fmt.Errorf("%s: %w: %w", operation, ErrNotUpdated, err)
@@ -748,7 +650,7 @@ func (r *Reader) readStore(ctx context.Context, code, path string) (*link.Link, 
 
 /*
 cacheTTL 是这条正缓存能放多久。
-没有到期时间时用 1 小时；有的话不能比链接本身活得更久。
+没有到期时间时用 positiveTTL（5 分钟）；有的话不能比链接本身活得更久。
 */
 func cacheTTL(l *link.Link) time.Duration {
 	if l.ExpiresAt == nil {

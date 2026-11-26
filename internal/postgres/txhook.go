@@ -84,7 +84,7 @@ type LinkDeletedEvent struct {
 func (LinkDeletedEvent) isTxEvent() {}
 
 // LinkBannedEvent 在平台封禁执行完成后触发。
-// 幂等重跑已封禁链接时 NewlyBanned 为 false，缓存对账仍可执行，Webhook 只在首次封禁时扇出。
+// 幂等重跑已封禁链接时 NewlyBanned 为 false，Webhook 只在首次封禁时扇出。
 type LinkBannedEvent struct {
 	Link        link.Link
 	NewlyBanned bool
@@ -93,7 +93,7 @@ type LinkBannedEvent struct {
 func (LinkBannedEvent) isTxEvent() {}
 
 // LinkUnbannedEvent 在平台解封执行完成后触发。
-// 幂等重跑未封禁链接时 WasBanned 为 false，缓存对账仍可执行，Webhook 只在实际解封时扇出。
+// 幂等重跑未封禁链接时 WasBanned 为 false，Webhook 只在实际解封时扇出。
 type LinkUnbannedEvent struct {
 	Link           link.Link
 	WasBanned      bool
@@ -115,10 +115,6 @@ type linkRiskScanPayload struct {
 	LinkID int64  `json:"link_id"`
 	Code   string `json:"code"`
 	URL    string `json:"url"`
-}
-
-type cacheReconcilePayload struct {
-	Code string `json:"code"`
 }
 
 type linkPurgeStatsPayload struct {
@@ -279,24 +275,6 @@ func InvitationEmailHook() TxHook {
 			return fmt.Errorf("enqueue email: %w", err)
 		}
 		return nil
-	}
-}
-
-// CacheReconcileHook 返回 Redis 缓存电平对账入队钩子（ADR 0025）。
-func CacheReconcileHook() TxHook {
-	return func(ctx context.Context, tx *sql.Tx, ev TxEvent) error {
-		switch e := ev.(type) {
-		case LinkUpdatedEvent:
-			return insertJobTx(ctx, tx, job.KindCacheReconcile, e.Link.TenantID, cacheReconcilePayload{Code: e.Link.Code})
-		case LinkDeletedEvent:
-			return insertJobTx(ctx, tx, job.KindCacheReconcile, e.TenantID, cacheReconcilePayload{Code: e.Code})
-		case LinkBannedEvent:
-			return insertJobTx(ctx, tx, job.KindCacheReconcile, e.Link.TenantID, cacheReconcilePayload{Code: e.Link.Code})
-		case LinkUnbannedEvent:
-			return insertJobTx(ctx, tx, job.KindCacheReconcile, e.Link.TenantID, cacheReconcilePayload{Code: e.Link.Code})
-		default:
-			return nil
-		}
 	}
 }
 

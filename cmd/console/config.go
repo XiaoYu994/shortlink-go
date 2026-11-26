@@ -56,7 +56,6 @@ type ConsoleConfig struct {
 // StoreFeatures 推导管理进程写路径需要挂载的事务钩子特性集。
 func (cfg ConsoleConfig) StoreFeatures() StoreFeatures {
 	return StoreFeatures{
-		Cache:     cfg.RedisURL != "",
 		Analytics: cfg.Features.Analytics,
 		RiskScan:  cfg.Features.RiskScan,
 		Webhooks:  cfg.WebhookSecretKey != "",
@@ -225,7 +224,6 @@ type WorkerConfig struct {
 // StoreFeatures 推导后台任务进程写路径（如风控 BanIfURL）需要挂载的事务钩子特性集。
 func (cfg WorkerConfig) StoreFeatures() StoreFeatures {
 	return StoreFeatures{
-		Cache:     cfg.RedisURL != "",
 		Analytics: cfg.Features.Analytics,
 		RiskScan:  cfg.Features.RiskScan,
 		Webhooks:  cfg.WebhookSecretKey != "",

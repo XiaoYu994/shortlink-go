@@ -796,7 +796,7 @@ func TestStoreGetByCodeCanceledDuringCacheReadDoesNotFetchOrigin(t *testing.T) {
 }
 
 func TestCacheTTL(t *testing.T) {
-	soon := time.Now().Add(30 * time.Minute)
+	soon := time.Now().Add(2 * time.Minute)
 	past := time.Now().Add(-time.Second)
 	long := time.Now().Add(2 * time.Hour)
 	tests := []struct {
@@ -807,8 +807,8 @@ func TestCacheTTL(t *testing.T) {
 		upperBound time.Duration
 	}{
 		{name: "no expiry", wantExact: positiveTTL, exact: true},
-		{name: "longer than an hour", at: &long, wantExact: positiveTTL, exact: true},
-		{name: "thirty minutes", at: &soon, upperBound: 30 * time.Minute},
+		{name: "longer than positiveTTL", at: &long, wantExact: positiveTTL, exact: true},
+		{name: "two minutes", at: &soon, upperBound: 2 * time.Minute},
 		{name: "past", at: &past},
 	}
 	for _, tt := range tests {
@@ -837,7 +837,7 @@ func TestStoreGetByCodeCacheTTLFollowsExpiry(t *testing.T) {
 	code := newTestCode(t)
 	cleanupTestKey(t, rdb, code)
 
-	expires := time.Now().Add(30 * time.Minute)
+	expires := time.Now().Add(2 * time.Minute)
 	want := &link.Link{
 		ID:        7,
 		Code:      code,
@@ -855,8 +855,8 @@ func TestStoreGetByCodeCacheTTLFollowsExpiry(t *testing.T) {
 		t.Fatalf("GetByCode: %v", err)
 	}
 	ttl := rdb.PTTL(ctx, keyPrefix+code).Val()
-	if ttl <= 0 || ttl > 30*time.Minute {
-		t.Errorf("cache TTL = %v, want in (0, 30m]", ttl)
+	if ttl <= 0 || ttl > 2*time.Minute {
+		t.Errorf("cache TTL = %v, want in (0, 2m]", ttl)
 	}
 }
 

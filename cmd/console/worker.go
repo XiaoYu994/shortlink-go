@@ -1,7 +1,7 @@
 /*
-worker 是 console 的后台任务模式（阶段 12、ADR 0020、ADR 0030）：
+worker 是 console 的后台任务模式（阶段 12、ADR 0020、ADR 0030、ADR 0031）：
 作为纯组合根按垂直特性装配各 WorkerModule（核心清理、手机号 OTP 清理、异步风控、Webhook、
-异步邀请邮件、缓存对账与点击统计维护），并按 WORKER_ADDR 可选暴露运维端口。
+异步邀请邮件与点击统计维护），并按 WORKER_ADDR 可选暴露运维端口。
 */
 package main
 
@@ -97,15 +97,12 @@ func runWorker(cliOpts workerCLIOptions) error {
 	)
 
 	storeFeatures := cfg.StoreFeatures()
-	enabledFeatures, disabledFeatures := storeFeatures.enabledDisabled()
+	enabledFeatures, disabledFeatures := storeFeatures.enabledDisabled(cfg.RedisURL != "")
 	logger.Info("worker features configured", "enabled_features", enabledFeatures, "disabled_features", disabledFeatures)
 
 	pgStore := newConfiguredPostgresStore(db, storeFeatures)
 	metricsStore := storemetrics.New(pgStore, registry)
-	var (
-		banner     risk.LinkBanner = metricsStore
-		reconciler cacheReconciler
-	)
+	var banner risk.LinkBanner = metricsStore
 	cachedStore, rdb, closeRedis, err := openRedisCache(cfg.RedisURL, metricsStore, registry, cfg.CacheFetchTimeout, logger)
 	if err != nil {
 		return err
@@ -113,12 +110,10 @@ func runWorker(cliOpts workerCLIOptions) error {
 	defer closeRedis()
 	if cachedStore != nil {
 		banner = cachedStore
-		reconciler = cachedStore
 	}
 
 	assembled, err := assembleWorkerModules(
 		logger,
-		registry,
 		coreWorkerModule{
 			store:               pgStore,
 			cleanupInterval:     cfg.CleanupInterval,
@@ -167,7 +162,6 @@ func runWorker(cliOpts workerCLIOptions) error {
 			consolePublicURL: cfg.ConsolePublicURL,
 			logger:           logger,
 		},
-		cacheWorkerModule{reconciler: reconciler},
 		analyticsWorkerModule{
 			enabled:         cfg.Features.Analytics,
 			store:           pgStore,

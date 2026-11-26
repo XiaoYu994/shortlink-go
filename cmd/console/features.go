@@ -11,12 +11,11 @@ import (
 )
 
 /*
-StoreFeatures 汇总 console serve、console worker 与运维 CLI 共用的存储级外围特性开关（ADR 0029）。
+StoreFeatures 汇总 console serve、console worker 与运维 CLI 共用的存储级外围特性开关（ADR 0029、ADR 0031）。
 三类入口共用 newConfiguredPostgresStore 构造 postgres.Store，确保无论通过 HTTP、后台风控
 还是 CLI（link ban/unban、member invite）写库，挂载的事务钩子完全一致。
 */
 type StoreFeatures struct {
-	Cache     bool // REDIS_URL 非空
 	Analytics bool // FEATURE_ANALYTICS
 	RiskScan  bool // FEATURE_RISK_SCAN
 	Webhooks  bool // WEBHOOK_SECRET_KEY 非空
@@ -39,33 +38,25 @@ func partitionFeatures(items []featureStatus) (enabled, disabled []string) {
 	return enabled, disabled
 }
 
-func (f StoreFeatures) featureStatuses(webhooksAPIEnabled bool) []featureStatus {
-	items := []featureStatus{
-		{"cache", f.Cache},
+func (f StoreFeatures) enabledDisabled(cacheEnabled bool) (enabled, disabled []string) {
+	return partitionFeatures([]featureStatus{
+		{"cache", cacheEnabled},
 		{"analytics", f.Analytics},
 		{"risk_scan", f.RiskScan},
-	}
-	if f.Webhooks && !webhooksAPIEnabled {
-		items = append(items,
-			featureStatus{"webhooks_fanout", true},
-			featureStatus{"webhooks_api", false},
-		)
-	} else {
-		items = append(items, featureStatus{"webhooks", f.Webhooks})
-	}
-	return append(items, featureStatus{"email", f.Email})
+		{"webhooks", f.Webhooks},
+		{"email", f.Email},
+	})
 }
 
-func (f StoreFeatures) enabledDisabled() (enabled, disabled []string) {
-	return partitionFeatures(f.featureStatuses(true))
-}
-
-/*
-consoleEnabledDisabled 生成 console serve 启动日志中的特性状态列表：
-当配置了 WEBHOOK_SECRET_KEY 但未启用任何用户登录方式时，明确区分事件扇出启用而管理 API 关闭。
-*/
-func (f StoreFeatures) consoleEnabledDisabled(webhooksAPIEnabled, webEnabled bool) (enabled, disabled []string) {
-	return partitionFeatures(append(f.featureStatuses(webhooksAPIEnabled), featureStatus{"web", webEnabled}))
+func (f StoreFeatures) consoleEnabledDisabled(cacheEnabled, webEnabled bool) (enabled, disabled []string) {
+	return partitionFeatures([]featureStatus{
+		{"cache", cacheEnabled},
+		{"analytics", f.Analytics},
+		{"risk_scan", f.RiskScan},
+		{"webhooks", f.Webhooks},
+		{"email", f.Email},
+		{"web", webEnabled},
+	})
 }
 
 /*
@@ -94,7 +85,7 @@ func loadAdminCLIStoreFeatures() (StoreFeatures, error) {
 	}, nil
 }
 
-// loadLinkCLIStoreFeatures 加载 link ban/unban 命令实际可能触发的缓存对账与 Webhook 钩子。
+// loadLinkCLIStoreFeatures 加载 link ban/unban 命令实际可能触发的 Webhook 钩子。
 func loadLinkCLIStoreFeatures() (StoreFeatures, error) {
 	webhookKey := strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY"))
 	if webhookKey != "" {
@@ -103,7 +94,6 @@ func loadLinkCLIStoreFeatures() (StoreFeatures, error) {
 		}
 	}
 	return StoreFeatures{
-		Cache:    strings.TrimSpace(os.Getenv("REDIS_URL")) != "",
 		Webhooks: webhookKey != "",
 	}, nil
 }
@@ -118,9 +108,6 @@ func newConfiguredPostgresStore(db *sql.DB, f StoreFeatures) *postgres.Store {
 	}
 	if f.Email {
 		hooks = append(hooks, postgres.InvitationEmailHook())
-	}
-	if f.Cache {
-		hooks = append(hooks, postgres.CacheReconcileHook())
 	}
 	if f.Analytics {
 		hooks = append(hooks, postgres.StatsPurgeHook())

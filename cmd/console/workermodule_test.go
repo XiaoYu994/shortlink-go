@@ -99,17 +99,6 @@ func (s *stubWorkerStore) DropExpiredStatsPartitions(context.Context, time.Time,
 	return 0, nil
 }
 
-type stubReconciler struct {
-	calls int
-	codes []string
-}
-
-func (s *stubReconciler) Reconcile(_ context.Context, code string) error {
-	s.calls++
-	s.codes = append(s.codes, code)
-	return nil
-}
-
 type stubPhoneOTPConsoleStore struct{}
 
 func (stubPhoneOTPConsoleStore) CreatePhoneOTPChallenge(context.Context, identity.PhoneOTPChallengeParams) (int64, error) {
@@ -124,12 +113,10 @@ func (stubPhoneOTPConsoleStore) VerifyPhoneOTPChallenge(context.Context, string,
 
 func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 	store := &stubWorkerStore{}
-	reconciler := &stubReconciler{}
 	reg := prometheus.NewRegistry()
 
 	assembled, err := assembleWorkerModules(
 		nil,
-		reg,
 		coreWorkerModule{
 			store:               store,
 			cleanupInterval:     time.Hour,
@@ -168,7 +155,6 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 			},
 			store: store,
 		},
-		cacheWorkerModule{reconciler: reconciler},
 		analyticsWorkerModule{
 			enabled:         true,
 			store:           store,
@@ -197,15 +183,12 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 	if err := handlers[job.KindInvitationEmail](context.Background(), job.Job{Payload: []byte(`{"invitation_id":1}`)}); !job.IsSkipped(err) {
 		t.Fatalf("email handler on missing invitation = %v, want job.Skip", err)
 	}
-	if err := handlers[job.KindCacheReconcile](context.Background(), job.Job{Payload: []byte(`{"code":"AbC12345"}`)}); err != nil {
-		t.Fatalf("cache handler: %v", err)
-	}
 	if err := handlers[job.KindLinkPurgeStats](context.Background(), job.Job{Payload: []byte(`{"link_id":7}`)}); err != nil {
 		t.Fatalf("purge stats handler: %v", err)
 	}
-	if store.banCalls != 1 || store.whReads != 1 || store.emailReads != 1 || reconciler.calls != 1 || store.purgeCalls != 1 {
-		t.Fatalf("handler calls = ban:%d wh:%d email:%d cache:%d purge:%d, want all 1",
-			store.banCalls, store.whReads, store.emailReads, reconciler.calls, store.purgeCalls)
+	if store.banCalls != 1 || store.whReads != 1 || store.emailReads != 1 || store.purgeCalls != 1 {
+		t.Fatalf("handler calls = ban:%d wh:%d email:%d purge:%d, want all 1",
+			store.banCalls, store.whReads, store.emailReads, store.purgeCalls)
 	}
 
 	names := make([]string, 0, len(periodic))
@@ -244,7 +227,6 @@ func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T)
 
 	assembled, err := assembleWorkerModules(
 		logger,
-		nil,
 		coreWorkerModule{
 			store:               store,
 			cleanupInterval:     time.Hour,
@@ -258,7 +240,6 @@ func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T)
 		riskWorkerModule{enabled: false, banner: store},
 		webhookWorkerModule{secretKey: "", store: store, cleanupInterval: time.Hour, retention: time.Hour},
 		emailWorkerModule{smtp: mailer.SMTPConfig{}, store: store},
-		cacheWorkerModule{reconciler: nil},
 		analyticsWorkerModule{enabled: false, store: store, cleanupInterval: time.Hour, retentionDays: 90},
 	)
 	if err != nil {
@@ -290,7 +271,6 @@ func TestAssembleWorkerModulesDisabledReturnSkipWithoutSideEffects(t *testing.T)
 		{job.KindLinkRiskScan, "risk_scan"},
 		{job.KindWebhookDeliver, "webhooks"},
 		{job.KindInvitationEmail, "email"},
-		{job.KindCacheReconcile, "cache"},
 		{job.KindLinkPurgeStats, "analytics"},
 	}
 	for _, tc := range disabledKinds {
@@ -341,17 +321,6 @@ func TestAssembleWorkerModulesValidation(t *testing.T) {
 		modules []WorkerModule
 	}{
 		{
-			name:    "duplicate risk module",
-			modules: []WorkerModule{riskWorkerModule{enabled: false}, riskWorkerModule{enabled: false}},
-		},
-		{
-			name: "duplicate core module",
-			modules: []WorkerModule{
-				coreWorkerModule{store: store, cleanupInterval: time.Hour, auditRetentionDays: 180},
-				coreWorkerModule{store: store, cleanupInterval: time.Hour, auditRetentionDays: 180},
-			},
-		},
-		{
 			name:    "nil core store",
 			modules: []WorkerModule{coreWorkerModule{cleanupInterval: time.Hour, auditRetentionDays: 180}},
 		},
@@ -387,7 +356,7 @@ func TestAssembleWorkerModulesValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := assembleWorkerModules(nil, nil, tt.modules...); err == nil {
+			if _, err := assembleWorkerModules(nil, tt.modules...); err == nil {
 				t.Fatalf("assembleWorkerModules(%s) = nil, want error", tt.name)
 			}
 		})
@@ -422,81 +391,6 @@ func TestInitPhoneOTPAuthMethod(t *testing.T) {
 	}, store, []string{"127.0.0.1:18092"}, nil)
 	if err != nil || m == nil || m.Descriptor().SendCodeURL != "/api/v1/auth/phone/send-code" {
 		t.Fatalf("webhook with allowlist = (%v, %v)", m, err)
-	}
-}
-
-type stubStartupModule struct {
-	name     string
-	hookName string
-	hookFn   func(context.Context) error
-}
-
-func (m stubStartupModule) Name() string { return m.name }
-func (m stubStartupModule) RegisterWorker(r WorkerRegistrar) error {
-	r.OnStart(m.hookName, m.hookFn)
-	return nil
-}
-
-type stubDisabledModule struct {
-	name    string
-	kind    string
-	feature string
-}
-
-func (m stubDisabledModule) Name() string { return m.name }
-func (m stubDisabledModule) RegisterWorker(r WorkerRegistrar) error {
-	r.HandleDisabled(m.kind, m.feature)
-	return nil
-}
-
-func TestAssembleWorkerModulesStartupValidation(t *testing.T) {
-	noop := func(context.Context) error { return nil }
-	for _, tt := range []struct {
-		name    string
-		modules []WorkerModule
-	}{
-		{
-			name:    "empty startup hook name",
-			modules: []WorkerModule{stubStartupModule{name: "s1", hookName: "", hookFn: noop}},
-		},
-		{
-			name:    "nil startup hook fn",
-			modules: []WorkerModule{stubStartupModule{name: "s1", hookName: "init", hookFn: nil}},
-		},
-		{
-			name: "duplicate startup hook name",
-			modules: []WorkerModule{
-				stubStartupModule{name: "s1", hookName: "dup", hookFn: noop},
-				stubStartupModule{name: "s2", hookName: "dup", hookFn: noop},
-			},
-		},
-		{
-			name:    "empty disabled feature name",
-			modules: []WorkerModule{stubDisabledModule{name: "d1", kind: "demo.job", feature: ""}},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			reg := prometheus.NewRegistry()
-			if _, err := assembleWorkerModules(nil, reg, tt.modules...); err == nil {
-				t.Fatalf("assembleWorkerModules(%s) = nil, want error", tt.name)
-			}
-			families, err := reg.Gather()
-			if err != nil {
-				t.Fatalf("gather registry: %v", err)
-			}
-			if len(families) != 0 {
-				t.Fatalf("failed assembly polluted prometheus registry with %d metric families", len(families))
-			}
-		})
-	}
-
-	// 同一个 registry 重复装配时应返回 error 而不是 panic。
-	reg := prometheus.NewRegistry()
-	if _, err := assembleWorkerModules(nil, reg, riskWorkerModule{enabled: false}); err != nil {
-		t.Fatalf("first assembleWorkerModules: %v", err)
-	}
-	if _, err := assembleWorkerModules(nil, reg, riskWorkerModule{enabled: false}); err == nil {
-		t.Fatal("duplicate registry registration = nil, want error")
 	}
 }
 
@@ -586,7 +480,6 @@ func TestDisabledWorkerModulesThroughRunnerMarkDoneAndRecordSkippedMetric(t *tes
 
 	assembled, err := assembleWorkerModules(
 		logger,
-		registry,
 		riskWorkerModule{enabled: false},
 		webhookWorkerModule{secretKey: ""},
 	)
@@ -659,9 +552,6 @@ func TestDisabledWorkerModulesThroughRunnerMarkDoneAndRecordSkippedMetric(t *tes
 		}
 		if got := counterValue(t, registry, "shortlink_jobs_processed_total", map[string]string{"kind": tc.kind, "result": "retry"}); got != 0 {
 			t.Errorf("shortlink_jobs_processed_total{kind=%q,result=retry} = %v, want 0", tc.kind, got)
-		}
-		if got := counterValue(t, registry, featureDisabledSkippedMetricName, map[string]string{"kind": tc.kind, "feature": tc.feature}); got != 1 {
-			t.Errorf("%s{kind=%q,feature=%q} = %v, want 1", featureDisabledSkippedMetricName, tc.kind, tc.feature, got)
 		}
 	}
 

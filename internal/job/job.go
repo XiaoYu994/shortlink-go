@@ -22,8 +22,6 @@ const (
 
 	// KindLinkRiskScan 是创建或修改短链 URL 后触发的异步风控扫描任务。
 	KindLinkRiskScan = "link.risk_scan"
-	// KindCacheReconcile 是写库事务原子入队的 Redis 缓存对账任务，按当前数据库真值自愈正/负缓存（ADR 0025）。
-	KindCacheReconcile = "cache.reconcile"
 	// KindLinkPurgeStats 是删除短链后异步分批清理三张日聚合统计表的任务（ADR 0025）。
 	KindLinkPurgeStats = "link.purge_stats"
 	// KindWebhookDeliver 是向租户订阅端点投递生命周期事件或 ping 的异步任务（ADR 0027）。
