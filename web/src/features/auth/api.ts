@@ -10,6 +10,18 @@ export interface AuthMethodDescriptor {
   id: string;
   kind: AuthFlowKind;
   login_url?: string;
+  send_code_url?: string;
+  verify_code_url?: string;
+}
+
+export interface SendPhoneOTPResponse {
+  expires_in: number;
+  cooldown_seconds: number;
+}
+
+export interface PhoneOTPLoginResponse {
+  user: UserSummary;
+  expires_at: string;
 }
 
 export interface FeatureCapabilities {
@@ -118,6 +130,33 @@ export function useLogout() {
     mutationFn: postLogout,
     onSuccess: () => {
       queryClient.clear();
+    },
+  });
+}
+
+export function useSendPhoneOTP() {
+  return useMutation({
+    mutationFn: ({ url, phone }: { url: string; phone: string }) =>
+      apiRequest<SendPhoneOTPResponse>(url, {
+        method: 'POST',
+        body: { phone },
+        skipAuthRedirect: true,
+      }),
+  });
+}
+
+export function useVerifyPhoneOTP() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ url, phone, code }: { url: string; phone: string; code: string }) =>
+      apiRequest<PhoneOTPLoginResponse>(url, {
+        method: 'POST',
+        body: { phone, code },
+        skipAuthRedirect: true,
+      }),
+    onSuccess: () => {
+      // 清掉登录页缓存的 401 状态，让目标页守卫用新 sl_session 拉取最新会话，避免双重跳转竞态。
+      queryClient.removeQueries({ queryKey: authKeys.me });
     },
   });
 }

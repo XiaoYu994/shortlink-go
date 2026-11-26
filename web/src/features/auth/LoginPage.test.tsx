@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { jsonResponse } from '@/test/test-utils';
 import type { AuthMethodDescriptor } from './api';
@@ -53,7 +54,10 @@ describe('LoginPage', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[initialEntry]}>
-          <LoginPage />
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/orgs/1/links" element={<div>links destination</div>} />
+          </Routes>
         </MemoryRouter>
       </QueryClientProvider>,
     );
@@ -80,25 +84,100 @@ describe('LoginPage', () => {
     );
   });
 
-  it('shows unsupported notice instead of empty warning for non-redirect auth methods', async () => {
-    renderLoginPage([{ id: 'phone', kind: 'phone_otp' }]);
+  it('completes phone OTP send-code and verify flow from capabilities URLs', async () => {
+    const user = userEvent.setup();
+    let authed = false;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/api/v1/me') {
+        if (authed) {
+          return jsonResponse({
+            user: { id: 9, email: '', name: '+86****8000' },
+            expires_at: '2026-12-01T00:00:00Z',
+            organizations: [],
+          });
+        }
+        return jsonResponse({ error: 'unauthorized' }, 401);
+      }
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse({
+          auth_methods: [
+            {
+              id: 'phone',
+              kind: 'phone_otp',
+              send_code_url: '/api/v1/auth/phone/send-code',
+              verify_code_url: '/api/v1/auth/phone/verify',
+            },
+          ],
+          features: { analytics: true, webhooks: false, risk_scan: true, email: false },
+        });
+      }
+      if (url === '/api/v1/auth/phone/send-code' && init?.method === 'POST') {
+        return jsonResponse({ expires_in: 300, cooldown_seconds: 60 });
+      }
+      if (url === '/api/v1/auth/phone/verify' && init?.method === 'POST') {
+        authed = true;
+        return jsonResponse({
+          user: { id: 9, email: '', name: '+86****8000' },
+          expires_at: '2026-12-01T00:00:00Z',
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/login?return_to=/orgs/1/links']}>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/orgs/1/links" element={<div>links destination</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const phoneInput = await screen.findByLabelText(/手机号/);
+    await user.type(phoneInput, '+8613800138000');
+    await user.click(screen.getByRole('button', { name: '获取验证码' }));
+
+    expect(await screen.findByRole('button', { name: /60s 后重试/ })).toBeDisabled();
+    await user.type(screen.getByLabelText('短信验证码'), '123456');
+    await user.click(screen.getByRole('button', { name: /使用手机号登录/ }));
+
+    expect(await screen.findByText('links destination')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/v1/auth/phone/verify',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ phone: '+8613800138000', code: '123456' }),
+        }),
+      );
+    });
+  });
+
+  it('shows unsupported notice instead of empty warning for unknown auth methods', async () => {
+    renderLoginPage([{ id: 'passkey', kind: 'webauthn' }]);
 
     expect(
       await screen.findByText(/服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互/),
     ).toBeInTheDocument();
-    expect(screen.getByText('phone')).toBeInTheDocument();
+    expect(screen.getByText('passkey')).toBeInTheDocument();
     expect(screen.queryByText(/未启用任何用户登录方式/)).not.toBeInTheDocument();
   });
 
-  it('shows muted footnote below login buttons when mixed with unsupported auth methods', async () => {
+  it('shows muted footnote below login buttons when mixed with unknown auth methods', async () => {
     renderLoginPage([
       { id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' },
-      { id: 'phone', kind: 'phone_otp' },
+      { id: 'passkey', kind: 'webauthn' },
     ]);
 
     expect(await screen.findByRole('link', { name: /使用 OIDC 单点登录/ })).toBeInTheDocument();
     expect(screen.getByText(/另有服务端已启用但当前页面暂未支持的登录方式/)).toBeInTheDocument();
-    expect(screen.getByText('phone')).toBeInTheDocument();
+    expect(screen.getByText('passkey')).toBeInTheDocument();
     expect(
       screen.queryByText(/服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互/),
     ).not.toBeInTheDocument();

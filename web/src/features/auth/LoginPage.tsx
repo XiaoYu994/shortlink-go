@@ -16,12 +16,19 @@ import { getErrorMessage } from '@/lib/api-client';
 import { ENDPOINTS } from '@/lib/endpoints';
 import { useDocumentTitle } from '@/lib/use-document-title';
 import { type AuthMethodDescriptor, useCapabilities, useMe } from './api';
+import { PhoneOTPLoginForm } from './PhoneOTPLoginForm';
 import { sanitizeReturnTo } from './return-to';
 
 function isRedirectMethod(
   m: AuthMethodDescriptor,
 ): m is AuthMethodDescriptor & { login_url: string } {
   return m.kind === 'redirect' && Boolean(m.login_url);
+}
+
+function isPhoneOTPMethod(
+  m: AuthMethodDescriptor,
+): m is AuthMethodDescriptor & { send_code_url: string; verify_code_url: string } {
+  return m.kind === 'phone_otp' && Boolean(m.send_code_url) && Boolean(m.verify_code_url);
 }
 
 const REDIRECT_METHOD_META: Record<
@@ -47,8 +54,12 @@ export function LoginPage() {
   const capabilities = capabilitiesQuery.data;
   const authMethods = capabilities?.auth_methods ?? [];
   const redirectMethods = authMethods.filter(isRedirectMethod);
-  const unsupportedMethods = authMethods.filter((m) => !isRedirectMethod(m));
+  const phoneOTPMethods = authMethods.filter(isPhoneOTPMethod);
+  const unsupportedMethods = authMethods.filter(
+    (m) => !isRedirectMethod(m) && !isPhoneOTPMethod(m),
+  );
   const hasAnyMethod = authMethods.length > 0;
+  const hasInteractiveMethod = redirectMethods.length > 0 || phoneOTPMethods.length > 0;
 
   return (
     <div className="grid min-h-screen bg-white lg:grid-cols-2">
@@ -217,8 +228,29 @@ export function LoginPage() {
                 );
               })}
 
+              {redirectMethods.length > 0 && phoneOTPMethods.length > 0 && (
+                <div className="relative py-1">
+                  <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                    <span className="w-full border-t border-zinc-200" />
+                  </div>
+                  <div className="relative flex justify-center text-xs">
+                    <span className="bg-white px-2 text-zinc-400">或使用手机号验证码登录</span>
+                  </div>
+                </div>
+              )}
+
+              {phoneOTPMethods.map((method) => (
+                <PhoneOTPLoginForm
+                  key={method.id}
+                  id={method.id}
+                  sendCodeUrl={method.send_code_url}
+                  verifyCodeUrl={method.verify_code_url}
+                  returnTo={returnTo}
+                />
+              ))}
+
               {unsupportedMethods.length > 0 &&
-                (redirectMethods.length === 0 ? (
+                (!hasInteractiveMethod ? (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-900">
                     服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互：
                     <code className="ml-1 font-mono text-xs">
