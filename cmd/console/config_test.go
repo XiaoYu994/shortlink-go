@@ -72,9 +72,20 @@ func baseConsoleTestEnv() map[string]string {
 		"WORKER_OTP_RETENTION":              "",
 		"RISK_FETCH_TIMEOUT":                "",
 		"RISK_HOST_RATE_LIMIT":              "",
+		"RISK_ALLOWED_HOSTS":                "",
 		"RISK_BLOCKED_HOSTS":                "",
 		"RISK_BLOCKED_KEYWORDS":             "",
 		"RISK_ALLOWED_PORTS":                "",
+		"RISK_GSB_API_KEY":                  "",
+		"RISK_GSB_BASE_URL":                 "",
+		"RISK_GSB_TIMEOUT":                  "",
+		"RISK_LLM_BASE_URL":                 "",
+		"RISK_LLM_API_KEY":                  "",
+		"RISK_LLM_MODEL":                    "",
+		"RISK_LLM_MODE":                     "",
+		"RISK_LLM_MIN_CONFIDENCE":           "",
+		"RISK_LLM_TIMEOUT":                  "",
+		"RISK_LLM_MAX_PER_MIN":              "",
 		"WEBHOOK_SECRET_KEY":                "",
 		"WEBHOOK_ALLOWED_PORTS":             "",
 		"WEBHOOK_TIMEOUT":                   "",
@@ -405,24 +416,34 @@ func TestLoadWorkerConfig(t *testing.T) {
 	base := baseConsoleTestEnv()
 
 	defaults := WorkerConfig{
-		BaseConfig:                    defaultBaseConfig(""),
-		Features:                      config.FeatureFlags{Analytics: true, RiskScan: true},
-		Concurrency:                   job.DefaultConcurrency,
-		MaxPerTenant:                  job.DefaultMaxPerTenant,
-		PollInterval:                  job.DefaultPollInterval,
-		LeaseDuration:                 job.DefaultLeaseDuration,
-		JobTimeout:                    job.DefaultJobTimeout,
-		ReapInterval:                  job.DefaultReapInterval,
-		CleanupInterval:               defaultWorkerCleanupInterval,
-		SessionRetention:              defaultWorkerRetention,
-		DoneJobRetention:              defaultWorkerRetention,
-		DeadJobRetention:              defaultWorkerLongRetention,
-		InvitationRetention:           defaultWorkerLongRetention,
-		OTPRetention:                  identity.DefaultOTPRetention,
-		StatsRetentionDays:            defaultStatsRetentionDays,
-		AuditRetentionDays:            defaultAuditRetentionDays,
-		RiskFetchTimeout:              risk.DefaultFetchTimeout,
-		RiskHostRateLimit:             risk.DefaultHostRateLimit,
+		BaseConfig:          defaultBaseConfig(""),
+		Features:            config.FeatureFlags{Analytics: true, RiskScan: true},
+		Concurrency:         job.DefaultConcurrency,
+		MaxPerTenant:        job.DefaultMaxPerTenant,
+		PollInterval:        job.DefaultPollInterval,
+		LeaseDuration:       job.DefaultLeaseDuration,
+		JobTimeout:          job.DefaultJobTimeout,
+		ReapInterval:        job.DefaultReapInterval,
+		CleanupInterval:     defaultWorkerCleanupInterval,
+		SessionRetention:    defaultWorkerRetention,
+		DoneJobRetention:    defaultWorkerRetention,
+		DeadJobRetention:    defaultWorkerLongRetention,
+		InvitationRetention: defaultWorkerLongRetention,
+		OTPRetention:        identity.DefaultOTPRetention,
+		StatsRetentionDays:  defaultStatsRetentionDays,
+		AuditRetentionDays:  defaultAuditRetentionDays,
+		RiskFetchTimeout:    risk.DefaultFetchTimeout,
+		RiskHostRateLimit:   risk.DefaultHostRateLimit,
+		RiskGSB: RiskGSBConfig{
+			BaseURL: risk.DefaultGSBBaseURL,
+			Timeout: risk.DefaultGSBTimeout,
+		},
+		RiskLLM: RiskLLMConfig{
+			Mode:          risk.LLMModeBan,
+			MinConfidence: risk.DefaultLLMMinConfidence,
+			Timeout:       risk.DefaultLLMTimeout,
+			MaxPerMin:     risk.DefaultLLMMaxPerMin,
+		},
 		WebhookTimeout:                webhook.DefaultTimeout,
 		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
 		WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
@@ -469,9 +490,20 @@ func TestLoadWorkerConfig(t *testing.T) {
 				"WORKER_AUDIT_RETENTION_DAYS": "365",
 				"RISK_FETCH_TIMEOUT":          "3s",
 				"RISK_HOST_RATE_LIMIT":        "5",
-				"RISK_BLOCKED_HOSTS":          "bad.example:malware",
+				"RISK_ALLOWED_HOSTS":          "github.com., docs.go.dev",
+				"RISK_BLOCKED_HOSTS":          "Bad.Example.:malware, [2001:db8::1]:phishing",
 				"RISK_BLOCKED_KEYWORDS":       "smoke-phish:phishing",
 				"RISK_ALLOWED_PORTS":          "80, 443, 8443",
+				"RISK_GSB_API_KEY":            "gsb-key",
+				"RISK_GSB_BASE_URL":           "https://safebrowsing.example.com/",
+				"RISK_GSB_TIMEOUT":            "4s",
+				"RISK_LLM_BASE_URL":           "https://llm.example.com/v1/",
+				"RISK_LLM_API_KEY":            "llm-key",
+				"RISK_LLM_MODEL":              "deepseek-chat",
+				"RISK_LLM_MODE":               "shadow",
+				"RISK_LLM_MIN_CONFIDENCE":     "0.9",
+				"RISK_LLM_TIMEOUT":            "6s",
+				"RISK_LLM_MAX_PER_MIN":        "60",
 			},
 			want: WorkerConfig{
 				BaseConfig:                    defaultBaseConfig("127.0.0.1:8082"),
@@ -492,9 +524,12 @@ func TestLoadWorkerConfig(t *testing.T) {
 				AuditRetentionDays:            365,
 				RiskFetchTimeout:              3 * time.Second,
 				RiskHostRateLimit:             5,
-				RiskBlockedHosts:              map[string]link.BanReason{"bad.example": link.BanReasonMalware},
+				RiskAllowedHosts:              []string{"docs.go.dev", "github.com"},
+				RiskBlockedHosts:              map[string]link.BanReason{"bad.example": link.BanReasonMalware, "2001:db8::1": link.BanReasonPhishing},
 				RiskBlockedKeywords:           map[string]link.BanReason{"smoke-phish": link.BanReasonPhishing},
 				RiskAllowedPorts:              []int{80, 443, 8443},
+				RiskGSB:                       RiskGSBConfig{APIKey: "gsb-key", BaseURL: "https://safebrowsing.example.com", Timeout: 4 * time.Second},
+				RiskLLM:                       RiskLLMConfig{BaseURL: "https://llm.example.com/v1", APIKey: "llm-key", Model: "deepseek-chat", Mode: "shadow", MinConfidence: 0.9, Timeout: 6 * time.Second, MaxPerMin: 60},
 				WebhookTimeout:                webhook.DefaultTimeout,
 				WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
 				WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
@@ -602,6 +637,41 @@ func TestLoadWorkerConfig(t *testing.T) {
 			wantErr: "RISK_ALLOWED_PORTS",
 		},
 		{
+			name:    "risk fetch timeout exceeds job timeout",
+			env:     map[string]string{"WORKER_JOB_TIMEOUT": "5s", "RISK_FETCH_TIMEOUT": "5s"},
+			wantErr: "RISK_FETCH_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+		},
+		{
+			name:    "gsb timeout exceeds job timeout when enabled",
+			env:     map[string]string{"RISK_GSB_API_KEY": "k", "RISK_GSB_TIMEOUT": "20s"},
+			wantErr: "RISK_GSB_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+		},
+		{
+			name:    "llm base url without model",
+			env:     map[string]string{"RISK_LLM_BASE_URL": "https://api.deepseek.com"},
+			wantErr: "RISK_LLM_BASE_URL and RISK_LLM_MODEL must both be set",
+		},
+		{
+			name:    "llm invalid mode",
+			env:     map[string]string{"RISK_LLM_MODE": "audit"},
+			wantErr: "RISK_LLM_MODE",
+		},
+		{
+			name:    "llm invalid confidence",
+			env:     map[string]string{"RISK_LLM_MIN_CONFIDENCE": "1.2"},
+			wantErr: "RISK_LLM_MIN_CONFIDENCE",
+		},
+		{
+			name:    "llm timeout exceeds job timeout when enabled",
+			env:     map[string]string{"RISK_LLM_BASE_URL": "http://127.0.0.1:11434/v1", "RISK_LLM_MODEL": "qwen2.5", "RISK_LLM_TIMEOUT": "20s"},
+			wantErr: "RISK_LLM_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+		},
+		{
+			name:    "llm negative max per min",
+			env:     map[string]string{"RISK_LLM_MAX_PER_MIN": "-1"},
+			wantErr: "RISK_LLM_MAX_PER_MIN must not be negative",
+		},
+		{
 			name:    "non-positive stats retention days",
 			env:     map[string]string{"WORKER_STATS_RETENTION_DAYS": "0"},
 			wantErr: "WORKER_STATS_RETENTION_DAYS must be positive",
@@ -641,6 +711,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 				t.Fatalf("loadWorkerConfig() returned error: %v", err)
 			}
 			if !workerConfigEqual(got, tt.want) ||
+				!slices.Equal(got.RiskAllowedHosts, tt.want.RiskAllowedHosts) ||
 				!maps.Equal(got.RiskBlockedHosts, tt.want.RiskBlockedHosts) ||
 				!maps.Equal(got.RiskBlockedKeywords, tt.want.RiskBlockedKeywords) ||
 				!slices.Equal(got.RiskAllowedPorts, tt.want.RiskAllowedPorts) ||
@@ -700,6 +771,8 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.AuditRetentionDays == b.AuditRetentionDays &&
 		a.RiskFetchTimeout == b.RiskFetchTimeout &&
 		a.RiskHostRateLimit == b.RiskHostRateLimit &&
+		a.RiskGSB == b.RiskGSB &&
+		a.RiskLLM == b.RiskLLM &&
 		a.WebhookSecretKey == b.WebhookSecretKey &&
 		a.WebhookTimeout == b.WebhookTimeout &&
 		a.WebhookHostRateLimit == b.WebhookHostRateLimit &&
@@ -738,6 +811,8 @@ func TestConsoleConfigRedaction(t *testing.T) {
 		BaseConfig:          base,
 		Concurrency:         8,
 		RiskBlockedKeywords: map[string]link.BanReason{"evil": link.BanReasonPhishing},
+		RiskGSB:             RiskGSBConfig{APIKey: "gsb-top-secret", BaseURL: risk.DefaultGSBBaseURL, Timeout: time.Second},
+		RiskLLM:             RiskLLMConfig{BaseURL: "https://api.deepseek.com", APIKey: "llm-top-secret", Model: "deepseek-chat", Mode: risk.LLMModeBan},
 		WebhookSecretKey:    webhookMasterKey,
 		SMTP: mailer.SMTPConfig{
 			Host:     "smtp.example.com",
@@ -751,7 +826,7 @@ func TestConsoleConfigRedaction(t *testing.T) {
 	logger.Info("dump", "console", conCfg, "worker", workerCfg, "oidc", oidcCfg, "github", ghCfg, "phone", phoneCfg)
 
 	combined := buf.String() + "\n" + fmt.Sprintf("%+v %+v %+v %+v %+v", conCfg, workerCfg, oidcCfg, ghCfg, phoneCfg)
-	for _, secret := range []string{"pg-secret", "redis-secret", "oidc-top-secret", "github-top-secret", "sms-top-secret", webhookMasterKey, "smtp-top-secret"} {
+	for _, secret := range []string{"pg-secret", "redis-secret", "oidc-top-secret", "github-top-secret", "sms-top-secret", "gsb-top-secret", "llm-top-secret", webhookMasterKey, "smtp-top-secret"} {
 		if strings.Contains(combined, secret) {
 			t.Errorf("secret %q leaked in config output: %s", secret, combined)
 		}

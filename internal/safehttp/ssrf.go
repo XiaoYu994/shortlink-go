@@ -146,7 +146,7 @@ func ValidateURL(raw string, opts URLValidationOptions) (*url.URL, error) {
 	if u.User != nil || u.Fragment != "" {
 		return nil, fmt.Errorf("%w: userinfo and fragment are not allowed", ErrInvalidURL)
 	}
-	host := strings.ToLower(u.Hostname())
+	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
 		return nil, fmt.Errorf("%w: host is required", ErrInvalidURL)
 	}

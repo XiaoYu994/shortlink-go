@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,18 +43,80 @@ VerdictCache 把最近扫描过的 URL 结论短时缓存在 Redis 里，减少�
 严格遵循 ADR 0006 与 ADR 0020 的 fail-open 定位：Redis 读写出错只记日志与指标，降级为直接扫描。
 */
 type VerdictCache struct {
-	rdb       *redis.Client
-	logger    *slog.Logger
-	safeTTL   time.Duration
-	unsafeTTL time.Duration
-	lookups   *prometheus.CounterVec
+	rdb         *redis.Client
+	logger      *slog.Logger
+	safeTTL     time.Duration
+	unsafeTTL   time.Duration
+	ruleVersion string
+	lookups     *prometheus.CounterVec
 }
 
-// VerdictCacheOptions 控制缓存 TTL 与日志。零值使用默认值。
+// VerdictCacheOptions 控制缓存 TTL、规则指纹与日志。零值使用默认值。
 type VerdictCacheOptions struct {
-	SafeTTL   time.Duration
-	UnsafeTTL time.Duration
-	Logger    *slog.Logger
+	SafeTTL     time.Duration
+	UnsafeTTL   time.Duration
+	RuleVersion string
+	Logger      *slog.Logger
+}
+
+// RuleVersionInput 汇总会影响风控裁决结果的配置维度（绝不含任何外部 API 密钥）。
+type RuleVersionInput struct {
+	AllowedHosts     []string
+	BlockedHosts     map[string]link.BanReason
+	BlockedKeywords  map[string]link.BanReason
+	GSBEnabled       bool
+	LLMModel         string
+	LLMMode          string
+	LLMMinConfidence float64
+	PromptVersion    string
+}
+
+// ComputeRuleVersion 为当前风控规则与模型参数计算稳定短指纹；改规则重启后自动切换缓存版本。
+func ComputeRuleVersion(in RuleVersionInput) string {
+	h := sha256.New()
+	allow := slices.Clone(in.AllowedHosts)
+	for i, host := range allow {
+		allow[i] = normalizeHost(host)
+	}
+	slices.Sort(allow)
+	for _, host := range allow {
+		if host != "" {
+			_, _ = fmt.Fprintf(h, "allow=%s\n", host)
+		}
+	}
+
+	hosts := make(map[string]link.BanReason, len(in.BlockedHosts))
+	for k, v := range in.BlockedHosts {
+		if nk := normalizeHost(k); nk != "" && v.Valid() {
+			hosts[nk] = v
+		}
+	}
+	for _, r := range sortedRules(hosts) {
+		_, _ = fmt.Fprintf(h, "block_host=%s:%s\n", r.pattern, r.reason)
+	}
+
+	kws := DefaultKeywordRules()
+	for k, v := range in.BlockedKeywords {
+		if nk := strings.ToLower(strings.TrimSpace(k)); nk != "" && v.Valid() {
+			kws[nk] = v
+		}
+	}
+	for _, r := range sortedRules(kws) {
+		_, _ = fmt.Fprintf(h, "block_kw=%s:%s\n", r.pattern, r.reason)
+	}
+
+	_, _ = fmt.Fprintf(h, "gsb=%t\n", in.GSBEnabled)
+	if model := strings.TrimSpace(in.LLMModel); model != "" {
+		pv := strings.TrimSpace(in.PromptVersion)
+		if pv == "" {
+			if p, err := NewStaticPolicyProvider("", in.LLMMode, in.LLMMinConfidence); err == nil {
+				pv = p.Current(context.Background()).Version
+			}
+		}
+		_, _ = fmt.Fprintf(h, "llm=%s|%s|%.4f|%s\n", model, strings.TrimSpace(in.LLMMode), in.LLMMinConfidence, pv)
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:8])
 }
 
 // NewVerdictCache 构造风控结果缓存并注册 shortlink_risk_cache_lookups_total 指标。
@@ -68,10 +132,11 @@ func NewVerdictCache(rdb *redis.Client, registry *prometheus.Registry, opts Verd
 	}
 
 	c := &VerdictCache{
-		rdb:       rdb,
-		logger:    opts.Logger,
-		safeTTL:   opts.SafeTTL,
-		unsafeTTL: opts.UnsafeTTL,
+		rdb:         rdb,
+		logger:      opts.Logger,
+		safeTTL:     opts.SafeTTL,
+		unsafeTTL:   opts.UnsafeTTL,
+		ruleVersion: strings.TrimSpace(opts.RuleVersion),
 		lookups: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: cacheLookupsMetricName,
 			Help: "Total number of risk scan verdict cache lookups by result.",
@@ -96,7 +161,7 @@ func NormalizeURL(raw string) (string, error) {
 		return "", errors.New("invalid url")
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	host := normalizeHost(u.Hostname())
 	port := u.Port()
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""
@@ -110,9 +175,13 @@ func NormalizeURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func riskCacheKey(normalizedURL string) string {
+func (c *VerdictCache) cacheKey(normalizedURL string) string {
 	sum := sha256.Sum256([]byte(normalizedURL))
-	return riskCacheKeyPrefix + hex.EncodeToString(sum[:])
+	digest := hex.EncodeToString(sum[:])
+	if c.ruleVersion != "" {
+		return riskCacheKeyPrefix + c.ruleVersion + ":" + digest
+	}
+	return riskCacheKeyPrefix + digest
 }
 
 // Get 查询缓存中的扫描结论。未命中或 Redis 异常返回 (Verdict{}, false)。
@@ -128,12 +197,13 @@ func (c *VerdictCache) Get(ctx context.Context, rawURL string) (Verdict, bool) {
 	opCtx, cancel := context.WithTimeout(ctx, cacheOpTimeout)
 	defer cancel()
 
-	raw, err := c.rdb.Get(opCtx, riskCacheKey(norm)).Bytes()
+	key := c.cacheKey(norm)
+	raw, err := c.rdb.Get(opCtx, key).Bytes()
 	switch {
 	case err == nil:
 		var cv cachedVerdict
 		if uerr := json.Unmarshal(raw, &cv); uerr != nil || (cv.Unsafe && !cv.Reason.Valid()) {
-			_ = c.rdb.Del(opCtx, riskCacheKey(norm)).Err()
+			_ = c.rdb.Del(opCtx, key).Err()
 			c.lookups.WithLabelValues(cacheResultMiss).Inc()
 			return Verdict{}, false
 		}
@@ -173,7 +243,7 @@ func (c *VerdictCache) Set(ctx context.Context, rawURL string, v Verdict) {
 	opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cacheOpTimeout)
 	defer cancel()
 
-	if err := c.rdb.Set(opCtx, riskCacheKey(norm), data, ttl).Err(); err != nil {
+	if err := c.rdb.Set(opCtx, c.cacheKey(norm), data, ttl).Err(); err != nil {
 		c.logger.WarnContext(ctx, "write risk verdict cache", "err", err)
 	}
 }

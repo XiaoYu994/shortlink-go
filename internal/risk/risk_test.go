@@ -3,6 +3,7 @@ package risk
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -89,6 +90,256 @@ func TestRuleScannerBodyLimitAndRules(t *testing.T) {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func TestRuleScannerRedirectRules(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("302 to blocked host stops before dialing", func(t *testing.T) {
+		entrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://sub.evil.test/landing", http.StatusFound)
+		}))
+		defer entrySrv.Close()
+
+		entryURL, _ := url.Parse(entrySrv.URL)
+		scanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient: NewSafeHTTPClient(safehttp.ClientOptions{
+				Timeout:          time.Second,
+				AllowedHostPorts: []string{entryURL.Host},
+			}),
+			BlockedHosts: map[string]link.BanReason{"evil.test": link.BanReasonMalware},
+		})
+
+		v, err := scanner.Scan(ctx, entrySrv.URL+"/go")
+		if err != nil {
+			t.Fatalf("Scan error = %v", err)
+		}
+		if !v.Unsafe || v.Reason != link.BanReasonMalware || v.Detail != "blocked redirect host: sub.evil.test" {
+			t.Fatalf("verdict = %+v, want unsafe/malware/blocked redirect host: sub.evil.test", v)
+		}
+	})
+
+	t.Run("multi-hop intermediate blocked host stops before hitting blocked or clean landing", func(t *testing.T) {
+		var entryHits, bounceHits, landingHits atomic.Int32
+		rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Hostname() {
+			case "entry.example":
+				entryHits.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://bounce.evil.test/hop"}},
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			case "bounce.evil.test":
+				bounceHits.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://landing.example/ok"}},
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			case "landing.example":
+				landingHits.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			default:
+				return nil, fmt.Errorf("unexpected host %q", req.URL.Hostname())
+			}
+		})
+
+		scanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient:   &http.Client{Transport: rt},
+			BlockedHosts: map[string]link.BanReason{"evil.test": link.BanReasonMalware},
+		})
+
+		v, err := scanner.Scan(ctx, "https://entry.example/go")
+		if err != nil {
+			t.Fatalf("Scan error = %v", err)
+		}
+		if !v.Unsafe || v.Reason != link.BanReasonMalware || v.Detail != "blocked redirect host: bounce.evil.test" {
+			t.Fatalf("verdict = %+v, want unsafe/malware/blocked redirect host: bounce.evil.test", v)
+		}
+		if entryHits.Load() != 1 || bounceHits.Load() != 0 || landingHits.Load() != 0 {
+			t.Fatalf("hits = (entry:%d, bounce:%d, landing:%d), want (1, 0, 0)",
+				entryHits.Load(), bounceHits.Load(), landingHits.Load())
+		}
+	})
+
+	t.Run("302 to url with blocked keyword stops before dialing landing", func(t *testing.T) {
+		var landingHits atomic.Int32
+		landingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			landingHits.Add(1)
+			_, _ = w.Write([]byte("ok"))
+		}))
+		defer landingSrv.Close()
+
+		entrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, landingSrv.URL+"/download?f=malware-payload", http.StatusFound)
+		}))
+		defer entrySrv.Close()
+
+		entryURL, _ := url.Parse(entrySrv.URL)
+		landingURL, _ := url.Parse(landingSrv.URL)
+		scanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient: NewSafeHTTPClient(safehttp.ClientOptions{
+				Timeout:          time.Second,
+				AllowedHostPorts: []string{entryURL.Host, landingURL.Host},
+			}),
+		})
+
+		v, err := scanner.Scan(ctx, entrySrv.URL+"/go")
+		if err != nil {
+			t.Fatalf("Scan error = %v", err)
+		}
+		if !v.Unsafe || v.Reason != link.BanReasonMalware || v.Detail != "matched redirect url keyword: malware-payload" {
+			t.Fatalf("verdict = %+v, want unsafe/malware/matched redirect url keyword: malware-payload", v)
+		}
+		if landingHits.Load() != 0 {
+			t.Fatalf("landingHits = %d, want 0", landingHits.Load())
+		}
+	})
+
+	t.Run("trailing dot fqdn matched on direct and redirect urls", func(t *testing.T) {
+		entrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://sub.evil.test./landing", http.StatusFound)
+		}))
+		defer entrySrv.Close()
+
+		entryURL, _ := url.Parse(entrySrv.URL)
+		scanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient: NewSafeHTTPClient(safehttp.ClientOptions{
+				Timeout:          time.Second,
+				AllowedHostPorts: []string{entryURL.Host},
+			}),
+			BlockedHosts: map[string]link.BanReason{"Evil.Test.": link.BanReasonMalware},
+		})
+
+		cases := []struct {
+			name       string
+			url        string
+			wantDetail string
+		}{
+			{name: "direct apex", url: "https://evil.test./page", wantDetail: "blocked host: evil.test"},
+			{name: "direct sub", url: "https://sub.evil.test./page", wantDetail: "blocked host: sub.evil.test"},
+			{name: "redirect sub", url: entrySrv.URL + "/hop", wantDetail: "blocked redirect host: sub.evil.test"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				v, err := scanner.Scan(ctx, tc.url)
+				if err != nil {
+					t.Fatalf("Scan(%q) error = %v", tc.url, err)
+				}
+				if !v.Unsafe || v.Reason != link.BanReasonMalware || v.Detail != tc.wantDetail {
+					t.Fatalf("Scan(%q) verdict = %+v, want unsafe/malware/%q", tc.url, v, tc.wantDetail)
+				}
+			})
+		}
+	})
+
+	t.Run("preserves safehttp redirect limit and scheme checks", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/loop":
+				http.Redirect(w, r, "/loop", http.StatusFound)
+			case "/bad-scheme":
+				http.Redirect(w, r, "ftp://example.com/a", http.StatusFound)
+			default:
+				w.WriteHeader(http.StatusOK)
+			}
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		scanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient: NewSafeHTTPClient(safehttp.ClientOptions{
+				Timeout:          time.Second,
+				MaxRedirects:     2,
+				AllowedHostPorts: []string{u.Host},
+			}),
+		})
+
+		if _, err := scanner.Scan(ctx, srv.URL+"/loop"); !errors.Is(err, safehttp.ErrTooManyRedirects) {
+			t.Errorf("/loop err = %v, want ErrTooManyRedirects", err)
+		}
+		if _, err := scanner.Scan(ctx, srv.URL+"/bad-scheme"); !errors.Is(err, safehttp.ErrInvalidScheme) {
+			t.Errorf("/bad-scheme err = %v, want ErrInvalidScheme", err)
+		}
+
+		// CheckRedirect 为 nil 的客户端也保留 Go 标准库 10 跳上限，不无限循环。
+		var hits atomic.Int32
+		loopRT := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			n := hits.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{fmt.Sprintf("https://loop.example/hop/%d", n)}},
+				Body:       http.NoBody,
+				Request:    req,
+			}, nil
+		})
+		defaultLimitScanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient: &http.Client{Transport: loopRT},
+		})
+		if _, err := defaultLimitScanner.Scan(ctx, "https://loop.example/start"); err == nil {
+			t.Error("expected default 10-redirect error, got nil")
+		}
+		if hits.Load() != 10 {
+			t.Errorf("default redirect loop hits = %d, want 10", hits.Load())
+		}
+	})
+
+	t.Run("does not mutate caller HTTPClient", func(t *testing.T) {
+		var landingHits atomic.Int32
+		landingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			landingHits.Add(1)
+			_, _ = w.Write([]byte("ok"))
+		}))
+		defer landingSrv.Close()
+
+		entrySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, landingSrv.URL+"/download?f=malware-payload", http.StatusFound)
+		}))
+		defer entrySrv.Close()
+
+		entryURL, _ := url.Parse(entrySrv.URL)
+		landingURL, _ := url.Parse(landingSrv.URL)
+		baseClient := NewSafeHTTPClient(safehttp.ClientOptions{
+			Timeout:          time.Second,
+			AllowedHostPorts: []string{entryURL.Host, landingURL.Host},
+		})
+		scanner := NewRuleScanner(RuleScannerOptions{HTTPClient: baseClient})
+
+		v, err := scanner.Scan(ctx, entrySrv.URL+"/go")
+		if err != nil || !v.Unsafe {
+			t.Fatalf("Scan = (%+v, %v), want unsafe/nil", v, err)
+		}
+		if landingHits.Load() != 0 {
+			t.Fatalf("landingHits after Scan = %d, want 0", landingHits.Load())
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, entrySrv.URL+"/go", nil)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext: %v", err)
+		}
+		resp, err := baseClient.Do(req)
+		if err != nil {
+			t.Fatalf("caller baseClient.Do: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || landingHits.Load() != 1 {
+			t.Fatalf("caller client status=%d landingHits=%d, want 200 and 1", resp.StatusCode, landingHits.Load())
+		}
+	})
+}
+
 func TestParseKeywordRules(t *testing.T) {
 	rules, err := ParseKeywordRules("smoke-phish:phishing, bad-ware:malware")
 	if err != nil {
@@ -133,22 +384,23 @@ func TestVerdictCacheRedisAndFailOpen(t *testing.T) {
 		t.Cleanup(func() { _ = rdb.Close() })
 
 		raw := fmt.Sprintf("HTTPS://Example.COM:443/path/%d#frag", time.Now().UnixNano())
-		norm, err := NormalizeURL(raw)
-		if err != nil {
+		if _, err := NormalizeURL(raw); err != nil {
 			t.Fatalf("NormalizeURL: %v", err)
 		}
-		t.Cleanup(func() { _ = rdb.Del(context.Background(), riskCacheKey(norm)).Err() })
 
 		reg := prometheus.NewRegistry()
 		vc := NewVerdictCache(rdb, reg, VerdictCacheOptions{})
+		if norm, err := NormalizeURL(raw); err == nil {
+			t.Cleanup(func() { _ = rdb.Del(context.Background(), vc.cacheKey(norm)).Err() })
+		}
 		if _, hit := vc.Get(ctx, raw); hit {
 			t.Fatal("expected miss before Set")
 		}
 		want := Verdict{Unsafe: true, Reason: link.BanReasonPhishing, Detail: "test"}
 		vc.Set(ctx, raw, want)
 
-		// 相同归一化 URL（去掉默认端口和 fragment）应命中缓存。
-		got, hit := vc.Get(ctx, strings.Split(strings.Replace(raw, "HTTPS://Example.COM:443", "https://example.com", 1), "#")[0])
+		// 相同归一化 URL（去掉默认端口、尾点和 fragment）应命中缓存。
+		got, hit := vc.Get(ctx, strings.Split(strings.Replace(raw, "HTTPS://Example.COM:443", "https://example.com.", 1), "#")[0])
 		if !hit || got != want {
 			t.Fatalf("Get = (%+v, %v), want (%+v, true)", got, hit, want)
 		}
@@ -235,35 +487,85 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 		}
 	})
 
-	t.Run("permanent on blocked SSRF address and malformed payload", func(t *testing.T) {
-		h := NewHandler(HandlerOptions{
-			Scanner: &fakeScanner{fn: func(context.Context, string) (Verdict, error) {
-				return Verdict{}, fmt.Errorf("fetch: %w", safehttp.ErrBlockedAddress)
-			}},
-			Banner: &fakeBanner{},
-		})
-		if err := h(context.Background(), makeJob(ScanPayload{Code: "AbC12345", URL: "http://127.0.0.1/"})); !job.IsPermanent(err) {
-			t.Errorf("SSRF err = %v, want Permanent", err)
-		}
-		if err := h(context.Background(), job.Job{Payload: []byte("{bad")}); !job.IsPermanent(err) {
-			t.Errorf("bad json err = %v, want Permanent", err)
-		}
-	})
+	t.Run("permanent on malformed payload and skips unscannable targets with metrics", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		metrics := NewMetrics(reg)
 
-	t.Run("defers on host rate limit", func(t *testing.T) {
-		lim := safehttp.NewHostLimiter(1)
-		lim.Allow("slow.example") // 消耗掉唯一令牌
-		h := NewHandler(HandlerOptions{
+		badPayloadH := NewHandler(HandlerOptions{
 			Scanner: &fakeScanner{fn: func(context.Context, string) (Verdict, error) {
-				t.Error("scanner should not be called when host limited")
+				t.Error("scanner must not run on invalid payload")
 				return Verdict{}, nil
 			}},
 			Banner:  &fakeBanner{},
-			Limiter: lim,
+			Metrics: metrics,
+		})
+		if err := badPayloadH(context.Background(), job.Job{Payload: []byte("{bad")}); !job.IsPermanent(err) {
+			t.Errorf("bad json err = %v, want Permanent", err)
+		}
+		if err := badPayloadH(context.Background(), makeJob(ScanPayload{Code: "AbC12345"})); !job.IsPermanent(err) {
+			t.Errorf("missing url err = %v, want Permanent", err)
+		}
+
+		cases := []struct {
+			name        string
+			scanErr     error
+			wantOutcome string
+		}{
+			{name: "blocked address", scanErr: safehttp.ErrBlockedAddress, wantOutcome: OutcomeBlockedAddress},
+			{name: "blocked port", scanErr: safehttp.ErrBlockedPort, wantOutcome: OutcomeBlockedPort},
+			{name: "invalid scheme", scanErr: safehttp.ErrInvalidScheme, wantOutcome: OutcomeInvalidScheme},
+			{name: "too many redirects", scanErr: safehttp.ErrTooManyRedirects, wantOutcome: OutcomeTooManyRedirects},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				banner := &fakeBanner{}
+				h := NewHandler(HandlerOptions{
+					Scanner: &fakeScanner{fn: func(context.Context, string) (Verdict, error) {
+						return Verdict{}, fmt.Errorf("fetch: %w", tc.scanErr)
+					}},
+					Banner:  banner,
+					Metrics: metrics,
+				})
+				err := h(context.Background(), makeJob(ScanPayload{Code: "AbC12345", URL: "https://example.com/a"}))
+				if !job.IsSkipped(err) {
+					t.Fatalf("err = %v, want job.Skip", err)
+				}
+				if job.IsPermanent(err) {
+					t.Fatalf("err = %v must not be job.Permanent", err)
+				}
+				if banner.calls.Load() != 0 {
+					t.Fatalf("banner calls = %d, want 0", banner.calls.Load())
+				}
+				if got := testutil.ToFloat64(metrics.scans.WithLabelValues(StageFetch, tc.wantOutcome)); got != 1 {
+					t.Errorf("scans{fetch,%s} = %v, want 1", tc.wantOutcome, got)
+				}
+			})
+		}
+	})
+
+	t.Run("defers on host rate limit without hitting target server", func(t *testing.T) {
+		var targetHits atomic.Int32
+		rt := roundTripFunc(func(*http.Request) (*http.Response, error) {
+			targetHits.Add(1)
+			return nil, errors.New("should not dial")
+		})
+		lim := safehttp.NewHostLimiter(1)
+		lim.Allow("slow.example") // 消耗掉唯一令牌
+
+		scanner := NewRuleScanner(RuleScannerOptions{
+			HTTPClient: &http.Client{Transport: rt},
+			Limiter:    lim,
+		})
+		h := NewHandler(HandlerOptions{
+			Scanner: scanner,
+			Banner:  &fakeBanner{},
 		})
 		err := h(context.Background(), makeJob(ScanPayload{Code: "AbC12345", URL: "https://slow.example/1"}))
 		if delay, ok := job.DeferDelay(err); !ok || delay <= 0 {
 			t.Errorf("handler err = %v, want Defer(delay>0)", err)
+		}
+		if targetHits.Load() != 0 {
+			t.Errorf("targetHits = %d, want 0", targetHits.Load())
 		}
 	})
 }

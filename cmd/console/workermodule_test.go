@@ -135,6 +135,7 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 			enabled:      true,
 			banner:       store,
 			fetchTimeout: time.Second,
+			allowedHosts: []string{"github.com"},
 			blockedHosts: map[string]link.BanReason{"evil.example": link.BanReasonPhishing},
 		},
 		webhookWorkerModule{
@@ -176,6 +177,9 @@ func TestAssembleWorkerModulesAllEnabled(t *testing.T) {
 
 	if err := handlers[job.KindLinkRiskScan](context.Background(), job.Job{Payload: []byte(`{"link_id":1,"code":"AbC12345","url":"https://evil.example/a"}`)}); err != nil {
 		t.Fatalf("risk handler: %v", err)
+	}
+	if err := handlers[job.KindLinkRiskScan](context.Background(), job.Job{Payload: []byte(`{"link_id":2,"code":"AbC12346","url":"https://docs.github.com/en?q=malware-payload"}`)}); err != nil {
+		t.Fatalf("risk handler allowed host: %v", err)
 	}
 	if err := handlers[job.KindWebhookDeliver](context.Background(), job.Job{Payload: []byte(`{"webhook_id":1,"event_id":"evt-1","event":"link.created","data":{}}`)}); !job.IsSkipped(err) {
 		t.Fatalf("webhook handler on missing target = %v, want job.Skip", err)

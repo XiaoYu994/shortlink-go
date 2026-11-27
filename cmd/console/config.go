@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -182,6 +184,66 @@ func (cfg ConsoleConfig) String() string {
 	return cfg.LogValue().String()
 }
 
+// RiskGSBConfig 配置可选的 Google Safe Browsing v4 威胁情报源。APIKey 为空时关闭。
+type RiskGSBConfig struct {
+	APIKey  string
+	BaseURL string
+	Timeout time.Duration
+}
+
+// Enabled 报告是否启用 Google Safe Browsing 查验。
+func (c RiskGSBConfig) Enabled() bool {
+	return c.APIKey != ""
+}
+
+// LogValue 掩码 APIKey。
+func (c RiskGSBConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("api_key", logx.RedactSecret(c.APIKey)),
+		slog.String("base_url", c.BaseURL),
+		slog.Duration("timeout", c.Timeout),
+	)
+}
+
+// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 GSB API Key。
+func (c RiskGSBConfig) String() string {
+	return c.LogValue().String()
+}
+
+// RiskLLMConfig 配置可选的 OpenAI 兼容 LLM 语义风控器（L3）。BaseURL 与 Model 均非空时启用。
+type RiskLLMConfig struct {
+	BaseURL       string
+	APIKey        string
+	Model         string
+	Mode          string
+	MinConfidence float64
+	Timeout       time.Duration
+	MaxPerMin     int
+}
+
+// Enabled 报告是否启用 LLM 语义风控。
+func (c RiskLLMConfig) Enabled() bool {
+	return c.BaseURL != "" && c.Model != ""
+}
+
+// LogValue 掩码 APIKey。
+func (c RiskLLMConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("base_url", c.BaseURL),
+		slog.String("api_key", logx.RedactSecret(c.APIKey)),
+		slog.String("model", c.Model),
+		slog.String("mode", c.Mode),
+		slog.Float64("min_confidence", c.MinConfidence),
+		slog.Duration("timeout", c.Timeout),
+		slog.Int("max_per_min", c.MaxPerMin),
+	)
+}
+
+// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 LLM API Key。
+func (c RiskLLMConfig) String() string {
+	return c.LogValue().String()
+}
+
 /*
 WorkerConfig 是后台任务进程（cmd/console worker）的完整启动配置（阶段 12、ADR 0020）。
 Addr 来自 WORKER_ADDR，默认空表示不开启运维 HTTP 端口；设置后暴露 /healthz、/readyz 和 /metrics。
@@ -206,9 +268,12 @@ type WorkerConfig struct {
 	AuditRetentionDays            int
 	RiskFetchTimeout              time.Duration
 	RiskHostRateLimit             int
+	RiskAllowedHosts              []string
 	RiskBlockedHosts              map[string]link.BanReason
 	RiskBlockedKeywords           map[string]link.BanReason
 	RiskAllowedPorts              []int
+	RiskGSB                       RiskGSBConfig
+	RiskLLM                       RiskLLMConfig
 	WebhookSecretKey              string
 	WebhookAllowedPorts           []int
 	WebhookTimeout                time.Duration
@@ -231,7 +296,7 @@ func (cfg WorkerConfig) StoreFeatures() StoreFeatures {
 	}
 }
 
-// LogValue 掩码基础连接串、Webhook 主密钥和 SMTP 密码，保留非敏感调度与风控参数。
+// LogValue 掩码基础连接串、Webhook 主密钥、SMTP 密码与风控外部 API 密钥，保留非敏感调度与风控参数。
 func (cfg WorkerConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
@@ -252,9 +317,12 @@ func (cfg WorkerConfig) LogValue() slog.Value {
 		slog.Int("audit_retention_days", cfg.AuditRetentionDays),
 		slog.Duration("risk_fetch_timeout", cfg.RiskFetchTimeout),
 		slog.Int("risk_host_rate_limit", cfg.RiskHostRateLimit),
+		slog.Int("risk_allowed_hosts_count", len(cfg.RiskAllowedHosts)),
 		slog.Int("risk_blocked_hosts_count", len(cfg.RiskBlockedHosts)),
 		slog.Int("risk_blocked_keywords_count", len(cfg.RiskBlockedKeywords)),
 		slog.Int("risk_allowed_ports_count", len(cfg.RiskAllowedPorts)),
+		slog.Any("risk_gsb", cfg.RiskGSB.LogValue()),
+		slog.Any("risk_llm", cfg.RiskLLM.LogValue()),
 		slog.String("webhook_secret_key", logx.RedactSecret(cfg.WebhookSecretKey)),
 		slog.Int("webhook_allowed_ports_count", len(cfg.WebhookAllowedPorts)),
 		slog.Duration("webhook_timeout", cfg.WebhookTimeout),
@@ -431,24 +499,38 @@ func loadWorkerConfig() (WorkerConfig, error) {
 	}
 
 	cfg := WorkerConfig{
-		BaseConfig:                    base,
-		Features:                      features,
-		Concurrency:                   job.DefaultConcurrency,
-		MaxPerTenant:                  job.DefaultMaxPerTenant,
-		PollInterval:                  job.DefaultPollInterval,
-		LeaseDuration:                 job.DefaultLeaseDuration,
-		JobTimeout:                    job.DefaultJobTimeout,
-		ReapInterval:                  job.DefaultReapInterval,
-		CleanupInterval:               defaultWorkerCleanupInterval,
-		SessionRetention:              defaultWorkerRetention,
-		DoneJobRetention:              defaultWorkerRetention,
-		DeadJobRetention:              defaultWorkerLongRetention,
-		InvitationRetention:           defaultWorkerLongRetention,
-		OTPRetention:                  identity.DefaultOTPRetention,
-		StatsRetentionDays:            defaultStatsRetentionDays,
-		AuditRetentionDays:            defaultAuditRetentionDays,
-		RiskFetchTimeout:              risk.DefaultFetchTimeout,
-		RiskHostRateLimit:             risk.DefaultHostRateLimit,
+		BaseConfig:          base,
+		Features:            features,
+		Concurrency:         job.DefaultConcurrency,
+		MaxPerTenant:        job.DefaultMaxPerTenant,
+		PollInterval:        job.DefaultPollInterval,
+		LeaseDuration:       job.DefaultLeaseDuration,
+		JobTimeout:          job.DefaultJobTimeout,
+		ReapInterval:        job.DefaultReapInterval,
+		CleanupInterval:     defaultWorkerCleanupInterval,
+		SessionRetention:    defaultWorkerRetention,
+		DoneJobRetention:    defaultWorkerRetention,
+		DeadJobRetention:    defaultWorkerLongRetention,
+		InvitationRetention: defaultWorkerLongRetention,
+		OTPRetention:        identity.DefaultOTPRetention,
+		StatsRetentionDays:  defaultStatsRetentionDays,
+		AuditRetentionDays:  defaultAuditRetentionDays,
+		RiskFetchTimeout:    risk.DefaultFetchTimeout,
+		RiskHostRateLimit:   risk.DefaultHostRateLimit,
+		RiskGSB: RiskGSBConfig{
+			APIKey:  strings.TrimSpace(os.Getenv("RISK_GSB_API_KEY")),
+			BaseURL: strings.TrimRight(strings.TrimSpace(config.EnvString("RISK_GSB_BASE_URL", risk.DefaultGSBBaseURL)), "/"),
+			Timeout: risk.DefaultGSBTimeout,
+		},
+		RiskLLM: RiskLLMConfig{
+			BaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("RISK_LLM_BASE_URL")), "/"),
+			APIKey:        strings.TrimSpace(os.Getenv("RISK_LLM_API_KEY")),
+			Model:         strings.TrimSpace(os.Getenv("RISK_LLM_MODEL")),
+			Mode:          strings.ToLower(strings.TrimSpace(config.EnvString("RISK_LLM_MODE", risk.LLMModeBan))),
+			MinConfidence: risk.DefaultLLMMinConfidence,
+			Timeout:       risk.DefaultLLMTimeout,
+			MaxPerMin:     risk.DefaultLLMMaxPerMin,
+		},
 		WebhookSecretKey:              strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
 		WebhookTimeout:                webhook.DefaultTimeout,
 		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
@@ -516,8 +598,11 @@ func loadWorkerConfig() (WorkerConfig, error) {
 	if cfg.RiskHostRateLimit, err = config.EnvInt("RISK_HOST_RATE_LIMIT", cfg.RiskHostRateLimit); err != nil {
 		return WorkerConfig{}, err
 	}
+	if raw := os.Getenv("RISK_ALLOWED_HOSTS"); raw != "" {
+		cfg.RiskAllowedHosts = risk.ParseHostList(raw)
+	}
 	if raw := os.Getenv("RISK_BLOCKED_HOSTS"); raw != "" {
-		rules, err := risk.ParseKeywordRules(raw)
+		rules, err := risk.ParseHostRules(raw)
 		if err != nil {
 			return WorkerConfig{}, fmt.Errorf("RISK_BLOCKED_HOSTS: %w", err)
 		}
@@ -536,6 +621,18 @@ func loadWorkerConfig() (WorkerConfig, error) {
 			return WorkerConfig{}, fmt.Errorf("RISK_ALLOWED_PORTS: %w", err)
 		}
 		cfg.RiskAllowedPorts = ports
+	}
+	if cfg.RiskGSB.Timeout, err = config.EnvDuration("RISK_GSB_TIMEOUT", cfg.RiskGSB.Timeout); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.RiskLLM.MinConfidence, err = config.EnvFloat("RISK_LLM_MIN_CONFIDENCE", cfg.RiskLLM.MinConfidence); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.RiskLLM.Timeout, err = config.EnvDuration("RISK_LLM_TIMEOUT", cfg.RiskLLM.Timeout); err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.RiskLLM.MaxPerMin, err = config.EnvInt("RISK_LLM_MAX_PER_MIN", cfg.RiskLLM.MaxPerMin); err != nil {
+		return WorkerConfig{}, err
 	}
 	if raw := os.Getenv("WEBHOOK_ALLOWED_PORTS"); raw != "" {
 		ports, err := config.ParsePorts(raw)
@@ -680,8 +777,17 @@ func validateWorker(cfg WorkerConfig) error {
 	if cfg.RiskFetchTimeout <= 0 {
 		return errors.New("RISK_FETCH_TIMEOUT must be positive")
 	}
+	if cfg.RiskFetchTimeout >= cfg.JobTimeout {
+		return errors.New("RISK_FETCH_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
+	}
 	if cfg.RiskHostRateLimit < 0 {
 		return errors.New("RISK_HOST_RATE_LIMIT must not be negative")
+	}
+	if err := validateRiskGSB(cfg.RiskGSB, cfg.JobTimeout); err != nil {
+		return err
+	}
+	if err := validateRiskLLM(cfg.RiskLLM, cfg.JobTimeout); err != nil {
+		return err
 	}
 	if cfg.WebhookSecretKey != "" {
 		if _, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey); err != nil {
@@ -733,6 +839,60 @@ func validateWorker(cfg WorkerConfig) error {
 		if _, err := mailer.NewSMTPSender(cfg.SMTP); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateRiskGSB(g RiskGSBConfig, jobTimeout time.Duration) error {
+	if g.Timeout <= 0 {
+		return errors.New("RISK_GSB_TIMEOUT must be positive")
+	}
+	if !g.Enabled() {
+		return nil
+	}
+	if err := validateRiskEndpointURL("RISK_GSB_BASE_URL", g.BaseURL); err != nil {
+		return err
+	}
+	if g.Timeout >= jobTimeout {
+		return errors.New("RISK_GSB_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
+	}
+	return nil
+}
+
+func validateRiskLLM(l RiskLLMConfig, jobTimeout time.Duration) error {
+	if l.BaseURL != "" || l.Model != "" || l.APIKey != "" {
+		if l.BaseURL == "" || l.Model == "" {
+			return errors.New("RISK_LLM_BASE_URL and RISK_LLM_MODEL must both be set when LLM risk scan is configured")
+		}
+		if err := validateRiskEndpointURL("RISK_LLM_BASE_URL", l.BaseURL); err != nil {
+			return err
+		}
+	}
+	if !risk.ValidLLMMode(l.Mode) {
+		return fmt.Errorf("RISK_LLM_MODE must be %q or %q, got %q", risk.LLMModeBan, risk.LLMModeShadow, l.Mode)
+	}
+	if math.IsNaN(l.MinConfidence) || math.IsInf(l.MinConfidence, 0) || l.MinConfidence <= 0 || l.MinConfidence > 1 {
+		return errors.New("RISK_LLM_MIN_CONFIDENCE must be in (0, 1]")
+	}
+	if l.Timeout <= 0 {
+		return errors.New("RISK_LLM_TIMEOUT must be positive")
+	}
+	if l.Enabled() && l.Timeout >= jobTimeout {
+		return errors.New("RISK_LLM_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
+	}
+	if l.MaxPerMin < 0 {
+		return errors.New("RISK_LLM_MAX_PER_MIN must not be negative")
+	}
+	return nil
+}
+
+func validateRiskEndpointURL(envName, raw string) error {
+	if err := config.ValidateIssuerURL(envName, raw); err != nil {
+		return err
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil {
+		return fmt.Errorf("%s must not contain userinfo", envName)
 	}
 	return nil
 }

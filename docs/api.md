@@ -611,6 +611,7 @@ curl -i localhost:8081/metrics   # console
 - `shortlink_jobs_reaped_total`（超时租约回收次数，`kind`；仅 `console worker`）
 - `shortlink_jobs_oldest_pending_age_seconds`（最老待执行任务等待秒数，`kind`，反映异步风控暴露窗口；仅 `console worker`）
 - `shortlink_risk_cache_lookups_total`（风控扫描结果缓存查找次数，`result` 为 `hit`、`miss`、`fallback`；仅 `console worker`）
+- `shortlink_risk_scans_total`（风控各阶段与裁决结果计数，`stage` 为 `cache`、`local_allow`、`local_host`、`local_keyword`、`gsb`、`fetch`、`body_keyword`、`llm`，`outcome` 为 `safe`、`unsafe`、`shadow_unsafe`、`low_confidence`、`filtered`、`budget_limited`、`rate_limited`、`blocked_address`、`blocked_port`、`invalid_scheme`、`too_many_redirects`、`unreachable`、`binary_skipped`、`http_4xx`、`error`；仅 `console worker`）
 - `shortlink_webhook_deliveries_total`（Webhook 出站投递结果计数，`event` 为订阅事件或 `webhook.ping`，`result` 为 `success`、`retry`、`failed`、`skipped`、`deferred`；仅 `console worker`）
 - `shortlink_webhook_delivery_duration_seconds`（Webhook 出站 HTTP 投递耗时直方图，`event`；仅 `console worker`）
 - `shortlink_webhook_auto_disabled_total`（Webhook 连续终态失败触发自动熔断停用的累计次数；仅 `console worker`）

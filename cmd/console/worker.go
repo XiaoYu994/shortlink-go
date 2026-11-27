@@ -143,9 +143,12 @@ func runWorker(cliOpts workerCLIOptions) error {
 			fetchTimeout:    cfg.RiskFetchTimeout,
 			allowedPorts:    cfg.RiskAllowedPorts,
 			allowTestHosts:  cliOpts.allowTestHosts,
+			allowedHosts:    cfg.RiskAllowedHosts,
 			blockedHosts:    cfg.RiskBlockedHosts,
 			blockedKeywords: cfg.RiskBlockedKeywords,
 			hostRateLimit:   cfg.RiskHostRateLimit,
+			gsb:             cfg.RiskGSB,
+			llm:             cfg.RiskLLM,
 			logger:          logger,
 		},
 		webhookWorkerModule{

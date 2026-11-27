@@ -19,7 +19,7 @@ import (
 const (
 	DefaultFetchTimeout  = 5 * time.Second
 	DefaultMaxRedirects  = 5
-	DefaultMaxBodyBytes  = 64 * 1024
+	DefaultMaxBodyBytes  = 256 * 1024
 	DefaultHostRateLimit = 2
 )
 

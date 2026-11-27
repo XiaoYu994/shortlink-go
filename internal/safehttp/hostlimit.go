@@ -32,7 +32,7 @@ func (l *HostLimiter) Allow(host string) (retryAfter time.Duration, allowed bool
 	if l == nil || l.limit <= 0 {
 		return 0, true
 	}
-	key := strings.ToLower(strings.TrimSpace(host))
+	key := strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
 	if key == "" {
 		return 0, true
 	}

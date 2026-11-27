@@ -76,7 +76,9 @@ func TestValidateURL(t *testing.T) {
 		{name: "control char rejected", rawURL: "https://hooks.example.com/ev\nents", wantErr: ErrInvalidURL},
 		{name: "internal whitespace rejected", rawURL: "https://hooks.example.com/my hook", wantErr: ErrInvalidURL},
 		{name: "localhost blocked", rawURL: "http://localhost/hook", wantErr: ErrBlockedAddress},
+		{name: "localhost trailing dot blocked", rawURL: "http://localhost./hook", wantErr: ErrBlockedAddress},
 		{name: "sub-localhost blocked", rawURL: "https://api.localhost/hook", wantErr: ErrBlockedAddress},
+		{name: "sub-localhost trailing dot blocked", rawURL: "https://api.localhost./hook", wantErr: ErrBlockedAddress},
 		{name: "loopback ip blocked", rawURL: "http://127.0.0.1/hook", wantErr: ErrBlockedAddress},
 		{name: "ipv4 mapped ipv6 blocked", rawURL: "http://[::ffff:127.0.0.1]/hook", wantErr: ErrBlockedAddress},
 		{name: "private ip blocked", rawURL: "https://10.0.0.5/hook", wantErr: ErrBlockedAddress},
@@ -203,6 +205,10 @@ func TestHostLimiter(t *testing.T) {
 	delay, ok := lim.Allow("  HOOKS.EXAMPLE.COM  ")
 	if ok || delay <= 0 {
 		t.Fatalf("normalized duplicate host = (%v, %v), want (positive delay, false)", delay, ok)
+	}
+	delayDot, okDot := lim.Allow("HOOKS.EXAMPLE.COM.")
+	if okDot || delayDot <= 0 {
+		t.Fatalf("trailing-dot duplicate host = (%v, %v), want (positive delay, false)", delayDot, okDot)
 	}
 	if _, ok := lim.Allow("other.com"); !ok {
 		t.Fatal("different host should not be affected")

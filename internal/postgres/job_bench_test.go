@@ -191,13 +191,13 @@ FROM generate_series(1, $3)`, tenantID, string(payload), b.N); err != nil {
 					Timeout:          5 * time.Second,
 					AllowedHostPorts: []string{stubURL.Host},
 				}),
+				Limiter: safehttp.NewHostLimiter(0),
 			})
 			linkStore := cache.New(store, rdb, prometheus.NewRegistry(), cache.Options{})
 			handler := risk.NewHandler(risk.HandlerOptions{
 				Scanner: scanner,
 				Banner:  linkStore,
 				Cache:   vc,
-				Limiter: safehttp.NewHostLimiter(0),
 			})
 
 			b.ResetTimer()

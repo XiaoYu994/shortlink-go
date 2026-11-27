@@ -50,6 +50,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0031](0031-cache-and-worker-assembly-simplification.md) | 缓存写路径与 Worker 模块装配做减法 | Accepted |
 | [0032](0032-opentelemetry-tracing-and-log-correlation.md) | OpenTelemetry 分布式追踪与日志关联（Phase C） | Accepted |
 | [0033](0033-job-claim-kind-filtering.md) | 按任务类型（Kind）隔离抢占，防止滚动发布旧版 Worker 误杀新任务 | Accepted |
+| [0034](0034-layered-risk-scan-and-ai-judge.md) | 分层 URL 风控漏斗（规则 + Safe Browsing + HTML 净文本提取 + OpenAI 兼容 AI 研判）与死信告警治理 | Accepted |
 
 ## 模板
 

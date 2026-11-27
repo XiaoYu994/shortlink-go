@@ -1,0 +1,12 @@
+Determine whether the webpage snapshot represents real abuse in any language:
+- phishing: fake bank, payment, cloud, email, or SaaS login pages stealing passwords, PINs, IDs, OTP codes, or card CVVs.
+- malware: distributing Trojans, malicious APKs/EXEs, exploit kits, or deceptive software downloads.
+- adult: explicit pornography or non-consensual sexual content.
+- gambling: unlicensed online casinos, sports betting, or illegal gambling promotion.
+- drugs: sale or promotion of illicit narcotics or controlled substances.
+- spam: aggressive deceptive ads, click-farming, fake prize scams, or pyramid schemes.
+- other: severe fraud or illegal abuse not fitting the categories above.
+
+Distinction rules:
+- Benign security blogs, news reports, threat-intelligence writeups, documentation, or educational pages discussing phishing/malware must be marked unsafe=false.
+- Empty or minimal placeholder pages (e.g. "Example Domain") must be marked unsafe=false.

@@ -45,7 +45,7 @@ shortlink/
 │   ├── job/             # 通用可靠后台任务引擎：Worker Pool、指数退避/自定义 RetryAfter、Lease Reaper、周期清理调度与指标（零 PG/Redis 依赖）
 │   ├── ratelimit/       # 零业务依赖的泛型按 Key 进程内令牌桶限流器：精确 LRU 有界淘汰与分批惰性过期回收（供 console、safehttp 共用）
 │   ├── safehttp/        # 零业务/存储依赖出站安全 HTTP 底座：防 SSRF 拨号校验（含 NAT64/6to4/端口白名单）、禁重定向客户端与基于 ratelimit 的按 host 限速器（供 risk、webhook、console 共用）
-│   ├── risk/            # 异步 URL 风控：基于 safehttp 的客户端/按 host 限速、Redis fail-open 结果缓存、规则检测与 link.risk_scan 处理器
+│   ├── risk/            # 异步 URL 风控：基于 safehttp 的分层漏斗（L0 黑白名单/关键词、可选 L1 Safe Browsing、L2 防 SSRF 安全抓取 + HTML 净文本提取、可选 L3 OpenAI 兼容 AI 研判）、带规则指纹的 Redis fail-open 缓存与 link.risk_scan 处理器（ADR 0034）
 │   ├── webhook/         # 租户 Webhook 订阅校验、AES-256-GCM（tenant_id AAD）密文加解密、HMAC-SHA256 签名校验与 webhook.deliver 处理器（含自动熔断与指标）
 │   ├── mailer/          # 仅依赖 Go 标准库的邮件发送器（SMTP StartTLS/SMTPS/Plain 与 CR/LF 注入防护）及邀请邮件正文构造（make arch-check 强制零内部依赖）
 │   ├── sms/             # 短信验证码发送通道抽象（Sender）：防 SSRF WebhookSender（经 safehttp）与本地开发 LogSender（make arch-check 强制仅依赖 safehttp/logx，ADR 0030）
@@ -83,7 +83,7 @@ audit          -> 标准库
 job            -> logx, 标准库、Prometheus、OTel API
 ratelimit      -> 标准库、golang.org/x/time/rate（严格零 internal/* 与业务/HTTP/存储/OTel 依赖，make arch-check 校验）
 safehttp       -> ratelimit, 标准库（严格零业务/存储/cache/config/OTel 依赖）
-risk           -> safehttp, cache, audit, job, link, go-redis, Prometheus、OTel API
+risk           -> safehttp, cache, audit, job, link, go-redis, golang.org/x/net/html, golang.org/x/time/rate, Prometheus、OTel API
 webhook        -> safehttp, audit, job, 标准库、Prometheus、OTel API
 mailer         -> 标准库（严格零 internal/* 与第三方依赖，make arch-check 校验）
 sms            -> safehttp, logx（严格零 PG/Redis/OAuth 依赖与 OTel 直接引入，make arch-check 校验）
@@ -211,7 +211,7 @@ GET /api/v1/links/{code}/stats
 - `SMS_PROVIDER` / `SMS_WEBHOOK_URL` / `SMS_WEBHOOK_TOKEN` / `SMS_ALLOWED_PORTS` / `SMS_TIMEOUT` / `SMS_OTP_TTL` / `SMS_OTP_COOLDOWN` / `SMS_OTP_MAX_PER_HOUR` / `SMS_OTP_MAX_ATTEMPTS` / `SMS_SECURE_COOKIES`：可选，仅 `console serve` 使用。`SMS_PROVIDER` 留空关闭手机号 OTP 登录；支持 `webhook`（经 `safehttp` 防 SSRF 投递）与本地开发 `log` 模式（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）；过期挑战清理由 `console worker` 按 `WORKER_OTP_RETENTION`（默认 `24h`）定期执行
 - `WEB_DIST_DIR`：可选，仅 console 使用。指向 `make web-build` 生成的静态目录后在 `/` 提供最小前端控制台 SPA，同时严格隔离 `/api/*`、`/r/*`、`/healthz`、`/readyz`、`/metrics`（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）
 - `PUBLIC_BASE_URL`：可选，仅 console 使用。公开短链跳转基地址（如 `https://s.example.com` 或本地 `http://127.0.0.1:8080`），随 `GET /api/v1/capabilities` 下发给前端拼装可点击短链与二维码；单入口反代时可留空
-- `WORKER_ADDR` / `WORKER_CONCURRENCY` / `WORKER_MAX_PER_TENANT` / `WORKER_POLL_INTERVAL` / `WORKER_LEASE_DURATION` / `WORKER_JOB_TIMEOUT` / `WORKER_REAP_INTERVAL` / `WORKER_CLEANUP_INTERVAL` / `WORKER_SESSION_RETENTION` / `WORKER_DONE_JOB_RETENTION` / `WORKER_DEAD_JOB_RETENTION` / `WORKER_INVITATION_RETENTION` / `WORKER_WEBHOOK_DELIVERY_RETENTION`（默认 `168h`）/ `WORKER_STATS_RETENTION_DAYS`（默认 `90`）/ `WORKER_AUDIT_RETENTION_DAYS`（默认 `180`）/ `RISK_FETCH_TIMEOUT` / `RISK_HOST_RATE_LIMIT` / `RISK_BLOCKED_HOSTS` / `RISK_BLOCKED_KEYWORDS` / `RISK_ALLOWED_PORTS`：仅 `console worker` 使用（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)、[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）
+- `WORKER_ADDR` / `WORKER_CONCURRENCY` / `WORKER_MAX_PER_TENANT` / `WORKER_POLL_INTERVAL` / `WORKER_LEASE_DURATION` / `WORKER_JOB_TIMEOUT` / `WORKER_REAP_INTERVAL` / `WORKER_CLEANUP_INTERVAL` / `WORKER_SESSION_RETENTION` / `WORKER_DONE_JOB_RETENTION` / `WORKER_DEAD_JOB_RETENTION` / `WORKER_INVITATION_RETENTION` / `WORKER_WEBHOOK_DELIVERY_RETENTION`（默认 `168h`）/ `WORKER_STATS_RETENTION_DAYS`（默认 `90`）/ `WORKER_AUDIT_RETENTION_DAYS`（默认 `180`）/ `RISK_FETCH_TIMEOUT` / `RISK_HOST_RATE_LIMIT` / `RISK_ALLOWED_HOSTS` / `RISK_BLOCKED_HOSTS` / `RISK_BLOCKED_KEYWORDS` / `RISK_ALLOWED_PORTS` / `RISK_GSB_*` / `RISK_LLM_*`：仅 `console worker` 使用（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)、[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)、[ADR 0034](adr/0034-layered-risk-scan-and-ai-judge.md)）
 - `WEBHOOK_SECRET_KEY` / `WEBHOOK_ALLOWED_PORTS`：`console serve`、`console worker` 与运维 CLI 共用；配置 64 位小写 hex 的 `WEBHOOK_SECRET_KEY` 后启用 Webhook 订阅、事务内扇出与投递（[ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)、[ADR 0029](adr/0029-modular-feature-plugins.md)）
 - `SMTP_HOST`：`console serve`（决定是否入队邀请邮件并在 `/api/v1/capabilities` 声明 `email`）、运维 CLI（`member invite`）与 `console worker`（实际发信）共用；`SMTP_PORT`（默认 `587`）/ `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_TLS_MODE`（`starttls`/`smtps`/`none`）/ `SMTP_TIMEOUT`（默认 `10s`）/ `CONSOLE_PUBLIC_URL` 及 `WEBHOOK_TIMEOUT` / `WEBHOOK_HOST_RATE_LIMIT` / `WEBHOOK_RETRY_BASE_DELAY` / `WEBHOOK_RETRY_MAX_DELAY` / `WEBHOOK_MAX_CONSECUTIVE_FAILURES` 仅 `console worker` 使用（[ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)）
 
