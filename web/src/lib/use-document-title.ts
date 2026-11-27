@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-const APP_TITLE = 'Shortlink Console';
+const APP_TITLE = 'Ori · 折羽';
 
 // 动态更新浏览器标签页标题，切换页面与组织时保持清晰定位。
 export function useDocumentTitle(pageTitle?: string): void {

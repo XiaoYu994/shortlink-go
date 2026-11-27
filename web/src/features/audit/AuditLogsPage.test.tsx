@@ -14,15 +14,21 @@ describe('AuditLogsPage', () => {
 
     renderWithOrg(<AuditLogsPage />, { orgId: 2, role: 'member' });
 
-    expect(screen.getByText('仅 Owner 与 Admin 可查看审计日志')).toBeInTheDocument();
+    expect(screen.getByText('仅所有者与管理员可查看审计日志')).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('loads audit logs, filters by action, and fetches next page via cursor', async () => {
+  it('loads audit logs, links short code targets, renders diff badges, filters by action, and fetches next page', async () => {
     const user = userEvent.setup();
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse({
+          auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+          features: { analytics: true, webhooks: false, risk_scan: true, email: false },
+        });
+      }
       if (url === '/api/v1/audit-logs?limit=20') {
         return jsonResponse({
           items: [
@@ -32,11 +38,11 @@ describe('AuditLogsPage', () => {
               actor_id: 7,
               actor_email: 'alice@example.com',
               actor_name: 'Alice',
-              action: 'apikey.issue',
-              target_type: 'api_key',
+              action: 'member.role_update',
+              target_type: 'member',
               target_id: '11',
-              request_id: 'req-issue-21',
-              metadata: { scopes: ['links:read'] },
+              request_id: 'req-role-21',
+              metadata: { previous_role: 'member', new_role: 'admin' },
               created_at: '2026-11-24T08:00:00Z',
             },
             {
@@ -90,11 +96,19 @@ describe('AuditLogsPage', () => {
     renderWithOrg(<AuditLogsPage />, { orgId: 5, role: 'owner' });
 
     expect(await screen.findByText('Alice')).toBeInTheDocument();
-    expect(screen.getByText('系统任务')).toBeInTheDocument();
-    expect(screen.getByText('AbC12345')).toBeInTheDocument();
+    expect(screen.getByText('成员 → 管理员')).toBeInTheDocument();
+    expect(screen.getByText('安全系统')).toBeInTheDocument();
+
+    const actionSelect = screen.getByLabelText('按操作筛选');
+    await waitFor(() => {
+      expect(actionSelect.querySelector('optgroup[label="Webhooks"]')).toBeNull();
+    });
+
+    const targetLink = screen.getByRole('link', { name: 'AbC12345' });
+    expect(targetLink).toHaveAttribute('href', '/orgs/5/links/AbC12345');
 
     await user.click(screen.getByRole('button', { name: '加载更多记录' }));
-    expect(await screen.findByText('运维 CLI')).toBeInTheDocument();
+    expect(await screen.findByText('平台管理员')).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText('按操作筛选'), 'link.ban');
     await waitFor(() => {
@@ -105,5 +119,28 @@ describe('AuditLogsPage', () => {
     });
     expect(screen.queryByText('Alice')).not.toBeInTheDocument();
     expect(await screen.findByText('AbC12345')).toBeInTheDocument();
+  });
+
+  it('includes Webhooks action group when features.webhooks is true', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === '/api/v1/capabilities') {
+        return jsonResponse({
+          auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+          features: { analytics: true, webhooks: true, risk_scan: true, email: false },
+        });
+      }
+      if (url === '/api/v1/audit-logs?limit=20') {
+        return jsonResponse({ items: [] });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    renderWithOrg(<AuditLogsPage />, { orgId: 5, role: 'owner' });
+
+    const actionSelect = await screen.findByLabelText('按操作筛选');
+    await waitFor(() => {
+      expect(actionSelect.querySelector('optgroup[label="Webhooks"]')).not.toBeNull();
+    });
   });
 });

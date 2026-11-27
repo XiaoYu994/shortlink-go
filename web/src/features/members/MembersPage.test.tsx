@@ -10,7 +10,7 @@ describe('MembersPage', () => {
     vi.restoreAllMocks();
   });
 
-  it('enforces admin vs owner boundary: admin can update member but cannot edit or remove owner', async () => {
+  it('enforces admin boundary and requires confirmation before self-downgrade without leaking PATCH on cancel', async () => {
     const user = userEvent.setup();
     let bobRole: 'member' | 'viewer' = 'member';
 
@@ -24,6 +24,15 @@ describe('MembersPage', () => {
           name: 'Bob',
           role: 'viewer',
           joined_at: '2026-11-22T08:00:00Z',
+        });
+      }
+      if (url === ENDPOINTS.members.detail(7) && init?.method === 'PATCH') {
+        return jsonResponse({
+          user_id: 7,
+          email: 'alice@example.com',
+          name: 'Alice',
+          role: 'viewer',
+          joined_at: '2026-11-21T08:00:00Z',
         });
       }
       if (url === ENDPOINTS.members.list) {
@@ -81,9 +90,21 @@ describe('MembersPage', () => {
         }),
       );
     });
+
+    // 管理员调整自己角色时先弹出确认框，取消后不发 PATCH 请求。
+    const aliceSelect = screen.getByLabelText('修改 alice@example.com 的角色');
+    await user.selectOptions(aliceSelect, 'viewer');
+    expect(await screen.findByText(/确认将自己的角色改为/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '取消' }));
+
+    expect(
+      fetchSpy.mock.calls.some(
+        ([u, reqInit]) => u === ENDPOINTS.members.detail(7) && reqInit?.method === 'PATCH',
+      ),
+    ).toBe(false);
   });
 
-  it('switches to invitations tab and exposes copy-login action for pending invitation', async () => {
+  it('switches to invitations tab with pending badge count and exposes copy-login action', async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
@@ -100,6 +121,13 @@ describe('MembersPage', () => {
               status: 'pending',
               created_at: '2026-11-23T09:00:00Z',
             },
+            {
+              id: 16,
+              email: 'done@example.com',
+              role: 'viewer',
+              status: 'accepted',
+              created_at: '2026-11-22T09:00:00Z',
+            },
           ],
         });
       }
@@ -108,12 +136,42 @@ describe('MembersPage', () => {
 
     renderWithOrg(<MembersPage />, { orgId: 4, role: 'owner' });
 
-    await user.click(await screen.findByRole('button', { name: /邀请记录/ }));
+    expect(await screen.findByText('1 待加入')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: /邀请记录/ }));
 
     expect(await screen.findByText('carol@example.com')).toBeInTheDocument();
-    expect(screen.getByText('待兑现')).toBeInTheDocument();
+    expect(screen.getByText('待加入')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '复制登录入口' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '撤销邀请' })).toBeInTheDocument();
+  });
+
+  it('disables role selector for sole owner while allowing changes when multiple owners exist', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === ENDPOINTS.members.list) {
+        return jsonResponse({
+          items: [
+            {
+              user_id: 7,
+              email: 'alice@example.com',
+              name: 'Alice',
+              role: 'owner',
+              joined_at: '2026-11-20T08:00:00Z',
+            },
+          ],
+        });
+      }
+      if (url === ENDPOINTS.invitations.listCreate) {
+        return jsonResponse({ items: [] });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    renderWithOrg(<MembersPage />, { orgId: 4, role: 'owner' });
+
+    const ownerSelect = await screen.findByLabelText('修改 alice@example.com 的角色');
+    expect(ownerSelect).toBeDisabled();
+    expect(fetchSpy.mock.calls.some(([, reqInit]) => reqInit?.method === 'PATCH')).toBe(false);
   });
 
   it.each([
@@ -122,13 +180,13 @@ describe('MembersPage', () => {
       emailEnabled: true,
       invitee: 'dave@example.com',
       wantShown: /系统将自动向/,
-      wantHidden: /服务端未开启自动邀请邮件/,
+      wantHidden: /当前未开启自动邀请邮件/,
     },
     {
       label: 'manual copy notice when features.email is false',
       emailEnabled: false,
       invitee: 'erin@example.com',
-      wantShown: /服务端未开启自动邀请邮件/,
+      wantShown: /当前未开启自动邀请邮件/,
       wantHidden: /系统将自动向/,
     },
   ])(

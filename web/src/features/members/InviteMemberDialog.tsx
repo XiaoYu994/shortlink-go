@@ -1,9 +1,15 @@
 import { type FormEvent, useState } from 'react';
-import { CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { routes } from '@/app/routes';
 import { CopyButton } from '@/components/CopyButton';
+import { CourierCat } from '@/components/CourierCat';
 import { ErrorAlert } from '@/components/ErrorAlert';
+import {
+  createInitialExpiration,
+  type ExpirationSelection,
+  resolveExpiration,
+} from '@/components/expiration-helpers';
+import { ExpirationPicker } from '@/components/ExpirationPicker';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -13,12 +19,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Input, Label, Select } from '@/components/ui/input';
+import { Input, Label } from '@/components/ui/input';
 import { type Role, useEmailEnabled } from '@/features/auth/api';
 import { assignableRolesFor, ROLE_LABELS } from '@/features/auth/permissions';
 import { getErrorMessage } from '@/lib/api-client';
-import { localDatetimeToISO } from '@/lib/format';
+import { cn } from '@/lib/cn';
 import { type Invitation, useCreateInvitation } from './api';
+
+const ROLE_DESCRIPTIONS: Record<Role, string> = {
+  owner: '完全控制组织、成员、API\u00A0Key、Webhook 与审计日志',
+  admin: '管理成员（除所有者）、短链、API\u00A0Key、Webhook 与审计日志',
+  member: '创建、编辑、停用与删除短链，查看点击统计',
+  viewer: '仅可浏览短链列表、访问统计与成员名单',
+};
 
 interface InviteMemberDialogProps {
   orgId: number;
@@ -35,7 +48,9 @@ export function InviteMemberDialog({
 }: InviteMemberDialogProps) {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<Role>('member');
-  const [expiresAt, setExpiresAt] = useState('');
+  const [expiration, setExpiration] = useState<ExpirationSelection>(() =>
+    createInitialExpiration('create'),
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [createdInv, setCreatedInv] = useState<Invitation | null>(null);
 
@@ -47,7 +62,7 @@ export function InviteMemberDialog({
     if (!nextOpen) {
       setEmail('');
       setRole('member');
-      setExpiresAt('');
+      setExpiration(createInitialExpiration('create'));
       setFormError(null);
       setCreatedInv(null);
     }
@@ -61,13 +76,17 @@ export function InviteMemberDialog({
       setFormError('请输入受邀邮箱');
       return;
     }
+    const exp = resolveExpiration(expiration);
+    if (exp.action === 'error') {
+      setFormError(exp.message);
+      return;
+    }
     setFormError(null);
     try {
-      const iso = localDatetimeToISO(expiresAt);
       const created = await createInvitation.mutateAsync({
         email: trimmed,
         role,
-        ...(iso ? { expires_at: iso } : {}),
+        ...(exp.action === 'set' ? { expires_at: exp.iso } : {}),
       });
       toast.success(`已登记对 ${created.email} 的邀请`);
       setCreatedInv(created);
@@ -84,30 +103,32 @@ export function InviteMemberDialog({
         {createdInv ? (
           <>
             <DialogHeader>
-              <div className="flex items-center gap-2 text-emerald-700">
-                <CheckCircle2 className="size-5" />
-                <DialogTitle>邀请已登记</DialogTitle>
+              <div className="flex items-center gap-3">
+                <CourierCat pose="success" className="size-14 shrink-0" />
+                <div className="space-y-1">
+                  <DialogTitle>邀请已登记</DialogTitle>
+                  <DialogDescription>
+                    {emailEnabled ? (
+                      <>
+                        系统将自动向{' '}
+                        <strong className="font-mono text-ink">{createdInv.email}</strong>{' '}
+                        发送邀请邮件；你也可以复制下方工作台登录入口发给对方，使用该邮箱登录后将自动以{' '}
+                        {ROLE_LABELS[createdInv.role]} 身份加入组织。
+                      </>
+                    ) : (
+                      <>
+                        当前未开启自动邀请邮件，请复制下方登录入口发送给{' '}
+                        <strong className="font-mono text-ink">{createdInv.email}</strong>
+                        ，对方使用该邮箱登录后将自动以 {ROLE_LABELS[createdInv.role]} 身份加入组织。
+                      </>
+                    )}
+                  </DialogDescription>
+                </div>
               </div>
-              <DialogDescription>
-                {emailEnabled ? (
-                  <>
-                    系统将自动向{' '}
-                    <strong className="font-mono text-zinc-900">{createdInv.email}</strong>{' '}
-                    发送邀请邮件；你也可以复制下方控制台登录入口发给对方，登录后将自动以{' '}
-                    {ROLE_LABELS[createdInv.role]} 身份加入组织。
-                  </>
-                ) : (
-                  <>
-                    服务端未开启自动邀请邮件，请复制下方控制台登录入口发送给{' '}
-                    <strong className="font-mono text-zinc-900">{createdInv.email}</strong>
-                    ，对方登录后将自动以 {ROLE_LABELS[createdInv.role]} 身份加入组织。
-                  </>
-                )}
-              </DialogDescription>
             </DialogHeader>
 
-            <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
-              <code className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-800">
+            <div className="flex items-center gap-2 rounded-xl border-[1.25px] border-ink bg-paper-warm/60 px-3 py-2.5">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-ink">
                 {loginUrl}
               </code>
               <CopyButton
@@ -125,21 +146,21 @@ export function InviteMemberDialog({
                 onClick={() => {
                   setCreatedInv(null);
                   setEmail('');
-                  setExpiresAt('');
+                  setExpiration(createInitialExpiration('create'));
                 }}
               >
                 继续邀请其他人
               </Button>
-              <Button onClick={() => handleOpenChange(false)}>完成</Button>
+              <Button variant="highlight" onClick={() => handleOpenChange(false)}>
+                完成
+              </Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
               <DialogTitle>邀请新成员</DialogTitle>
-              <DialogDescription>
-                登记受邀人邮箱与角色；对方下次使用该已验证邮箱登录控制台时将自动加入本组织。
-              </DialogDescription>
+              <DialogDescription>对方使用受邀邮箱登录后将自动加入组织。</DialogDescription>
             </DialogHeader>
             <form className="space-y-4" onSubmit={handleSubmit}>
               <div className="space-y-2">
@@ -156,30 +177,47 @@ export function InviteMemberDialog({
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="invite-role">组织角色</Label>
-                <Select
-                  id="invite-role"
-                  className="w-full"
-                  value={role}
-                  onChange={(e) => setRole(e.target.value as Role)}
-                >
-                  {roles.map((r) => (
-                    <option key={r} value={r}>
-                      {ROLE_LABELS[r]} ({r})
-                    </option>
-                  ))}
-                </Select>
+                <span className="block text-sm font-medium leading-none text-ink">组织角色</span>
+                <div role="radiogroup" aria-label="组织角色" className="grid gap-2">
+                  {roles.map((r) => {
+                    const selected = role === r;
+                    return (
+                      <label
+                        key={r}
+                        className={cn(
+                          'flex items-start gap-2.5 rounded-xl border-[1.25px] px-3 py-2 text-sm transition-colors cursor-pointer',
+                          selected
+                            ? 'border-ink bg-hl-yellow/40'
+                            : 'border-border-soft bg-paper-warm/40 hover:border-ink/60',
+                        )}
+                      >
+                        <input
+                          type="radio"
+                          name="invite-role"
+                          value={r}
+                          checked={selected}
+                          onChange={() => setRole(r)}
+                          className="mt-1 size-4 accent-ink"
+                        />
+                        <span className="min-w-0">
+                          <span className="font-semibold text-ink">{ROLE_LABELS[r]}</span>
+                          <span className="block text-xs text-ink-secondary">
+                            {ROLE_DESCRIPTIONS[r]}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="invite-expires">过期时间（可选）</Label>
-                <Input
-                  id="invite-expires"
-                  type="datetime-local"
-                  value={expiresAt}
-                  onChange={(e) => setExpiresAt(e.target.value)}
-                />
-              </div>
+              <ExpirationPicker
+                id="invite-expires"
+                label="邀请有效期（可选）"
+                mode="create"
+                value={expiration}
+                onChange={setExpiration}
+              />
 
               {formError && <ErrorAlert compact message={formError} />}
 
@@ -191,7 +229,7 @@ export function InviteMemberDialog({
                 >
                   取消
                 </Button>
-                <Button type="submit" disabled={createInvitation.isPending}>
+                <Button type="submit" variant="highlight" disabled={createInvitation.isPending}>
                   {createInvitation.isPending ? '提交中…' : '发起邀请'}
                 </Button>
               </DialogFooter>

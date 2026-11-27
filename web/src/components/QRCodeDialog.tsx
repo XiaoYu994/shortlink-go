@@ -17,29 +17,29 @@ export function QRCodeDialog({ open, onOpenChange, code, shortUrl, targetUrl }: 
       <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>短链二维码</DialogTitle>
-          <DialogDescription>
-            扫码即可直接访问该短链，适合海报、PPT 与移动端分享。
+          <DialogDescription className="sr-only">
+            短链 {code} 二维码与复制分享入口。
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <QRCodeCard url={shortUrl} code={code} />
 
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex min-w-0 items-center gap-2 rounded-lg border-[1.25px] border-ink/75 bg-paper-warm/60 px-3 py-2">
               <a
                 href={shortUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-brand hover:underline"
+                className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-ink underline decoration-hl-yellow decoration-2 underline-offset-2 hover:bg-hl-yellow/40"
               >
                 {shortUrl}
               </a>
-              <ExternalLink className="size-3.5 shrink-0 text-zinc-400" />
+              <ExternalLink className="size-3.5 shrink-0 text-ink-secondary" />
               <CopyButton value={shortUrl} label="复制短链" toastMessage={`已复制 ${shortUrl}`} />
             </div>
             {targetUrl && (
-              <p className="truncate text-xs text-zinc-400" title={targetUrl}>
+              <p className="truncate text-xs text-muted-foreground" title={targetUrl}>
                 目标：{targetUrl}
               </p>
             )}

@@ -19,10 +19,11 @@ function capabilitiesPayload(overrides?: { analytics?: boolean; public_base_url?
 
 describe('LinksPage', () => {
   afterEach(() => {
+    localStorage.clear();
     vi.restoreAllMocks();
   });
 
-  it('uses public_base_url for short link href and locks mutations on banned links', async () => {
+  it('uses public_base_url, localizes ban reason, and locks mutations on banned links', async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
@@ -59,7 +60,7 @@ describe('LinksPage', () => {
 
     const shortAnchor = await screen.findByRole('link', { name: /s\.example\.com\/r\/Actv1234/ });
     expect(shortAnchor).toHaveAttribute('href', 'https://s.example.com/r/Actv1234');
-    expect(screen.getByText(/已封禁 · phishing/)).toBeInTheDocument();
+    expect(screen.getByText(/已封禁 · 钓鱼风险/)).toBeInTheDocument();
 
     expect(fetchSpy).toHaveBeenCalledWith(
       '/api/v1/links?limit=20&sort=id',
@@ -71,11 +72,11 @@ describe('LinksPage', () => {
 
     await user.click(screen.getByRole('button', { name: '操作 Bann9999' }));
     expect(await screen.findByText('封禁链接不可修改或删除')).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: /编辑目标 URL/ })).toHaveAttribute('data-disabled');
+    expect(screen.getByRole('menuitem', { name: /编辑目标网址/ })).toHaveAttribute('data-disabled');
     expect(screen.getByRole('menuitem', { name: /永久删除/ })).toHaveAttribute('data-disabled');
   });
 
-  it('shows read-only banner and hides write controls for viewer role', async () => {
+  it('shows read-only banner and hides write controls and quick-shorten bar for viewer role', async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
@@ -99,28 +100,29 @@ describe('LinksPage', () => {
     renderWithOrg(<LinksPage />, { orgId: 1, role: 'viewer' });
 
     expect(await screen.findByText('/r/View1234')).toBeInTheDocument();
-    expect(screen.getByText(/只读观察者（Viewer）/)).toBeInTheDocument();
+    expect(screen.getByText(/只读成员权限/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /创建短链/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('极速缩短长链接')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '操作 View1234' }));
     expect(await screen.findByRole('menuitem', { name: /查看二维码/ })).toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: /编辑目标 URL/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /编辑目标网址/ })).not.toBeInTheDocument();
   });
 
-  it('creates a link via shortcut C and shows copy + QR code success state', async () => {
+  it('creates a link via shortcut C and via Quick Shorten Bar', async () => {
     const user = userEvent.setup();
-    let created = false;
+    let count = 0;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       if (url === '/api/v1/capabilities') {
         return jsonResponse(capabilitiesPayload({ public_base_url: 'http://127.0.0.1:8080' }));
       }
       if (url === '/api/v1/links' && init?.method === 'POST') {
-        created = true;
+        count += 1;
         return jsonResponse(
           {
-            code: 'New12345',
-            url: 'https://example.com/fresh',
+            code: count === 1 ? 'New12345' : 'Qck67890',
+            url: count === 1 ? 'https://example.com/fresh' : 'https://example.com/quick',
             status: 'active',
             created_at: '2026-11-23T08:10:00Z',
             clicks: 0,
@@ -131,18 +133,19 @@ describe('LinksPage', () => {
       }
       if (url.startsWith('/api/v1/links')) {
         return jsonResponse({
-          items: created
-            ? [
-                {
-                  code: 'New12345',
-                  url: 'https://example.com/fresh',
-                  status: 'active',
-                  created_at: '2026-11-23T08:10:00Z',
-                  clicks: 0,
-                  clicks_today: 0,
-                },
-              ]
-            : [],
+          items:
+            count > 0
+              ? [
+                  {
+                    code: count === 1 ? 'New12345' : 'Qck67890',
+                    url: count === 1 ? 'https://example.com/fresh' : 'https://example.com/quick',
+                    status: 'active',
+                    created_at: '2026-11-23T08:10:00Z',
+                    clicks: 0,
+                    clicks_today: 0,
+                  },
+                ]
+              : [],
         });
       }
       throw new Error(`unexpected fetch: ${url}`);
@@ -153,7 +156,15 @@ describe('LinksPage', () => {
     await screen.findByText('当前组织还没有短链');
     await user.keyboard('c');
 
-    const urlInput = await screen.findByLabelText('目标 URL');
+    const urlInput = await screen.findByLabelText('目标网址');
+    await user.click(screen.getByRole('button', { name: '自定义' }));
+    const customExpiryInput = screen.getByLabelText('有效期设置');
+    expect(customExpiryInput).toHaveAttribute('type', 'datetime-local');
+    expect(
+      (customExpiryInput as HTMLInputElement).value > (customExpiryInput as HTMLInputElement).min,
+    ).toBe(true);
+    await user.click(screen.getByRole('button', { name: '永不过期' }));
+
     await user.type(urlInput, 'https://example.com/fresh');
     await user.click(screen.getByRole('button', { name: '生成短链' }));
 
@@ -167,13 +178,21 @@ describe('LinksPage', () => {
       );
     });
 
-    // 创建成功后停留在成功态，展示公开域名短链与一键复制按钮。
     expect(await screen.findByText('短链已生成')).toBeInTheDocument();
     expect(screen.getByTestId('created-short-url')).toHaveTextContent(
       'http://127.0.0.1:8080/r/New12345',
     );
     await user.click(screen.getByRole('button', { name: '完成' }));
     expect(await screen.findByText('127.0.0.1:8080/r/New12345')).toBeInTheDocument();
+
+    // 使用顶部极速缩短框快速折叠
+    await user.type(screen.getByLabelText('极速缩短长链接'), 'https://example.com/quick');
+    await user.click(screen.getByRole('button', { name: /立即折叠/ }));
+
+    expect(await screen.findByText('刚刚折好：')).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: 'http://127.0.0.1:8080/r/Qck67890' }),
+    ).toBeInTheDocument();
   });
 
   it('deduplicates overlapping items across cursor pages and does not render banned url as link', async () => {
@@ -232,7 +251,7 @@ describe('LinksPage', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('filters links by status and debounced server search q, and resets on clear', async () => {
+  it('filters links by status pills and debounced server search q, supports exact code bar, and resets on clear', async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
@@ -289,7 +308,7 @@ describe('LinksPage', () => {
     renderWithOrg(<LinksPage />, { orgId: 9, role: 'owner' });
     expect(await screen.findByText('/r/Actv1234')).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText('状态筛选'), 'banned');
+    await user.click(screen.getByRole('button', { name: '已封禁' }));
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledWith(
         '/api/v1/links?limit=20&sort=id&status=banned',
@@ -305,6 +324,10 @@ describe('LinksPage', () => {
         expect.anything(),
       );
     });
+
+    await user.clear(screen.getByLabelText('搜索短链'));
+    await user.type(screen.getByLabelText('搜索短链'), 'AbC12345');
+    expect(await screen.findByRole('button', { name: /直达 \/r\/AbC12345/ })).toBeInTheDocument();
 
     await user.clear(screen.getByLabelText('搜索短链'));
     await user.type(screen.getByLabelText('搜索短链'), 'missing');
@@ -349,7 +372,7 @@ describe('LinksPage', () => {
 
     expect(await screen.findByText('/r/Lite1234')).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByText('累计点击')).not.toBeInTheDocument();
+      expect(screen.queryByText(/今日点击/)).not.toBeInTheDocument();
     });
     expect(screen.queryByText('次点击')).not.toBeInTheDocument();
     const sortSelect = screen.getByLabelText('排序方式');
@@ -385,7 +408,7 @@ describe('LinksPage', () => {
     renderWithOrg(<LinksPage />, { orgId: 1, role: 'owner' });
 
     expect(await screen.findByText('/r/Pend1234')).toBeInTheDocument();
-    expect(screen.queryByText('累计点击')).not.toBeInTheDocument();
+    expect(screen.queryByText(/今日点击/)).not.toBeInTheDocument();
     expect(screen.queryByText('次点击')).not.toBeInTheDocument();
     const sortSelect = screen.getByLabelText('排序方式');
     expect(sortSelect.querySelector('option[value="clicks"]')).toBeNull();

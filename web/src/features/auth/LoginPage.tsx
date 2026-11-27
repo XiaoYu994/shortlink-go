@@ -1,16 +1,9 @@
-import {
-  Activity,
-  CornerDownRight,
-  Github,
-  KeyRound,
-  Link2,
-  MousePointerClick,
-  ShieldCheck,
-  Zap,
-} from 'lucide-react';
+import { Activity, Github, KeyRound, ShieldCheck, Users } from 'lucide-react';
 import { Navigate, useSearchParams } from 'react-router';
+import { BrandLogo } from '@/components/BrandLogo';
+import { CourierCat } from '@/components/CourierCat';
 import { ErrorAlert } from '@/components/ErrorAlert';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getErrorMessage } from '@/lib/api-client';
 import { ENDPOINTS } from '@/lib/endpoints';
@@ -35,7 +28,7 @@ const REDIRECT_METHOD_META: Record<
   string,
   { label: string; icon: typeof ShieldCheck; primary?: boolean }
 > = {
-  oidc: { label: '使用 OIDC 单点登录（Dex / SSO）', icon: ShieldCheck, primary: true },
+  oidc: { label: '使用单点登录（SSO）', icon: ShieldCheck, primary: true },
   github: { label: '使用 GitHub 账号登录', icon: Github },
 };
 
@@ -60,207 +53,144 @@ export function LoginPage() {
   );
   const hasAnyMethod = authMethods.length > 0;
   const hasInteractiveMethod = redirectMethods.length > 0 || phoneOTPMethods.length > 0;
+  const checkingSession = meQuery.isPending;
 
   return (
-    <div className="grid min-h-screen bg-white lg:grid-cols-2">
-      {/* 左侧品牌与产品预览区（宽屏展示） */}
-      <div className="relative hidden flex-col justify-between overflow-hidden border-r border-zinc-200/80 bg-zinc-50 bg-dot-grid p-10 lg:flex">
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute -top-32 -left-24 size-96 rounded-full bg-indigo-500/10 blur-3xl"
-        />
-
-        <div className="relative flex items-center gap-2.5">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-zinc-900 text-white shadow-xs">
-            <Link2 className="size-4" />
-          </div>
-          <span className="text-base font-semibold tracking-tight text-zinc-950">Shortlink</span>
-          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
-            Console
-          </span>
-        </div>
+    <div className="grid min-h-screen bg-paper lg:grid-cols-2">
+      {/* 左侧品牌插画与产品叙事区（宽屏展示） */}
+      <div className="relative hidden flex-col justify-between overflow-hidden border-r-[1.25px] border-ink/80 bg-paper-dots p-10 lg:flex">
+        <BrandLogo size="md" />
 
         <div className="relative max-w-md space-y-6">
           <div className="space-y-3">
-            <h1 className="text-3xl font-semibold tracking-tight text-zinc-950 leading-tight">
-              干净、可观测的多租户
+            <h1 className="text-3xl font-bold leading-tight tracking-tight text-ink">
+              把长链接，
               <br />
-              短链管理控制台
+              <span className="hl-swipe-yellow px-1.5">折叠成轻巧的纸飞机</span>
             </h1>
-            <p className="text-sm leading-relaxed text-zinc-500">
-              从组织隔离、按角色细粒度授权，到 Redis 写穿缓存与异步 URL
-              风控，一条短链背后的完整工程闭环。
+            <p className="text-sm leading-relaxed text-ink-secondary">
+              多团队空间隔离、实时点击归因与自动安全风控，让每一条发出去的短链都清晰可控。
             </p>
           </div>
 
-          {/* 静态产品卡片预览：第一眼建立清爽的 Dub.co / Vercel 视觉预期 */}
-          <div className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-[0_8px_30px_rgba(0,0,0,0.04)]">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-sm font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200/80">
-                  G
-                </span>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 font-mono text-sm font-semibold text-zinc-950">
-                    /r/Launch26
-                    <span className="size-2 rounded-full bg-emerald-500 ring-2 ring-emerald-500/20" />
-                  </div>
-                  <div className="flex items-center gap-1 text-xs text-zinc-500">
-                    <CornerDownRight className="size-3 shrink-0 text-zinc-400" />
-                    <span className="truncate">https://github.com/shortlink/releases</span>
-                  </div>
-                </div>
-              </div>
-              <span className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 font-mono text-xs font-medium text-zinc-800">
-                <MousePointerClick className="size-3.5 text-brand" />
-                12.4k
-                <span className="rounded bg-emerald-100 px-1 text-[10px] font-semibold text-emerald-700">
-                  +342
-                </span>
-              </span>
-            </div>
-
-            {/* 迷你趋势预览线 */}
-            <svg viewBox="0 0 320 44" className="mt-3.5 h-10 w-full" aria-hidden="true">
-              <defs>
-                <linearGradient id="login-spark" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.18" />
-                  <stop offset="100%" stopColor="#4f46e5" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <path
-                d="M 0 36 C 35 32, 55 24, 90 26 C 125 28, 150 12, 190 16 C 230 20, 260 6, 320 8 L 320 44 L 0 44 Z"
-                fill="url(#login-spark)"
-              />
-              <path
-                d="M 0 36 C 35 32, 55 24, 90 26 C 125 28, 150 12, 190 16 C 230 20, 260 6, 320 8"
-                fill="none"
-                stroke="#4f46e5"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
+          <div className="rounded-2xl border-[1.25px] border-dashed border-ink/35 bg-card/70 px-4 py-3">
+            <CourierCat pose="hero" />
           </div>
 
-          <div className="grid grid-cols-3 gap-3 text-xs text-zinc-600">
+          <div className="grid grid-cols-3 gap-3 text-xs font-medium text-ink-secondary">
             <div className="flex items-center gap-1.5">
-              <Zap className="size-3.5 text-brand" />
-              Redis 写穿缓存
+              <Users className="size-3.5 text-ink" />
+              团队空间隔离
             </div>
             <div className="flex items-center gap-1.5">
-              <Activity className="size-3.5 text-brand" />
-              异步 URL 风控
+              <Activity className="size-3.5 text-ink" />
+              实时点击归因
             </div>
             <div className="flex items-center gap-1.5">
-              <ShieldCheck className="size-3.5 text-brand" />
-              多租户 RBAC
+              <ShieldCheck className="size-3.5 text-ink" />
+              自动安全风控
             </div>
           </div>
         </div>
 
-        <div className="relative text-xs text-zinc-400">
-          Go + PostgreSQL + Redis · React 19 + TanStack Query
-        </div>
+        <div className="text-xs text-muted-foreground">Ori · 折羽短链工作台</div>
       </div>
 
-      {/* 右侧极简登录区 */}
-      <div className="flex flex-col items-center justify-center px-6 py-12">
+      {/* 右侧手绘偏移登录区 */}
+      <div className="flex flex-col items-center justify-center max-lg:bg-paper-dots px-6 py-12 lg:bg-paper">
         <div className="w-full max-w-sm space-y-6">
           <div className="flex flex-col items-center text-center lg:items-start lg:text-left">
-            <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-zinc-900 text-white shadow-xs lg:hidden">
-              <Link2 className="size-5" />
+            <div className="mb-4 lg:hidden">
+              <BrandLogo size="md" />
             </div>
-            <h2 className="text-2xl font-semibold tracking-tight text-zinc-950">欢迎回来</h2>
-            <p className="mt-1 text-sm text-zinc-500">选择已配置的身份提供方登录你的组织工作区</p>
+            <h2 className="text-2xl font-bold tracking-tight text-ink">欢迎回来</h2>
+            <p className="mt-1 text-sm text-ink-secondary">选择一种方式登录</p>
           </div>
 
-          <Card className="border-zinc-200/90 shadow-none">
+          <Card className="border-[1.5px] border-ink ink-shadow">
             <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-zinc-700">身份验证方式</CardTitle>
-              <CardDescription className="text-xs">
-                登录后可自助创建组织、管理短链、邀请成员与签发 API Key。
-              </CardDescription>
+              <CardTitle className="text-sm font-semibold text-ink">登录方式</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2.5">
-              {capabilitiesQuery.isPending && (
-                <div className="space-y-2.5">
+            <CardContent className="space-y-3">
+              {(checkingSession || capabilitiesQuery.isPending) && (
+                <div className="space-y-2.5" aria-label="正在检查登录状态">
                   <Skeleton className="h-10 w-full" />
                   <Skeleton className="h-10 w-full" />
                 </div>
               )}
 
-              {capabilitiesQuery.isError && (
+              {!checkingSession && capabilitiesQuery.isError && (
                 <ErrorAlert
                   compact
                   message={`无法获取登录方式：${getErrorMessage(capabilitiesQuery.error)}`}
                 />
               )}
 
-              {capabilities && !hasAnyMethod && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-900">
-                  当前 <code className="font-mono text-xs">console</code>{' '}
-                  未启用任何用户登录方式。请在服务端配置登录提供方（如{' '}
-                  <code className="font-mono text-xs">OIDC_*</code> 或{' '}
-                  <code className="font-mono text-xs">GITHUB_*</code>）后重启。
+              {!checkingSession && capabilities && !hasAnyMethod && (
+                <div className="rounded-xl border-[1.25px] border-ink/70 bg-hl-peach/35 px-3.5 py-3 text-sm text-ink">
+                  暂未开放任何登录方式，请联系工作台管理员检查登录配置。
                 </div>
               )}
 
-              {redirectMethods.map((method, index) => {
-                const meta = REDIRECT_METHOD_META[method.id] ?? {
-                  label: `使用 ${method.id.toUpperCase()} 登录`,
-                  icon: KeyRound,
-                };
-                const Icon = meta.icon;
-                const isPrimary = meta.primary ?? index === 0;
-                return (
-                  <a
-                    key={method.id}
-                    href={ENDPOINTS.auth.redirectLogin(method.login_url, returnTo)}
-                    className={
-                      isPrimary
-                        ? 'inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white shadow-xs transition-colors hover:bg-zinc-800'
-                        : 'inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 text-sm font-medium text-zinc-900 shadow-2xs transition-colors hover:bg-zinc-50'
-                    }
-                  >
-                    <Icon className="size-4" />
-                    {meta.label}
-                  </a>
-                );
-              })}
+              {!checkingSession &&
+                redirectMethods.map((method, index) => {
+                  const meta = REDIRECT_METHOD_META[method.id] ?? {
+                    label: `使用 ${method.id.toUpperCase()} 登录`,
+                    icon: KeyRound,
+                  };
+                  const Icon = meta.icon;
+                  const isPrimary = meta.primary ?? index === 0;
+                  return (
+                    <a
+                      key={method.id}
+                      href={ENDPOINTS.auth.redirectLogin(method.login_url, returnTo)}
+                      className={
+                        isPrimary
+                          ? 'inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border-[1.5px] border-ink bg-ink px-4 text-sm font-medium text-primary-foreground ink-shadow-sm ink-pressable hover:bg-ink/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2'
+                          : 'inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border-[1.25px] border-ink bg-card px-4 text-sm font-medium text-ink transition-colors hover:bg-paper-warm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2'
+                      }
+                    >
+                      <Icon className="size-4" />
+                      {meta.label}
+                    </a>
+                  );
+                })}
 
-              {redirectMethods.length > 0 && phoneOTPMethods.length > 0 && (
+              {!checkingSession && redirectMethods.length > 0 && phoneOTPMethods.length > 0 && (
                 <div className="relative py-1">
                   <div className="absolute inset-0 flex items-center" aria-hidden="true">
-                    <span className="w-full border-t border-zinc-200" />
+                    <span className="w-full border-t border-dashed border-ink/35" />
                   </div>
                   <div className="relative flex justify-center text-xs">
-                    <span className="bg-white px-2 text-zinc-400">或使用手机号验证码登录</span>
+                    <span className="bg-card px-2 text-muted-foreground">或使用手机号验证码</span>
                   </div>
                 </div>
               )}
 
-              {phoneOTPMethods.map((method) => (
-                <PhoneOTPLoginForm
-                  key={method.id}
-                  id={method.id}
-                  sendCodeUrl={method.send_code_url}
-                  verifyCodeUrl={method.verify_code_url}
-                  returnTo={returnTo}
-                />
-              ))}
+              {!checkingSession &&
+                phoneOTPMethods.map((method) => (
+                  <PhoneOTPLoginForm
+                    key={method.id}
+                    id={method.id}
+                    sendCodeUrl={method.send_code_url}
+                    verifyCodeUrl={method.verify_code_url}
+                    returnTo={returnTo}
+                  />
+                ))}
 
-              {unsupportedMethods.length > 0 &&
+              {!checkingSession &&
+                unsupportedMethods.length > 0 &&
                 (!hasInteractiveMethod ? (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-900">
-                    服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互：
+                  <div className="rounded-xl border-[1.25px] border-ink/70 bg-hl-peach/35 px-3.5 py-3 text-sm text-ink">
+                    以下登录方式暂不支持在当前网页直接使用：
                     <code className="ml-1 font-mono text-xs">
                       {unsupportedMethods.map((m) => m.id).join('、')}
                     </code>
                   </div>
                 ) : (
-                  <p className="pt-1 text-xs text-zinc-500">
-                    另有服务端已启用但当前页面暂未支持的登录方式：
-                    <code className="ml-1 font-mono text-[11px] text-zinc-600">
+                  <p className="pt-1 text-xs text-muted-foreground">
+                    另有暂不支持在当前网页直接使用的登录方式：
+                    <code className="ml-1 font-mono text-[11px] text-ink-secondary">
                       {unsupportedMethods.map((m) => m.id).join('、')}
                     </code>
                   </p>
@@ -268,8 +198,9 @@ export function LoginPage() {
             </CardContent>
           </Card>
 
-          <p className="flex items-center justify-center gap-1.5 text-xs text-zinc-400 lg:justify-start">
-            <KeyRound className="size-3.5" />受 HttpOnly 会话与同源安全策略保护
+          <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground lg:justify-start">
+            <KeyRound className="size-3.5" />
+            全站加密传输与账号安全保护
           </p>
         </div>
       </div>

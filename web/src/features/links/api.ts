@@ -7,6 +7,7 @@ import { ENDPOINTS } from '@/lib/endpoints';
 export type LinkStatus = 'active' | 'disabled' | 'expired' | 'banned';
 export type LinkStatusFilter = '' | LinkStatus;
 export type LinkSort = 'id' | 'clicks' | 'clicks_today';
+export type StatsRangeDays = 7 | 30 | 90;
 
 export interface AdminLink {
   code: string;
@@ -45,7 +46,7 @@ export const linkKeys = {
   list: (orgId: number, sort: LinkSort, status: LinkStatusFilter, q: string) =>
     ['orgs', orgId, 'links', 'list', sort, status, q] as const,
   detail: (orgId: number, code: string) => ['orgs', orgId, 'links', 'detail', code] as const,
-  stats: (orgId: number, code: string, days: number) =>
+  stats: (orgId: number, code: string, days: StatsRangeDays) =>
     ['orgs', orgId, 'links', 'stats', code, days] as const,
 };
 
@@ -133,7 +134,7 @@ export function useLinkDetail(orgId: number, code: string) {
   });
 }
 
-export function useLinkStats(orgId: number, code: string, days: 7 | 30, enabled = true) {
+export function useLinkStats(orgId: number, code: string, days: StatsRangeDays, enabled = true) {
   return useQuery({
     queryKey: linkKeys.stats(orgId, code, days),
     queryFn: ({ signal }) => fetchLinkStats(orgId, code, days, signal),
@@ -152,7 +153,7 @@ export function useCreateLink(orgId: number) {
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: linkKeys.all(orgId) });
-      // 同步刷新 /me 让侧边栏与概览区的本月配额用量实时更新。
+      // 同步刷新 /me 让侧边栏与配额检测实时更新。
       void queryClient.invalidateQueries({ queryKey: authKeys.me });
     },
   });

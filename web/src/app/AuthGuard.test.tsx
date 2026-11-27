@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { apiRequest } from '@/lib/api-client';
 import { ENDPOINTS } from '@/lib/endpoints';
 import { jsonResponse } from '@/test/test-utils';
@@ -37,20 +38,22 @@ function renderWithGuard(initialEntry: string) {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <Routes>
-          <Route path={ROUTE_PATTERNS.root} element={<RootRedirect />} />
-          <Route path={ROUTE_PATTERNS.login} element={<LocationProbe testId="login-page" />} />
-          <Route
-            path={ROUTE_PATTERNS.onboarding}
-            element={<div data-testid="onboarding-page">onboarding</div>}
-          />
-          <Route path={ROUTE_PATTERNS.orgRoot} element={<OrgRouteGuard />}>
-            <Route path="links" element={<div data-testid="org-links-page">links</div>} />
-            <Route path="members" element={<ExpireSessionTrigger />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider delayDuration={0}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <Routes>
+            <Route path={ROUTE_PATTERNS.root} element={<RootRedirect />} />
+            <Route path={ROUTE_PATTERNS.login} element={<LocationProbe testId="login-page" />} />
+            <Route
+              path={ROUTE_PATTERNS.onboarding}
+              element={<div data-testid="onboarding-page">onboarding</div>}
+            />
+            <Route path={ROUTE_PATTERNS.orgRoot} element={<OrgRouteGuard />}>
+              <Route path="links" element={<div data-testid="org-links-page">links</div>} />
+              <Route path="members" element={<ExpireSessionTrigger />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
@@ -155,13 +158,15 @@ describe('AuthGuard', () => {
     });
     render(
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={['/orgs/3/links']}>
-          <Routes>
-            <Route path={ROUTE_PATTERNS.orgRoot} element={<OrgRouteGuard />}>
-              <Route path="links" element={<div data-testid="org-links-page">links</div>} />
-            </Route>
-          </Routes>
-        </MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <MemoryRouter initialEntries={['/orgs/3/links']}>
+            <Routes>
+              <Route path={ROUTE_PATTERNS.orgRoot} element={<OrgRouteGuard />}>
+                <Route path="links" element={<div data-testid="org-links-page">links</div>} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
       </QueryClientProvider>,
     );
 

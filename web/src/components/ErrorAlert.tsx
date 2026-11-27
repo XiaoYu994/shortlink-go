@@ -10,21 +10,20 @@ interface ErrorAlertProps {
 }
 
 /*
-  统一错误提示组件：收口表单内联错误与页面级请求失败横幅，
-  避免在各个页面重复手写 border-red-200 bg-red-50 样式。
+  统一错误提示组件：手绘印章红描边 + 浅红纸底，确保错误反馈与重试按钮清晰高对比。
 */
 export function ErrorAlert({ message, onRetry, compact = false, className }: ErrorAlertProps) {
   return (
     <div
       role="alert"
       className={cn(
-        'flex items-center justify-between gap-3 border border-red-200 bg-red-50 text-sm text-red-700',
-        compact ? 'rounded-md px-3 py-2' : 'rounded-xl px-4 py-3',
+        'flex items-center justify-between gap-3 border-[1.25px] border-stamp-red bg-red-50/90 text-sm text-[#991b1b]',
+        compact ? 'rounded-lg px-3 py-2' : 'rounded-xl px-4 py-3',
         className,
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <AlertCircle className="size-4 shrink-0 text-red-500" />
+        <AlertCircle className="size-4 shrink-0 text-stamp-red" />
         <span className="break-words">{message}</span>
       </span>
       {onRetry && (

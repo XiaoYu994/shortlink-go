@@ -13,11 +13,31 @@ import { routes } from './routes';
 
 function FullPageLoading() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-6">
-      <div className="w-full max-w-sm space-y-3">
-        <Skeleton className="h-8 w-40" />
-        <Skeleton className="h-32 w-full rounded-xl" />
-      </div>
+    <div className="flex min-h-screen bg-paper">
+      <aside className="hidden w-56 shrink-0 border-r-[1.25px] border-border-soft p-4 lg:flex lg:flex-col lg:justify-between">
+        <div className="space-y-4">
+          <Skeleton className="h-8 w-28" />
+          <Skeleton className="h-12 w-full rounded-xl" />
+          <div className="space-y-2 pt-3">
+            <Skeleton className="h-9 w-full rounded-lg" />
+            <Skeleton className="h-9 w-full rounded-lg" />
+            <Skeleton className="h-9 w-full rounded-lg" />
+          </div>
+        </div>
+        <div className="space-y-3">
+          <Skeleton className="h-16 w-full rounded-xl" />
+          <Skeleton className="h-11 w-full rounded-xl" />
+        </div>
+      </aside>
+      <main className="mx-auto w-full max-w-5xl space-y-5 px-4 py-8 sm:px-8 lg:px-10">
+        <Skeleton className="h-9 w-44" />
+        <Skeleton className="h-14 w-full rounded-xl" />
+        <div className="space-y-3 pt-2">
+          <Skeleton className="h-20 w-full rounded-xl" />
+          <Skeleton className="h-20 w-full rounded-xl" />
+          <Skeleton className="h-20 w-full rounded-xl" />
+        </div>
+      </main>
     </div>
   );
 }
@@ -36,10 +56,10 @@ export function RootRedirect() {
       return <Navigate to={routes.login()} replace />;
     }
     return (
-      <div className="flex min-h-screen items-center justify-center p-6">
+      <div className="flex min-h-screen items-center justify-center bg-paper p-6">
         <ErrorAlert
           className="w-full max-w-md"
-          message={`无法连接控制台：${getErrorMessage(meQuery.error)}`}
+          message={`工作台暂时无法连接：${getErrorMessage(meQuery.error)}`}
           onRetry={() => void meQuery.refetch()}
         />
       </div>
@@ -102,7 +122,7 @@ export function OrgRouteGuard() {
       return <Navigate to={routes.login(location.pathname + location.search)} replace />;
     }
     return (
-      <div className="flex min-h-screen items-center justify-center p-6">
+      <div className="flex min-h-screen items-center justify-center bg-paper p-6">
         <ErrorAlert
           className="w-full max-w-md"
           message={`加载会话失败：${getErrorMessage(meQuery.error)}`}

@@ -99,8 +99,8 @@ export function usePublicBaseUrl(): string | undefined {
 }
 
 // 报告后端是否启用了 Webhook 管理（配置了 WEBHOOK_SECRET_KEY）。
-export function useWebhooksEnabled(): boolean {
-  const { data } = useCapabilities();
+export function useWebhooksEnabled(enabled = true): boolean {
+  const { data } = useCapabilities(enabled);
   return Boolean(data?.features.webhooks);
 }
 

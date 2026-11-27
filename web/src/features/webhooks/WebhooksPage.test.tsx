@@ -22,7 +22,7 @@ describe('WebhooksPage', () => {
 
     renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'member' });
 
-    expect(screen.getByText('仅 Owner 与 Admin 可管理 Webhooks')).toBeInTheDocument();
+    expect(screen.getByText('仅所有者与管理员可管理 Webhooks')).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalledWith('/api/v1/webhooks', expect.anything());
   });
 
@@ -39,7 +39,7 @@ describe('WebhooksPage', () => {
 
     renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'owner' });
 
-    expect(await screen.findByText('服务端尚未启用 Webhook 功能')).toBeInTheDocument();
+    expect(await screen.findByText('Webhook 功能暂未开启')).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalledWith('/api/v1/webhooks', expect.anything());
   });
 
@@ -65,7 +65,7 @@ describe('WebhooksPage', () => {
 
     renderWithOrg(<WebhooksPage />, { orgId: 2, role: 'owner' });
 
-    expect(await screen.findByText(/无法获取服务端功能配置/)).toBeInTheDocument();
+    expect(await screen.findByText(/功能状态加载失败/)).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalledWith('/api/v1/webhooks', expect.anything());
 
     failCapabilities = false;
@@ -73,7 +73,7 @@ describe('WebhooksPage', () => {
     expect(await screen.findByText('还没有 Webhook 订阅')).toBeInTheDocument();
   });
 
-  it('creates webhook, reveals secret once, triggers test ping, and inspects deliveries', async () => {
+  it('creates webhook, reveals secret once, triggers test ping from menu, and inspects deliveries drawer', async () => {
     const user = userEvent.setup();
     const secret = 'whsec_' + 'a'.repeat(64);
     let created = false;
@@ -151,7 +151,10 @@ describe('WebhooksPage', () => {
 
     await screen.findByText('还没有 Webhook 订阅');
     await user.click(screen.getByRole('button', { name: /添加第一条订阅/ }));
-    await user.type(await screen.findByLabelText('回调 URL'), 'https://hooks.example.com/events');
+    await user.type(
+      await screen.findByLabelText('接收通知地址'),
+      'https://hooks.example.com/events',
+    );
     await user.type(screen.getByLabelText('备注（可选）'), 'prod-sink');
     await user.click(screen.getByRole('button', { name: '确认创建' }));
 
@@ -162,10 +165,14 @@ describe('WebhooksPage', () => {
       );
     });
 
-    expect(await screen.findByTestId('webhook-plaintext-secret')).toHaveTextContent(secret);
+    const secretNode = await screen.findByTestId('webhook-plaintext-secret');
+    expect(secretNode).not.toHaveTextContent(secret);
+    await user.click(screen.getByRole('button', { name: '显示明文密钥' }));
+    expect(secretNode).toHaveTextContent(secret);
     expect(await screen.findByText('https://hooks.example.com/events')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /测试 Ping/ }));
+    await user.click(screen.getByRole('button', { name: '操作 Webhook #12' }));
+    await user.click(await screen.findByRole('menuitem', { name: /发送测试请求/ }));
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledWith(
         '/api/v1/webhooks/12/test',

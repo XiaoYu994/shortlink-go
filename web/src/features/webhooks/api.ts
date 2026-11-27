@@ -62,7 +62,7 @@ export const ALL_WEBHOOK_EVENTS: ReadonlyArray<{
   { value: 'link.created', label: 'link.created', description: '新建短链提交成功后触发' },
   { value: 'link.updated', label: 'link.updated', description: '修改短链地址、过期时间或启停状态' },
   { value: 'link.deleted', label: 'link.deleted', description: '删除非封禁短链时触发' },
-  { value: 'link.banned', label: 'link.banned', description: '短链首次被封禁（风控或运维下架）' },
+  { value: 'link.banned', label: 'link.banned', description: '短链首次被封禁（触发安全风控）' },
   { value: 'link.unbanned', label: 'link.unbanned', description: '已封禁短链被解封恢复' },
 ];
 

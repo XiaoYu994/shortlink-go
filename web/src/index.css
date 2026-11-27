@@ -1,58 +1,252 @@
 @import 'tailwindcss';
 
 /*
-  Dub.co / Vercel 风格的克制明亮色板：
-  - 外层导轨用极浅中性灰 (#f7f7f8)，主画布用纯白 (#ffffff) 形成“内嵌工作台”层次；
-  - 主按钮与主标题用深墨黑 (#18181b)，强调色克制地收在靛蓝 (#4f46e5)，只用于链接、图表与焦点态。
+  Ori（折羽）视觉设计令牌 — Ink & Highlighter（墨线涂鸦 × 荧光笔风）：
+  - 素描纸画布 (#FDFBF6) + 纯暖白卡片 (#FFFFFF) + 炭墨主线 (#1F1E1B)；
+  - 三支柔和半透明荧光笔作功能语义锚点：柠檬黄 (#FEF08A)、薄荷绿 (#A7F3D0)、蜜桃橘 (#FDBA74)；
+  - 次级可读文字严格保持 >= 5.1:1 对比度（#4A4843 / #6B6860），不把浅灰用于实质信息。
 */
 @theme {
-  --color-background: #f7f7f8;
-  --color-foreground: #09090b;
+  --color-background: #fdfbf6;
+  --color-foreground: #1f1e1b;
   --color-card: #ffffff;
-  --color-card-foreground: #09090b;
+  --color-card-foreground: #1f1e1b;
   --color-popover: #ffffff;
-  --color-popover-foreground: #09090b;
-  --color-primary: #18181b;
-  --color-primary-foreground: #fafafa;
-  --color-secondary: #f4f4f5;
-  --color-secondary-foreground: #18181b;
-  --color-muted: #f4f4f5;
-  --color-muted-foreground: #71717a;
-  --color-accent: #f4f4f5;
-  --color-accent-foreground: #18181b;
+  --color-popover-foreground: #1f1e1b;
+  --color-primary: #1f1e1b;
+  --color-primary-foreground: #fdfbf6;
+  --color-secondary: #f4efe4;
+  --color-secondary-foreground: #1f1e1b;
+  --color-muted: #f4efe4;
+  --color-muted-foreground: #6b6860;
+  --color-accent: #f4efe4;
+  --color-accent-foreground: #1f1e1b;
   --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
-  --color-border: #e4e4e7;
-  --color-input: #d4d4d8;
-  --color-ring: #4f46e5;
-  --color-brand: #4f46e5;
-  --color-brand-foreground: #ffffff;
+  --color-border: #1f1e1b;
+  --color-input: #1f1e1b;
+  --color-ring: #1f1e1b;
+  --color-brand: #1f1e1b;
+  --color-brand-foreground: #fdfbf6;
 
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
+  --color-paper: #fdfbf6;
+  --color-paper-warm: #f6f1e6;
+  --color-ink: #1f1e1b;
+  --color-ink-secondary: #4a4843;
+  --color-ink-muted: #6b6860;
+  --color-border-soft: #e5dfd3;
+  --color-hl-yellow: #fef08a;
+  --color-hl-mint: #a7f3d0;
+  --color-hl-peach: #fdba74;
+  --color-stamp-red: #dc2626;
+
+  --radius-sm: 0.45rem;
+  --radius-md: 0.65rem;
+  --radius-lg: 0.9rem;
 
   --font-sans:
-    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Noto Sans SC',
+    'Plus Jakarta Sans Variable', 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC',
     'Microsoft YaHei', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-mono:
+    'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @layer base {
   * {
-    border-color: var(--color-border);
+    border-color: var(--color-border-soft);
   }
 
   body {
     font-family: var(--font-sans);
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-    background-color: var(--color-background);
-    color: var(--color-foreground);
+    background-color: var(--color-paper);
+    color: var(--color-ink);
   }
 }
 
-/* 登录页与引导页使用的极轻微点阵背景，增加层次而不抢视线。 */
-.bg-dot-grid {
-  background-image: radial-gradient(rgba(24, 24, 27, 0.09) 1px, transparent 1px);
+/* 登录页、引导页与空白画布使用的极轻微点阵素描纸底（使用 @utility 支持 max-lg:/lg: 断点变体）。 */
+@utility bg-paper-dots {
+  background-color: var(--color-paper);
+  background-image: radial-gradient(rgba(31, 30, 27, 0.11) 1px, transparent 1px);
   background-size: 20px 20px;
+}
+
+/* 细腻炭墨线框与硬偏移墨影：仅给重点交互组件或悬停卡片使用，保证整体界面轻盈耐看。 */
+.ink-box {
+  background-color: var(--color-card);
+  border: 1.25px solid var(--color-ink);
+  border-radius: 12px 14px 13px 11px / 11px 13px 14px 12px;
+}
+
+.ink-shadow {
+  box-shadow: 3px 3px 0 var(--color-ink);
+}
+
+.ink-shadow-sm {
+  box-shadow: 2px 2px 0 var(--color-ink);
+}
+
+.ink-pressable {
+  transition:
+    transform 120ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 120ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 120ms ease;
+}
+
+.ink-pressable:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--color-ink);
+}
+
+.ink-pressable:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--color-ink);
+}
+
+/* 三支荧光笔手抹高亮底色：保持文字水平清晰，只给笔触铺底。 */
+.hl-swipe-yellow {
+  background-image: linear-gradient(
+    102deg,
+    rgba(254, 240, 138, 0.25) 0%,
+    rgba(254, 240, 138, 0.92) 8%,
+    rgba(254, 240, 138, 0.88) 92%,
+    rgba(254, 240, 138, 0.3) 100%
+  );
+  border-radius: 6px 9px 7px 8px;
+}
+
+.hl-swipe-mint {
+  background-image: linear-gradient(
+    100deg,
+    rgba(167, 243, 208, 0.25) 0%,
+    rgba(167, 243, 208, 0.85) 8%,
+    rgba(167, 243, 208, 0.8) 92%,
+    rgba(167, 243, 208, 0.28) 100%
+  );
+  border-radius: 6px 9px 7px 8px;
+}
+
+.hl-swipe-peach {
+  background-image: linear-gradient(
+    100deg,
+    rgba(253, 186, 116, 0.24) 0%,
+    rgba(253, 186, 116, 0.72) 8%,
+    rgba(253, 186, 116, 0.68) 92%,
+    rgba(253, 186, 116, 0.24) 100%
+  );
+  border-radius: 6px 9px 7px 8px;
+}
+
+/* 彩铅斜线填充纹理：用于月度配额进度条与状态强调。 */
+.hachure-mint {
+  background-color: #a7f3d0;
+  background-image: repeating-linear-gradient(
+    -55deg,
+    rgba(31, 30, 27, 0.16) 0,
+    rgba(31, 30, 27, 0.16) 1.5px,
+    transparent 1.5px,
+    transparent 5.5px
+  );
+}
+
+.hachure-amber {
+  background-color: #fdba74;
+  background-image: repeating-linear-gradient(
+    -55deg,
+    rgba(31, 30, 27, 0.18) 0,
+    rgba(31, 30, 27, 0.18) 1.5px,
+    transparent 1.5px,
+    transparent 5.5px
+  );
+}
+
+.hachure-red {
+  background-color: #fecaca;
+  background-image: repeating-linear-gradient(
+    -55deg,
+    rgba(220, 38, 38, 0.24) 0,
+    rgba(220, 38, 38, 0.24) 1.5px,
+    transparent 1.5px,
+    transparent 5.5px
+  );
+}
+
+/* 风控封禁橡皮印章风格。 */
+.stamp-banned {
+  transform: rotate(-2deg);
+  border: 1.5px solid #dc2626;
+  background-color: rgba(254, 226, 226, 0.78);
+  color: #b91c1c;
+  box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.22);
+}
+
+/* Radix 浮层入退场微动效（居中位移由组件自身 translate: -50% -50% 控制，此处仅叠加 Y 轴微落差与缩放，避免左上角闪跳）。 */
+@keyframes ori-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ori-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ori-slide-right {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes ori-slide-left {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.ori-dialog-animate[data-state='open'] {
+  animation: ori-pop-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ori-popover-animate[data-state='open'] {
+  animation: ori-fade-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ori-sheet-right[data-state='open'] {
+  animation: ori-slide-right 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ori-sheet-left[data-state='open'] {
+  animation: ori-slide-left 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ink-pressable,
+  .ori-dialog-animate,
+  .ori-popover-animate,
+  .ori-sheet-right,
+  .ori-sheet-left {
+    animation: none !important;
+    transition: none !important;
+  }
 }

@@ -2,15 +2,7 @@ import type { ComponentProps } from 'react';
 import { cn } from '@/lib/cn';
 
 export function Card({ className, ...props }: ComponentProps<'div'>) {
-  return (
-    <div
-      className={cn(
-        'rounded-xl border border-zinc-200/90 bg-card text-card-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)]',
-        className,
-      )}
-      {...props}
-    />
-  );
+  return <div className={cn('ink-box bg-card text-card-foreground', className)} {...props} />;
 }
 
 export function CardHeader({ className, ...props }: ComponentProps<'div'>) {
@@ -19,10 +11,7 @@ export function CardHeader({ className, ...props }: ComponentProps<'div'>) {
 
 export function CardTitle({ className, ...props }: ComponentProps<'h3'>) {
   return (
-    <h3
-      className={cn('text-[15px] font-semibold tracking-tight text-zinc-950', className)}
-      {...props}
-    />
+    <h3 className={cn('text-[15px] font-semibold tracking-tight text-ink', className)} {...props} />
   );
 }
 

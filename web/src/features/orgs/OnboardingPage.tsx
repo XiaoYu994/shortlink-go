@@ -1,8 +1,10 @@
 import { type FormEvent, useState } from 'react';
-import { ArrowRight, Building2, LogOut } from 'lucide-react';
+import { ArrowRight, LogOut } from 'lucide-react';
 import { Navigate, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { routes } from '@/app/routes';
+import { BrandLogo } from '@/components/BrandLogo';
+import { CourierCat } from '@/components/CourierCat';
 import { ErrorAlert } from '@/components/ErrorAlert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -25,8 +27,8 @@ export function OnboardingPage() {
 
   if (meQuery.isPending) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-zinc-50 p-6">
-        <Skeleton className="h-64 w-full max-w-md rounded-2xl" />
+      <div className="flex min-h-screen items-center justify-center bg-paper-dots p-6">
+        <Skeleton className="h-72 w-full max-w-md rounded-2xl" />
       </div>
     );
   }
@@ -58,38 +60,55 @@ export function OnboardingPage() {
   }
 
   async function handleLogout() {
-    await logout.mutateAsync();
-    navigate(routes.login(), { replace: true });
+    try {
+      await logout.mutateAsync();
+      navigate(routes.login(), { replace: true });
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    }
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 bg-dot-grid px-4 py-12">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-paper-dots px-4 py-12">
       <div className="w-full max-w-md space-y-5">
-        <div className="flex items-center justify-between text-xs text-zinc-500">
-          <span>
-            当前账号：
-            <strong className="font-medium text-zinc-800">
-              {meQuery.data.user.name || meQuery.data.user.email || `用户 #${meQuery.data.user.id}`}
-            </strong>
-          </span>
-          <Button variant="ghost" size="sm" onClick={() => void handleLogout()}>
+        <div className="flex items-center justify-between">
+          <BrandLogo />
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={logout.isPending}
+            onClick={() => void handleLogout()}
+          >
             <LogOut className="size-3.5" />
-            退出
+            {logout.isPending ? '退出中…' : '退出'}
           </Button>
         </div>
 
-        <Card className="rounded-2xl border-zinc-200/90 shadow-[0_8px_30px_rgba(0,0,0,0.04)]">
-          <CardHeader className="space-y-2 pb-4">
-            <div className="inline-flex w-fit items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-medium text-brand">
-              <Building2 className="size-3" />
-              步骤 1 / 1 · 初始化工作区
+        <Card className="border-[1.5px] border-ink ink-shadow">
+          <CardHeader className="space-y-2 pb-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="space-y-1.5">
+                <span className="hl-swipe-yellow inline-block px-2 py-0.5 text-xs font-semibold text-ink">
+                  初始化工作台
+                </span>
+                <CardTitle className="text-xl">创建你的第一个组织</CardTitle>
+              </div>
+              <CourierCat pose="success" className="size-16 shrink-0" />
             </div>
-            <CardTitle className="text-xl">创建你的第一个组织</CardTitle>
             <CardDescription>
-              每个组织拥有完全隔离的短链、统计、成员与 API Key 空间。创建后你将自动成为 Owner。
+              每个组织拥有完全隔离的短链、统计、成员与 API{'\u00A0'}
+              Key 空间。创建后你将自动成为所有者。
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              当前账号：
+              <strong className="font-semibold text-ink">
+                {meQuery.data.user.name ||
+                  meQuery.data.user.email ||
+                  `用户 #${meQuery.data.user.id}`}
+              </strong>
+            </p>
             <form className="space-y-4" onSubmit={handleSubmit}>
               <div className="space-y-2">
                 <Label htmlFor="first-org-name">组织名称</Label>
@@ -104,7 +123,12 @@ export function OnboardingPage() {
                 />
               </div>
               {formError && <ErrorAlert compact message={formError} />}
-              <Button type="submit" className="w-full" disabled={createOrg.isPending}>
+              <Button
+                type="submit"
+                variant="highlight"
+                className="w-full"
+                disabled={createOrg.isPending}
+              >
                 {createOrg.isPending ? '创建中…' : '创建组织并进入工作台'}
                 <ArrowRight className="size-4" />
               </Button>

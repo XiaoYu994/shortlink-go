@@ -47,4 +47,18 @@ describe('ConsoleLayout', () => {
     const webhooksLink = await screen.findByRole('link', { name: 'Webhooks' });
     expect(webhooksLink).toHaveAttribute('href', '/orgs/4/webhooks');
   });
+
+  it('explains disabled creation quota accurately when link_quota is 0', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        auth_methods: [{ id: 'oidc', kind: 'redirect', login_url: '/api/v1/auth/oidc/login' }],
+        features: { analytics: true, webhooks: false, risk_scan: true, email: false },
+      }),
+    );
+
+    renderWithOrg(<ConsoleLayout />, { orgId: 4, role: 'owner', linkUsage: 0, linkQuota: 0 });
+
+    expect(screen.getByText('当前组织未开放创建额度，请联系管理员调整')).toBeInTheDocument();
+    expect(screen.queryByText(/下月 1 日/)).not.toBeInTheDocument();
+  });
 });

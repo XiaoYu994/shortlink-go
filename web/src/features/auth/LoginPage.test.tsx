@@ -72,7 +72,7 @@ describe('LoginPage', () => {
       '/login?return_to=/orgs/1/links',
     );
 
-    const oidcLink = await screen.findByRole('link', { name: /使用 OIDC 单点登录/ });
+    const oidcLink = await screen.findByRole('link', { name: /使用单点登录（SSO）/ });
     expect(oidcLink).toHaveAttribute(
       'href',
       '/api/v1/auth/oidc/login?return_to=%2Forgs%2F1%2Flinks',
@@ -84,7 +84,7 @@ describe('LoginPage', () => {
     );
   });
 
-  it('completes phone OTP send-code and verify flow from capabilities URLs', async () => {
+  it('completes phone OTP flow with dial code normalization and focus handoff', async () => {
     const user = userEvent.setup();
     let authed = false;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -139,13 +139,24 @@ describe('LoginPage', () => {
       </QueryClientProvider>,
     );
 
-    const phoneInput = await screen.findByLabelText(/手机号/);
-    await user.type(phoneInput, '+8613800138000');
-    await user.click(screen.getByRole('button', { name: '获取验证码' }));
+    const sendBtn = await screen.findByRole('button', { name: '获取验证码' });
+    expect(sendBtn).toBeDisabled();
+
+    const phoneInput = screen.getByLabelText('手机号');
+    await user.type(phoneInput, '13800138000');
+    expect(sendBtn).toBeEnabled();
+    await user.click(sendBtn);
 
     expect(await screen.findByRole('button', { name: /60s 后重试/ })).toBeDisabled();
-    await user.type(screen.getByLabelText('短信验证码'), '123456');
-    await user.click(screen.getByRole('button', { name: /使用手机号登录/ }));
+    expect(screen.getByText('约 5 分钟内有效')).toBeInTheDocument();
+
+    const codeInput = screen.getByLabelText('短信验证码');
+    expect(codeInput).toHaveFocus();
+    const submitBtn = screen.getByRole('button', { name: /使用手机号登录/ });
+    expect(submitBtn).toBeDisabled();
+    await user.type(codeInput, '123456');
+    expect(submitBtn).toBeEnabled();
+    await user.click(submitBtn);
 
     expect(await screen.findByText('links destination')).toBeInTheDocument();
     await waitFor(() => {
@@ -162,11 +173,9 @@ describe('LoginPage', () => {
   it('shows unsupported notice instead of empty warning for unknown auth methods', async () => {
     renderLoginPage([{ id: 'passkey', kind: 'webauthn' }]);
 
-    expect(
-      await screen.findByText(/服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/以下登录方式暂不支持在当前网页直接使用/)).toBeInTheDocument();
     expect(screen.getByText('passkey')).toBeInTheDocument();
-    expect(screen.queryByText(/未启用任何用户登录方式/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/暂未开放任何登录方式/)).not.toBeInTheDocument();
   });
 
   it('shows muted footnote below login buttons when mixed with unknown auth methods', async () => {
@@ -175,11 +184,9 @@ describe('LoginPage', () => {
       { id: 'passkey', kind: 'webauthn' },
     ]);
 
-    expect(await screen.findByRole('link', { name: /使用 OIDC 单点登录/ })).toBeInTheDocument();
-    expect(screen.getByText(/另有服务端已启用但当前页面暂未支持的登录方式/)).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: /使用单点登录（SSO）/ })).toBeInTheDocument();
+    expect(screen.getByText(/另有暂不支持在当前网页直接使用的登录方式/)).toBeInTheDocument();
     expect(screen.getByText('passkey')).toBeInTheDocument();
-    expect(
-      screen.queryByText(/服务端已启用以下登录方式，但当前控制台页面尚不支持直接交互/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/以下登录方式暂不支持在当前网页直接使用/)).not.toBeInTheDocument();
   });
 });

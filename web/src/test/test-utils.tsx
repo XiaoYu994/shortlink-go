@@ -4,6 +4,7 @@ import { render } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { OrgContext, type OrgContextValue } from '@/app/org-context';
 import { routes } from '@/app/routes';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import type { Role } from '@/features/auth/api';
 
 interface RenderWithOrgOptions {
@@ -39,9 +40,11 @@ export function renderWithOrg(ui: ReactElement, opts: RenderWithOrgOptions = {})
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[opts.route ?? routes.orgLinks(orgId)]}>
-        <OrgContext.Provider value={ctxValue}>{ui}</OrgContext.Provider>
-      </MemoryRouter>
+      <TooltipProvider delayDuration={0}>
+        <MemoryRouter initialEntries={[opts.route ?? routes.orgLinks(orgId)]}>
+          <OrgContext.Provider value={ctxValue}>{ui}</OrgContext.Provider>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }

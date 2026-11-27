@@ -9,7 +9,7 @@ export const DropdownMenuSeparator = ({
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.Separator>) => (
   <DropdownMenuPrimitive.Separator
-    className={cn('-mx-1 my-1 h-px bg-border', className)}
+    className={cn('-mx-1 my-1 h-px bg-border-soft', className)}
     {...props}
   />
 );
@@ -24,7 +24,7 @@ export function DropdownMenuContent({
       <DropdownMenuPrimitive.Content
         sideOffset={sideOffset}
         className={cn(
-          'z-50 min-w-52 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg',
+          'ori-popover-animate z-50 min-w-52 overflow-hidden rounded-xl border-[1.5px] border-ink bg-popover p-1.5 text-popover-foreground ink-shadow-sm',
           className,
         )}
         {...props}
@@ -52,7 +52,7 @@ export function DropdownMenuItem({
   return (
     <DropdownMenuPrimitive.Item
       className={cn(
-        'relative flex cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
+        'relative flex cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-ink outline-none transition-colors focus:bg-hl-yellow/45 focus:text-ink data-[disabled]:pointer-events-none data-[disabled]:opacity-45',
         className,
       )}
       {...props}

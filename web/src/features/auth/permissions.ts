@@ -39,8 +39,8 @@ export function canManageWebhooks(role: Role): boolean {
 }
 
 export const ROLE_LABELS: Record<Role, string> = {
-  owner: 'Owner',
-  admin: 'Admin',
-  member: 'Member',
-  viewer: 'Viewer',
+  owner: '所有者',
+  admin: '管理员',
+  member: '成员',
+  viewer: '只读成员',
 };

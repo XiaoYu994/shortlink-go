@@ -57,8 +57,8 @@ export function CreateOrgDialog({ open, onOpenChange, onCreated }: CreateOrgDial
       <DialogContent>
         <DialogHeader>
           <DialogTitle>新建组织</DialogTitle>
-          <DialogDescription>
-            创建后你将自动成为该组织的 Owner，拥有独立的短链、成员与 API Key 隔离空间。
+          <DialogDescription className="sr-only">
+            创建一个隔离的短链与团队工作空间。
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={handleSubmit}>
@@ -74,7 +74,7 @@ export function CreateOrgDialog({ open, onOpenChange, onCreated }: CreateOrgDial
               onChange={(e) => setName(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              每个账号最多作为 Owner 拥有 {MAX_OWNED_ORGS} 个组织。
+              每个账号最多作为所有者拥有 {MAX_OWNED_ORGS} 个组织。
             </p>
           </div>
           {formError && <ErrorAlert compact message={formError} />}
@@ -86,7 +86,7 @@ export function CreateOrgDialog({ open, onOpenChange, onCreated }: CreateOrgDial
             >
               取消
             </Button>
-            <Button type="submit" disabled={createOrg.isPending}>
+            <Button type="submit" variant="highlight" disabled={createOrg.isPending}>
               {createOrg.isPending ? '创建中…' : '创建组织'}
             </Button>
           </DialogFooter>

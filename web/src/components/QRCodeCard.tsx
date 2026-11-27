@@ -21,7 +21,7 @@ export function QRCodeCard({ url, code }: QRCodeCardProps) {
     QRCode.toDataURL(url, {
       width: 220,
       margin: 2,
-      color: { dark: '#18181b', light: '#ffffff' },
+      color: { dark: '#1f1e1b', light: '#ffffff' },
     })
       .then((res) => {
         if (active) {
@@ -44,24 +44,22 @@ export function QRCodeCard({ url, code }: QRCodeCardProps) {
     if (!dataUrl) return;
     const a = document.createElement('a');
     a.href = dataUrl;
-    a.download = `shortlink-${code}.png`;
+    a.download = `ori-${code}.png`;
     a.click();
   }
 
   return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-zinc-200/90 bg-zinc-50/50 p-4">
+    <div className="flex flex-col items-center gap-3 rounded-xl border-[1.25px] border-dashed border-ink/55 bg-paper-warm/50 p-4">
       {failed ? (
-        <div className="flex size-44 items-center justify-center rounded-lg border border-zinc-200 bg-white text-xs text-zinc-400">
+        <div className="flex size-44 items-center justify-center rounded-xl border-[1.25px] border-ink bg-card text-xs text-muted-foreground">
           二维码生成失败
         </div>
       ) : dataUrl ? (
-        <img
-          src={dataUrl}
-          alt={`短链 ${code} 二维码`}
-          className="size-44 rounded-lg border border-zinc-200 bg-white p-1.5 shadow-2xs"
-        />
+        <div className="relative rounded-xl border-[1.5px] border-ink bg-card p-2 ink-shadow-sm">
+          <img src={dataUrl} alt={`短链 ${code} 二维码`} className="size-40 rounded-md" />
+        </div>
       ) : (
-        <Skeleton className="size-44 rounded-lg" />
+        <Skeleton className="size-44 rounded-xl" />
       )}
       <Button variant="outline" size="sm" disabled={!dataUrl} onClick={handleDownload}>
         <Download className="size-3.5" />

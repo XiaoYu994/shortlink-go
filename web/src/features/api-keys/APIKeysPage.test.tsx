@@ -14,11 +14,11 @@ describe('APIKeysPage', () => {
 
     renderWithOrg(<APIKeysPage />, { orgId: 2, role: 'member' });
 
-    expect(screen.getByText('仅 Owner 与 Admin 可管理 API Key')).toBeInTheDocument();
+    expect(screen.getByText('仅所有者与管理员可管理 API Key')).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('issues an API key, reveals curl snippet, and resolves creator member name', async () => {
+  it('issues read-only key by default with GET curl, masks secret until revealed, and guards dismiss', async () => {
     const user = userEvent.setup();
     const plaintext = 'slk_' + 'a'.repeat(64);
     let issued = false;
@@ -43,8 +43,8 @@ describe('APIKeysPage', () => {
         return jsonResponse(
           {
             id: 11,
-            name: 'prod-ci',
-            scopes: ['links:read', 'links:write', 'stats:read'],
+            name: 'ci-reader',
+            scopes: ['links:read'],
             status: 'active',
             created_by: 7,
             created_at: '2026-11-23T08:00:00Z',
@@ -59,8 +59,8 @@ describe('APIKeysPage', () => {
             ? [
                 {
                   id: 11,
-                  name: 'prod-ci',
-                  scopes: ['links:read', 'links:write', 'stats:read'],
+                  name: 'ci-reader',
+                  scopes: ['links:read'],
                   status: 'active',
                   created_by: 7,
                   created_at: '2026-11-23T08:00:00Z',
@@ -76,9 +76,13 @@ describe('APIKeysPage', () => {
     renderWithOrg(<APIKeysPage />, { orgId: 5, role: 'owner' });
 
     await screen.findByText('还没有组织 API Key');
-    await user.click(screen.getByRole('button', { name: /签发第一把 API Key/ }));
-    await user.type(await screen.findByLabelText('名称 / 备注（可选）'), 'prod-ci');
-    await user.click(screen.getByRole('button', { name: '确认签发' }));
+    await user.click(screen.getByRole('button', { name: /创建第一把 API Key/ }));
+    expect(await screen.findByRole('button', { name: '只读（推荐）' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await user.type(screen.getByLabelText('名称 / 备注（可选）'), 'ci-reader');
+    await user.click(screen.getByRole('button', { name: '确认创建' }));
 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledWith(
@@ -86,21 +90,36 @@ describe('APIKeysPage', () => {
         expect.objectContaining({
           method: 'POST',
           body: JSON.stringify({
-            name: 'prod-ci',
-            scopes: ['links:read', 'links:write', 'stats:read'],
+            name: 'ci-reader',
+            scopes: ['links:read'],
           }),
         }),
       );
     });
 
-    expect(await screen.findByTestId('issued-api-key-secret')).toHaveTextContent(plaintext);
-    expect(screen.getByTestId('issued-api-key-curl')).toHaveTextContent(
-      `Authorization: Bearer ${plaintext}`,
-    );
-    expect(await screen.findByText('prod-ci')).toBeInTheDocument();
+    // 默认掩码防泄露，点击显示明文才暴露完整字符串。
+    const secretNode = await screen.findByTestId('issued-api-key-secret');
+    expect(secretNode).not.toHaveTextContent(plaintext);
+    await user.click(screen.getByRole('button', { name: '显示明文密钥' }));
+    expect(secretNode).toHaveTextContent(plaintext);
+
+    // 仅含 links:read 权限时动态生成 GET 示例，且默认使用环境变量占位符。
+    const curlNode = screen.getByTestId('issued-api-key-curl');
+    expect(curlNode).toHaveTextContent('/api/v1/links?limit=10');
+    expect(curlNode).toHaveTextContent('Authorization: Bearer $ORI_API_KEY');
+    await user.click(screen.getByLabelText('在示例命令中填入本次明文'));
+    expect(curlNode).toHaveTextContent(`Authorization: Bearer ${plaintext}`);
+
+    // 未勾选确认前禁止关闭一次性密钥横幅。
+    const dismissBtn = screen.getByRole('button', { name: '我已保存，关闭' });
+    expect(dismissBtn).toBeDisabled();
+    await user.click(screen.getByLabelText(/我已安全复制并保存该密钥/));
+    expect(dismissBtn).toBeEnabled();
+
+    expect(await screen.findByText('ci-reader')).toBeInTheDocument();
     expect(screen.getByText('#11')).toBeInTheDocument();
     expect(screen.getByText(/最近使用/)).toBeInTheDocument();
-    expect(await screen.findByText('由 Alice 签发')).toBeInTheDocument();
+    expect(await screen.findByText('由 Alice 创建')).toBeInTheDocument();
   });
 
   it('shows unused state when last_used_at is absent', async () => {

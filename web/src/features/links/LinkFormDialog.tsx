@@ -1,8 +1,15 @@
 import { type FormEvent, useState } from 'react';
-import { CheckCircle2, ExternalLink } from 'lucide-react';
+import { ExternalLink, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { CopyButton } from '@/components/CopyButton';
+import { CourierCat } from '@/components/CourierCat';
 import { ErrorAlert } from '@/components/ErrorAlert';
+import {
+  createInitialExpiration,
+  type ExpirationSelection,
+  resolveExpiration,
+} from '@/components/expiration-helpers';
+import { ExpirationPicker } from '@/components/ExpirationPicker';
 import { QRCodeCard } from '@/components/QRCodeCard';
 import { Button } from '@/components/ui/button';
 import {
@@ -16,7 +23,6 @@ import {
 import { Input, Label } from '@/components/ui/input';
 import { usePublicBaseUrl } from '@/features/auth/api';
 import { getErrorMessage } from '@/lib/api-client';
-import { isoToLocalDatetime, localDatetimeToISO } from '@/lib/format';
 import { buildShortUrl } from '@/lib/short-url';
 import { type AdminLink, useCreateLink, useUpdateLink } from './api';
 
@@ -25,6 +31,12 @@ interface LinkFormDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   editingLink?: AdminLink | null;
+}
+
+function needsHttpsPrefix(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed || /^https?:\/\//i.test(trimmed)) return false;
+  return /^[^\s/]+\.[^\s]+/.test(trimmed);
 }
 
 /*
@@ -57,12 +69,12 @@ interface LinkFormInnerProps {
 
 function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
   const isEdit = editingLink !== null;
-  const initialExpires = isoToLocalDatetime(editingLink?.expires_at);
   const publicBaseUrl = usePublicBaseUrl();
 
   const [url, setUrl] = useState(editingLink?.url ?? '');
-  const [expiresAt, setExpiresAt] = useState(initialExpires);
-  const [clearExpires, setClearExpires] = useState(false);
+  const [expiration, setExpiration] = useState<ExpirationSelection>(() =>
+    createInitialExpiration(isEdit ? 'edit' : 'create', editingLink?.expires_at),
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [createdLink, setCreatedLink] = useState<AdminLink | null>(null);
 
@@ -77,30 +89,29 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
       setFormError('请输入有效的 http 或 https 目标地址');
       return;
     }
+
+    const expResult = resolveExpiration(expiration, editingLink?.expires_at);
+    if (expResult.action === 'error') {
+      setFormError(expResult.message);
+      return;
+    }
     setFormError(null);
 
     try {
       if (isEdit) {
         const payload: { url?: string; expires_at?: string | null } = { url: trimmedUrl };
-        if (clearExpires) {
+        if (expResult.action === 'clear') {
           payload.expires_at = null;
-        } else if (expiresAt.trim() && expiresAt !== initialExpires) {
-          // 仅在用户主动改动过过期时间时提交，避免编辑已过期链接的 URL 时把旧的过去时间重新发回后端。
-          const iso = localDatetimeToISO(expiresAt);
-          if (!iso) {
-            setFormError('过期时间格式无效');
-            return;
-          }
-          payload.expires_at = iso;
+        } else if (expResult.action === 'set') {
+          payload.expires_at = expResult.iso;
         }
         await updateLink.mutateAsync({ code: editingLink.code, payload });
         toast.success(`已更新短链 /r/${editingLink.code}`);
         onClose();
       } else {
-        const iso = localDatetimeToISO(expiresAt);
         const created = await createLink.mutateAsync({
           url: trimmedUrl,
-          ...(iso ? { expires_at: iso } : {}),
+          ...(expResult.action === 'set' ? { expires_at: expResult.iso } : {}),
         });
         toast.success(`已生成短链 /r/${created.code}`);
         setCreatedLink(created);
@@ -113,8 +124,7 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
   function handleCreateAnother() {
     setCreatedLink(null);
     setUrl('');
-    setExpiresAt('');
-    setClearExpires(false);
+    setExpiration(createInitialExpiration('create'));
     setFormError(null);
   }
 
@@ -123,27 +133,27 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
     return (
       <>
         <DialogHeader>
-          <div className="flex items-center gap-2 text-emerald-700">
-            <CheckCircle2 className="size-5" />
-            <DialogTitle>短链已生成</DialogTitle>
+          <div className="flex items-center gap-3">
+            <CourierCat pose="success" className="size-16 shrink-0" />
+            <div className="space-y-1">
+              <DialogTitle>短链已生成</DialogTitle>
+              <DialogDescription>复制短链或下载二维码即可分享。</DialogDescription>
+            </div>
           </div>
-          <DialogDescription>
-            短链已生效，你可以立即复制链接或保存二维码用于分享。
-          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
+          <div className="flex items-center gap-2 rounded-xl border-[1.25px] border-ink bg-hl-mint/35 px-3 py-2.5">
             <a
               href={shortUrl}
               target="_blank"
               rel="noreferrer"
               data-testid="created-short-url"
-              className="min-w-0 flex-1 truncate font-mono text-sm font-semibold text-brand hover:underline"
+              className="min-w-0 flex-1 truncate font-mono text-sm font-bold text-ink hover:underline"
             >
               {shortUrl}
             </a>
-            <ExternalLink className="size-3.5 shrink-0 text-zinc-400" />
+            <ExternalLink className="size-3.5 shrink-0 text-ink-secondary" />
             <CopyButton
               value={shortUrl}
               variant="pill"
@@ -160,60 +170,59 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
           <Button variant="outline" onClick={handleCreateAnother}>
             继续创建下一条
           </Button>
-          <Button onClick={onClose}>完成</Button>
+          <Button variant="highlight" onClick={onClose}>
+            完成
+          </Button>
         </DialogFooter>
       </>
     );
   }
 
+  const showHttpsHint = needsHttpsPrefix(url);
+
   return (
     <>
       <DialogHeader>
         <DialogTitle>{isEdit ? `编辑短链 /r/${editingLink.code}` : '创建短链'}</DialogTitle>
-        <DialogDescription>
-          {isEdit
-            ? '保存后新地址立即生效，系统会在后台自动复检目标链接安全性。'
-            : '支持 http / https 网址，提交后即刻生成随机短码与分享二维码。'}
+        <DialogDescription className={isEdit ? undefined : 'sr-only'}>
+          {isEdit ? '保存后新网址立即生效，系统将自动复检安全性。' : '填写目标网址与有效期。'}
         </DialogDescription>
       </DialogHeader>
 
-      <form className="space-y-4" onSubmit={handleSubmit}>
+      <form className="space-y-4" onSubmit={handleSubmit} noValidate>
         <div className="space-y-2">
-          <Label htmlFor="link-url">目标 URL</Label>
+          <Label htmlFor="link-url">目标网址</Label>
           <Input
             id="link-url"
             type="url"
             required
             autoFocus
-            placeholder="https://example.com/landing?ref=shortlink"
+            placeholder="https://example.com/landing?ref=ori"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
           />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="link-expires">
-            {isEdit ? '过期时间（可调整，留空保持不变）' : '过期时间（可选，留空永不过期）'}
-          </Label>
-          <Input
-            id="link-expires"
-            type="datetime-local"
-            disabled={clearExpires}
-            value={expiresAt}
-            onChange={(e) => setExpiresAt(e.target.value)}
-          />
-          {isEdit && editingLink.expires_at && (
-            <label className="mt-2 inline-flex items-center gap-2 text-sm text-foreground cursor-pointer">
-              <input
-                type="checkbox"
-                className="size-4 rounded border-input accent-primary"
-                checked={clearExpires}
-                onChange={(e) => setClearExpires(e.target.checked)}
-              />
-              清除现有过期时间（改为永不过期）
-            </label>
+          {showHttpsHint && (
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-ink/30 bg-hl-yellow/35 px-2.5 py-1.5 text-xs text-ink">
+              <span>检测到未带协议头，需要补全为 https:// 吗？</span>
+              <button
+                type="button"
+                onClick={() => setUrl(`https://${url.trim()}`)}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-ink bg-card px-2 py-0.5 font-medium hover:bg-hl-yellow cursor-pointer"
+              >
+                <Sparkles className="size-3" />
+                补全协议
+              </button>
+            </div>
           )}
         </div>
+
+        <ExpirationPicker
+          id="link-expires"
+          mode={isEdit ? 'edit' : 'create'}
+          initialIso={editingLink?.expires_at}
+          value={expiration}
+          onChange={setExpiration}
+        />
 
         {formError && <ErrorAlert compact message={formError} />}
 
@@ -221,7 +230,7 @@ function LinkFormInner({ orgId, editingLink, onClose }: LinkFormInnerProps) {
           <Button variant="outline" disabled={isPending} onClick={onClose}>
             取消
           </Button>
-          <Button type="submit" disabled={isPending}>
+          <Button type="submit" variant="highlight" disabled={isPending}>
             {isPending ? '保存中…' : isEdit ? '保存修改' : '生成短链'}
           </Button>
         </DialogFooter>

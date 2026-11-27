@@ -60,11 +60,11 @@ export function WebhookFormDialog({
     const trimmedUrl = url.trim();
     const trimmedDesc = description.trim();
     if (!trimmedUrl) {
-      setFormError('请输入回调 URL');
+      setFormError('请输入接收通知的网址');
       return;
     }
     if (utf8Encoder.encode(trimmedDesc).length > MAX_WEBHOOK_DESCRIPTION_BYTES) {
-      setFormError(`备注不能超过 ${MAX_WEBHOOK_DESCRIPTION_BYTES} 字节`);
+      setFormError('备注过长，请精简后再试');
       return;
     }
     if (events.length === 0) {
@@ -104,14 +104,11 @@ export function WebhookFormDialog({
           <DialogTitle>
             {isEditing ? `编辑 Webhook #${editing.id}` : '添加 Webhook 订阅'}
           </DialogTitle>
-          <DialogDescription>
-            系统将以 HTTP(S) POST 发送带 HMAC-SHA256 签名的 JSON 事件通知（生产推荐 HTTPS），不支持
-            3xx 重定向与内网地址。
-          </DialogDescription>
+          <DialogDescription>建议使用 HTTPS 地址，不支持重定向与内网地址。</DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div className="space-y-2">
-            <Label htmlFor="webhook-url">回调 URL</Label>
+            <Label htmlFor="webhook-url">接收通知地址</Label>
             <Input
               id="webhook-url"
               type="url"
@@ -132,34 +129,32 @@ export function WebhookFormDialog({
           </div>
 
           <div className="space-y-2">
-            <Label>订阅事件</Label>
-            <div className="space-y-2 rounded-lg border border-border bg-slate-50/70 p-3">
+            <span className="block text-sm font-medium leading-none text-ink">订阅事件</span>
+            <div className="space-y-2 rounded-xl border-[1.25px] border-ink/60 bg-paper-warm/50 p-3">
               {ALL_WEBHOOK_EVENTS.map((item) => (
                 <label key={item.value} className="flex items-start gap-2.5 text-sm cursor-pointer">
                   <input
                     type="checkbox"
-                    className="mt-0.5 size-4 rounded border-input accent-primary"
+                    className="mt-0.5 size-4 rounded border-ink accent-ink"
                     checked={events.includes(item.value)}
                     onChange={() => toggleEvent(item.value)}
                   />
                   <span>
-                    <span className="font-mono text-xs font-semibold text-foreground">
-                      {item.label}
-                    </span>
-                    <span className="block text-xs text-muted-foreground">{item.description}</span>
+                    <span className="font-mono text-xs font-bold text-ink">{item.label}</span>
+                    <span className="block text-xs text-ink-secondary">{item.description}</span>
                   </span>
                 </label>
               ))}
             </div>
           </div>
 
-          {formError && <ErrorAlert message={formError} />}
+          {formError && <ErrorAlert compact message={formError} />}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               取消
             </Button>
-            <Button type="submit" disabled={isPending}>
+            <Button type="submit" variant="highlight" disabled={isPending}>
               {isPending ? '保存中…' : isEditing ? '保存修改' : '确认创建'}
             </Button>
           </DialogFooter>

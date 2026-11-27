@@ -14,8 +14,8 @@ interface CopyButtonProps {
 }
 
 /*
-  短链控制台里最高频的微交互：点击后剪贴板图标立刻切为绿色对勾并保持 1.8 秒。
-  用 useEffect 清理定时器，避免组件提前卸载后触发多余状态更新。
+  高频剪贴板交互：点击后立刻切换为薄荷绿荧光底 + 对勾并保持 1.8 秒，
+  触控热区满足 WCAG 2.2 最小尺寸要求，并补齐高对比度焦点环。
 */
 export function CopyButton({
   value,
@@ -50,13 +50,13 @@ export function CopyButton({
         aria-label={label}
         onClick={() => void handleCopy()}
         className={cn(
-          'inline-flex items-center gap-1.5 rounded-md border border-border bg-white px-2.5 text-xs font-medium text-zinc-700 shadow-2xs transition-colors hover:bg-zinc-50 hover:text-zinc-950 cursor-pointer',
+          'inline-flex items-center gap-1.5 rounded-lg border-[1.25px] border-ink/80 bg-card px-2.5 text-xs font-medium text-ink transition-colors hover:border-ink hover:bg-paper-warm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink cursor-pointer',
           size === 'xs' ? 'h-7' : 'h-8',
-          copied && 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50',
+          copied && 'border-ink bg-hl-mint text-ink hover:bg-hl-mint',
           className,
         )}
       >
-        {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
+        {copied ? <Check className="size-3.5 text-ink" /> : <Copy className="size-3.5" />}
         {copied ? '已复制' : label}
       </button>
     );
@@ -69,10 +69,9 @@ export function CopyButton({
       aria-label={label}
       onClick={() => void handleCopy()}
       className={cn(
-        'inline-flex items-center justify-center rounded-full border border-transparent text-zinc-400 transition-all hover:border-zinc-200 hover:bg-zinc-100 hover:text-zinc-700 cursor-pointer',
-        size === 'xs' ? 'size-6' : 'size-7',
-        copied &&
-          'border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-600',
+        'inline-flex items-center justify-center rounded-lg border border-transparent text-ink-secondary transition-all hover:border-ink/40 hover:bg-paper-warm hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink cursor-pointer',
+        size === 'xs' ? 'size-7' : 'size-8',
+        copied && 'border-ink bg-hl-mint text-ink hover:bg-hl-mint',
         className,
       )}
     >
