@@ -3,6 +3,7 @@
 .env
 .env.*
 bin
+tmp
 docs
 *.md
 deploy/prometheus.local.yml

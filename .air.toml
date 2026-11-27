@@ -1,0 +1,22 @@
+# Air 本地 Go 热更新配置（由 make run-redirector / make run-console / make run-worker 复用并按进程覆写）
+# 首次使用可先运行 make install-air；日常仍执行 make run-*，传 HOT_RELOAD=0 可回退普通 go run。
+#:schema https://json.schemastore.org/any.json
+
+root = "."
+tmp_dir = "tmp/air"
+
+[build]
+  # 默认构建 console serve；Makefile 各 run-* 目标会用独立 --tmp_dir / --build.include_dir / --build.cmd / --build.entrypoint 覆写，三进程可并行运行。
+  cmd = "go build -o ./tmp/air/console ./cmd/console"
+  entrypoint = ["./tmp/air/console", "serve"]
+  include_ext = ["go"]
+  exclude_dir = ["bin", "tmp", "web", "docs", "deploy", "migrations", "scripts", "vendor", ".git", ".github", ".vscode"]
+  exclude_regex = ["_test\\.go$"]
+  delay = 300
+  stop_on_error = true
+  send_interrupt = true
+  kill_delay = "2s"
+  log = "build-errors.log"
+
+[misc]
+  clean_on_exit = true

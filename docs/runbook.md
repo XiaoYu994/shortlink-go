@@ -76,7 +76,13 @@ PostgreSQL 并占用 5432 端口。Redis 仍然要在 `REDIS_URL` 上可连，�
 
 ## 启动
 
-两个进程各开一个终端：
+首次本地开发前建议先安装 `air`（装到 `GOPATH/bin`，不污染 `go.mod`）：
+
+```bash
+make install-air
+```
+
+各进程独立开一个终端启动：
 
 ```bash
 make run-redirector   # 公开跳转，ADDR，默认 :8080
@@ -85,6 +91,12 @@ make run-redirector   # 公开跳转，ADDR，默认 :8080
 ```bash
 make run-console      # 管理 API，CONSOLE_ADDR，默认 :8081
 ```
+
+```bash
+make run-worker       # 可选后台任务（异步风控 / Webhook / 邀请邮件 / 定期清理）
+```
+
+> **默认热更新说明**：`make run-redirector`、`make run-console` 与 `make run-worker` 默认通过仓库根目录的 [`.air.toml`](../.air.toml) 启用热更新，修改各自依赖的 `.go` 文件后会自动重编译并优雅重启，三进程使用独立临时目录（`tmp/air/*`）互不干扰；为避免每次保存被 `.env` 的 `DRAIN_DELAY=5s` 卡住或触发端口复用冲突，热更新模式默认注入 `DEV_DRAIN_DELAY=0s`（需演练摘流时可传 `DEV_DRAIN_DELAY=5s`）。如需回退普通 `go run`，传 `HOT_RELOAD=0`（例如 `make run-console HOT_RELOAD=0`）。注意修改 `.env` 环境变量仍需手动重启对应进程。
 
 看到 `connected to postgres`、`connected to redis`（配置了 `REDIS_URL` 时；未配置则打印 `redis cache disabled`）和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。当 `FEATURE_ANALYTICS=true` 时 redirector 没有 `VISITOR_SALT` 会直接退出，避免 UV 被静默记成 0；若只需最简短链服务，可仅配 `DATABASE_URL` 并设 `REDIS_URL="" FEATURE_ANALYTICS=false FEATURE_RISK_SCAN=false` 启动无 Redis/无统计/无风控的极简模式（注意跨进程与运维 CLI 保持开关一致）。密钥、租户和成员命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 在未配置 `REDIS_URL` 时也只写 PostgreSQL。
 

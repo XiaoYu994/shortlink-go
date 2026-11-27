@@ -7,13 +7,14 @@
 ```bash
 # 先按 docs/runbook.md 准备 .env（DATABASE_URL 必填；REDIS_URL 与 VISITOR_SALT 可按需启用，极简单 PG 模式可留空并设 FEATURE_ANALYTICS=false），并启动数据库
 make migrate
-make run-redirector   # 终端 1：公开跳转，默认 :8080，用 ADDR 改
+make install-air      # 首次运行需安装 air（GOPATH/bin），之后 run-* 默认热更新
+make run-redirector   # 终端 1：公开跳转，默认 :8080，用 ADDR 改（传 HOT_RELOAD=0 可关闭热更新）
 ```
 
 另开一个终端启动管理进程：
 
 ```bash
-make run-console      # 管理 API，默认 :8081，用 CONSOLE_ADDR 改
+make run-console      # 管理 API，默认 :8081，用 CONSOLE_ADDR 改（后台任务用 make run-worker）
 curl -i localhost:8080/healthz
 ```
 

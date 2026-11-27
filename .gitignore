@@ -5,6 +5,7 @@
 *.so
 *.dylib
 bin/
+tmp/
 
 # Test and coverage output
 *.test

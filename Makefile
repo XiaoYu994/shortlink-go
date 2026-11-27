@@ -12,24 +12,64 @@ worker_port := $(lastword $(subst :, ,$(WORKER_ADDR)))
 redirector_ops_port := $(if $(OPS_ADDR),$(lastword $(subst :, ,$(OPS_ADDR))),$(redirector_port))
 console_ops_port := $(if $(CONSOLE_OPS_ADDR),$(lastword $(subst :, ,$(CONSOLE_OPS_ADDR))),$(console_port))
 
+# 本地开发默认通过 air 热更新（改 .go 自动重编译重启）；传 HOT_RELOAD=0 可回退普通 go run。
+HOT_RELOAD ?= 1
+# 热更新模式默认跳过 .env 里的 5s 摘流等待，避免每次保存卡 5 秒或端口冲突；需演练摘流时传 DEV_DRAIN_DELAY=5s 或 HOT_RELOAD=0。
+DEV_DRAIN_DELAY ?= 0s
+AIR_VERSION ?= v1.67.4
+
 # 让 make lint 能找到 go install 安装到 GOPATH/bin 的工具。
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
-.PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check arch-check verify selfcheck \
+.PHONY: help install-air check-air run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check arch-check verify selfcheck \
 	test-db test-integration smoke deps-up up stack tracing prometheus prometheus-config down psql redis-cli \
 	web-install web-dev web-build web-fmt web-fmt-check web-lint web-test web-check
 
 help: ## 列出所有命令
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
 
-run-redirector: ## 启动跳转进程（ADDR，默认 :8080）
+install-air: ## 安装本地 Go 热更新工具 air（安装到 GOPATH/bin，不污染 go.mod）
+	go install github.com/air-verse/air@$(AIR_VERSION)
+
+check-air:
+	@if [ "$(HOT_RELOAD)" = "1" ] && ! command -v air >/dev/null 2>&1; then \
+		echo "未找到 air，请先运行: make install-air（或传 HOT_RELOAD=0 使用普通 go run）" >&2; \
+		exit 1; \
+	fi
+
+ifeq ($(HOT_RELOAD),1)
+run-redirector: check-air ## 启动跳转进程（ADDR，默认 :8080；默认热更新，HOT_RELOAD=0 关闭）
+	ADDR=$(ADDR) DRAIN_DELAY=$(DEV_DRAIN_DELAY) air \
+		--tmp_dir tmp/air/redirector \
+		--build.include_dir cmd/redirector --build.include_dir internal \
+		--build.cmd "go build -o ./tmp/air/redirector/app ./cmd/redirector" \
+		--build.entrypoint ./tmp/air/redirector/app
+
+run-console: check-air ## 启动管理进程（CONSOLE_ADDR，默认 :8081；默认热更新，HOT_RELOAD=0 关闭）
+	CONSOLE_ADDR=$(CONSOLE_ADDR) DRAIN_DELAY=$(DEV_DRAIN_DELAY) air \
+		--tmp_dir tmp/air/console \
+		--build.include_dir cmd/console --build.include_dir internal \
+		--build.cmd "go build -o ./tmp/air/console/app ./cmd/console" \
+		--build.entrypoint ./tmp/air/console/app \
+		-- $(strip serve $(ARGS))
+
+run-worker: check-air ## 启动后台任务进程（异步风控/Webhook/清理；默认热更新，HOT_RELOAD=0 关闭）
+	air \
+		--tmp_dir tmp/air/worker \
+		--build.include_dir cmd/console --build.include_dir internal \
+		--build.cmd "go build -o ./tmp/air/worker/app ./cmd/console" \
+		--build.entrypoint ./tmp/air/worker/app \
+		-- $(strip worker $(ARGS))
+else
+run-redirector:
 	ADDR=$(ADDR) go run ./cmd/redirector
 
-run-console: ## 启动管理进程（CONSOLE_ADDR，默认 :8081）
-	CONSOLE_ADDR=$(CONSOLE_ADDR) go run ./cmd/console serve
+run-console:
+	CONSOLE_ADDR=$(CONSOLE_ADDR) go run ./cmd/console $(strip serve $(ARGS))
 
-run-worker: ## 启动后台任务进程（异步 URL 风控与定期清理）
-	go run ./cmd/console worker
+run-worker:
+	go run ./cmd/console $(strip worker $(ARGS))
+endif
 
 build: ## 编译到 bin/redirector 和 bin/console
 	go build -o bin/redirector ./cmd/redirector
