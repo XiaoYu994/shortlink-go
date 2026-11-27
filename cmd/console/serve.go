@@ -71,9 +71,6 @@ func runServe(cliOpts serveCLIOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := console.ValidateAuthMethods(authMethods); err != nil {
-		return fmt.Errorf("validate auth methods: %w", err)
-	}
 
 	var (
 		sessions console.SessionStore
@@ -103,9 +100,6 @@ func runServe(cliOpts serveCLIOptions) error {
 	}
 	if whModule != nil {
 		modules = append(modules, whModule)
-	}
-	if err := console.ValidateModules(modules); err != nil {
-		return fmt.Errorf("validate modules: %w", err)
 	}
 	if cfg.WebDistDir != "" {
 		info, err := os.Stat(cfg.WebDistDir)

@@ -1,7 +1,6 @@
 package console
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -59,28 +58,6 @@ type AuthMethod interface {
 	Descriptor() AuthMethodDescriptor
 	SecureCookies() bool
 	RegisterRoutes(tk AuthToolkit)
-}
-
-// ValidateAuthMethods 校验已装配的登录方式集合：ID 必须合法且不得重复。
-func ValidateAuthMethods(methods []AuthMethod) error {
-	seen := make(map[string]struct{}, len(methods))
-	for _, m := range methods {
-		if m == nil {
-			continue
-		}
-		desc := m.Descriptor()
-		if !validAuthMethodID(desc.ID) {
-			return fmt.Errorf("invalid auth method id %q", desc.ID)
-		}
-		if desc.Kind == "" {
-			return fmt.Errorf("auth method %q missing flow kind", desc.ID)
-		}
-		if _, dup := seen[desc.ID]; dup {
-			return fmt.Errorf("duplicate auth method id %q", desc.ID)
-		}
-		seen[desc.ID] = struct{}{}
-	}
-	return nil
 }
 
 func validAuthMethodID(id string) bool {

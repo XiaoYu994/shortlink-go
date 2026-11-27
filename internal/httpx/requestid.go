@@ -4,10 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net/http"
-	"sync/atomic"
-	"time"
 
 	"shortlink/internal/logx"
 )
@@ -72,15 +69,9 @@ func validRequestID(id string) bool {
 	return true
 }
 
-// fallbackRequestSeq 只在 crypto/rand 失败时使用，避免同一纳秒内的两次失败拿到同一个编号。
-var fallbackRequestSeq atomic.Uint64
-
-// newRequestID 生成 32 位十六进制编号。crypto/rand 失败时退回时间戳加序号，避免这次请求没有编号。
+// newRequestID 生成 32 位十六进制编号；Go 1.24+ 保证 crypto/rand.Read 永不返回错误。
 func newRequestID() string {
 	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		n := fallbackRequestSeq.Add(1)
-		return fmt.Sprintf("fallback-%d-%d", time.Now().UnixNano(), n)
-	}
+	_, _ = rand.Read(buf[:])
 	return hex.EncodeToString(buf[:])
 }

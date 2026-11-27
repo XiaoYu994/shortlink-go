@@ -105,14 +105,10 @@ func (m *OAuthAuthMethod) SecureCookies() bool {
 
 // RegisterRoutes 在 /api/v1/auth/{id}/login 与 /api/v1/auth/{id}/callback 挂载登录与回调处理器。
 func (m *OAuthAuthMethod) RegisterRoutes(tk AuthToolkit) {
-	wrap := tk.IPRateLimit
-	if wrap == nil {
-		wrap = func(next http.Handler) http.Handler { return next }
-	}
-	tk.Mux.Handle("GET "+m.loginPath, wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tk.Mux.Handle("GET "+m.loginPath, tk.IPRateLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.handleLogin(w, r, tk.Logger)
 	})))
-	tk.Mux.Handle("GET "+m.callbackPath, wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tk.Mux.Handle("GET "+m.callbackPath, tk.IPRateLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.handleCallback(w, r, tk.Logger, tk.Issuer)
 	})))
 }
@@ -212,11 +208,6 @@ func (m *OAuthAuthMethod) handleLogin(w http.ResponseWriter, r *http.Request, lo
 
 func (m *OAuthAuthMethod) handleCallback(w http.ResponseWriter, r *http.Request, logger *slog.Logger, issuer SessionIssuer) {
 	if httpx.IsClientGone(logger, r) || !requireGetOnly(logger, w, r) {
-		return
-	}
-	if issuer == nil {
-		logger.ErrorContext(r.Context(), "auth callback", "provider", m.id, "err", errors.New("session issuer is nil"))
-		httpx.WriteError(logger, r.Context(), w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

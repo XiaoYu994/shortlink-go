@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -35,24 +34,6 @@ const (
 	partitionMonthsAhead       = 2
 	workerStartupTimeout       = 10 * time.Second
 )
-
-type workerCLIOptions struct {
-	allowTestHosts []string
-}
-
-func parseWorkerArgs(args []string, stderr io.Writer) (workerCLIOptions, bool, error) {
-	fs := newFlagSet("worker", stderr)
-	var opts workerCLIOptions
-	registerWorkerTestFlags(fs, &opts)
-	ok, err := parseFlags(fs, args, stderr)
-	if !ok {
-		return workerCLIOptions{}, false, err
-	}
-	if err := validateWorkerTestFlags(opts); err != nil {
-		return workerCLIOptions{}, false, err
-	}
-	return opts, true, nil
-}
 
 // drainCleanupBatches 在单次周期 tick 内连续分批清理，直到返回不足 batchLimit 行或达到批数上限。
 func drainCleanupBatches(ctx context.Context, batchLimit, maxBatches int, fn func(context.Context, int) (int64, error)) (int64, error) {

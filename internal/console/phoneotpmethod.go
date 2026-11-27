@@ -114,14 +114,10 @@ func (m *PhoneOTPAuthMethod) SecureCookies() bool {
 
 // RegisterRoutes 挂载发码与核验两个 POST 路由，并统一接入底座 IP 限流中间件。
 func (m *PhoneOTPAuthMethod) RegisterRoutes(tk AuthToolkit) {
-	wrap := tk.IPRateLimit
-	if wrap == nil {
-		wrap = func(next http.Handler) http.Handler { return next }
-	}
-	tk.Mux.Handle("POST "+m.sendCodePath, wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tk.Mux.Handle("POST "+m.sendCodePath, tk.IPRateLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.handleSendCode(w, r, tk.Logger, tk.CSRF)
 	})))
-	tk.Mux.Handle("POST "+m.verifyCodePath, wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tk.Mux.Handle("POST "+m.verifyCodePath, tk.IPRateLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.handleVerify(w, r, tk.Logger, tk.CSRF, tk.Issuer)
 	})))
 }
@@ -165,18 +161,8 @@ func (m *PhoneOTPAuthMethod) handleSendCode(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	code, err := identity.NewOTPCode()
-	if err != nil {
-		logger.ErrorContext(r.Context(), "generate phone otp code", "err", err)
-		httpx.WriteError(logger, r.Context(), w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	salt, err := identity.NewOTPSalt()
-	if err != nil {
-		logger.ErrorContext(r.Context(), "generate phone otp salt", "err", err)
-		httpx.WriteError(logger, r.Context(), w, http.StatusInternalServerError, "internal error")
-		return
-	}
+	code := identity.NewOTPCode()
+	salt := identity.NewOTPSalt()
 
 	challengeID, err := m.store.CreatePhoneOTPChallenge(r.Context(), identity.PhoneOTPChallengeParams{
 		Phone:       phone,
@@ -235,11 +221,6 @@ func (m *PhoneOTPAuthMethod) handleVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if issuer == nil {
-		logger.ErrorContext(r.Context(), "verify phone otp", "provider", m.id, "err", errors.New("session issuer is nil"))
-		httpx.WriteError(logger, r.Context(), w, http.StatusInternalServerError, "internal error")
-		return
-	}
 	if !checkCrossOrigin(logger, csrf, w, r) {
 		return
 	}

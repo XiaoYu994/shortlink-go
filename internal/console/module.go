@@ -1,7 +1,6 @@
 package console
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -46,13 +45,7 @@ type Module interface {
 	RegisterRoutes(r RouteRegistrar)
 }
 
-// ValidateModules 校验已装配的业务模块集合：名称不得为空且不得重复；nil 模块会被忽略。
-func ValidateModules(modules []Module) error {
-	_, _, err := indexModules(modules)
-	return err
-}
-
-func indexModules(modules []Module) ([]Module, map[string]struct{}, error) {
+func indexModules(modules []Module) ([]Module, map[string]struct{}) {
 	filtered := make([]Module, 0, len(modules))
 	seen := make(map[string]struct{}, len(modules))
 	for _, m := range modules {
@@ -61,15 +54,15 @@ func indexModules(modules []Module) ([]Module, map[string]struct{}, error) {
 		}
 		name := m.Name()
 		if name == "" {
-			return nil, nil, errors.New("module name must not be empty")
+			panic("console: module name must not be empty")
 		}
 		if _, dup := seen[name]; dup {
-			return nil, nil, fmt.Errorf("duplicate module %q", name)
+			panic(fmt.Sprintf("console: duplicate module %q", name))
 		}
 		seen[name] = struct{}{}
 		filtered = append(filtered, m)
 	}
-	return filtered, seen, nil
+	return filtered, seen
 }
 
 type orgsModule struct {

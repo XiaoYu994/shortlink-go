@@ -54,14 +54,24 @@ func newAuthHandler(logger *slog.Logger, methods []AuthMethod, sessions SessionM
 	if sessionTTL <= 0 {
 		sessionTTL = identity.DefaultSessionTTL
 	}
-	var filtered []AuthMethod
+	filtered := make([]AuthMethod, 0, len(methods))
+	seen := make(map[string]struct{}, len(methods))
 	for _, m := range methods {
-		if m != nil {
-			filtered = append(filtered, m)
+		if m == nil {
+			continue
 		}
-	}
-	if err := ValidateAuthMethods(filtered); err != nil {
-		panic(fmt.Sprintf("console: %v", err))
+		desc := m.Descriptor()
+		if !validAuthMethodID(desc.ID) {
+			panic(fmt.Sprintf("console: invalid auth method id %q", desc.ID))
+		}
+		if desc.Kind == "" {
+			panic(fmt.Sprintf("console: auth method %q missing flow kind", desc.ID))
+		}
+		if _, dup := seen[desc.ID]; dup {
+			panic(fmt.Sprintf("console: duplicate auth method id %q", desc.ID))
+		}
+		seen[desc.ID] = struct{}{}
+		filtered = append(filtered, m)
 	}
 	return &authHandler{
 		logger:     logger,
@@ -76,15 +86,23 @@ func (h *authHandler) registerRoutes(mux *http.ServeMux, wrap func(http.Handler)
 	if wrap == nil {
 		wrap = func(next http.Handler) http.Handler { return next }
 	}
-	var issuer SessionIssuer
-	if h.sessions != nil {
-		issuer = h
+	methodWrap := wrap
+	if h.sessions == nil {
+		methodWrap = func(next http.Handler) http.Handler {
+			return wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if httpx.IsClientGone(h.logger, r) {
+					return
+				}
+				h.logger.ErrorContext(r.Context(), "auth request without session manager")
+				httpx.WriteError(h.logger, r.Context(), w, http.StatusInternalServerError, "internal error")
+			}))
+		}
 	}
 	tk := AuthToolkit{
 		Mux:         mux,
-		IPRateLimit: wrap,
+		IPRateLimit: methodWrap,
 		CSRF:        h.csrf,
-		Issuer:      issuer,
+		Issuer:      h,
 		Logger:      h.logger,
 	}
 	for _, m := range h.methods {

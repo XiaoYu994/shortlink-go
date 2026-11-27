@@ -13,10 +13,7 @@ import (
 
 func mustOTPParams(t *testing.T, phone, code string, ttl, cooldown time.Duration, maxPerHour, maxAttempts int) identity.PhoneOTPChallengeParams {
 	t.Helper()
-	salt, err := identity.NewOTPSalt()
-	if err != nil {
-		t.Fatalf("NewOTPSalt: %v", err)
-	}
+	salt := identity.NewOTPSalt()
 	return identity.PhoneOTPChallengeParams{
 		Phone:       phone,
 		CodeSalt:    salt,

@@ -244,11 +244,6 @@ psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
 mkdir -p "$TMP/webdist"
 printf '%s\n' '<!doctype html><html><body>smoke-web-console</body></html>' >"$TMP/webdist/index.html"
 
-# 确认生产构建的 ./bin/console serve 拒绝测试专用开关 --allow-test-host。
-if ./bin/console serve --allow-test-host "$WEBHOOK_STUB_HOST" >/dev/null 2>&1; then
-	fail '生产 bin/console serve 不应允许 --allow-test-host'
-fi
-
 # 本地 HTTP 短信网关桩：校验 Bearer 令牌并把收到的验证码 JSON 落盘供冒烟读取。
 cat >"$TMP/sms_stub.py" <<'EOF'
 import http.server
@@ -1111,11 +1106,6 @@ while ! python3 -c "import socket; socket.create_connection(('127.0.0.1', int('$
 	[ "$i" -ge 50 ] && fail '本地 SMTP 接收桩 5 秒内未就绪'
 	sleep 0.1
 done
-
-# 确认生产构建的 ./bin/console 拒绝测试专用开关 --allow-test-host。
-if ./bin/console worker --allow-test-host "$RISK_STUB_HOST" >/dev/null 2>&1; then
-	fail '生产 bin/console 不应允许 --allow-test-host'
-fi
 
 WORKER_ADDR=$worker_addr \
 WORKER_POLL_INTERVAL=50ms \

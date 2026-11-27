@@ -844,7 +844,7 @@ WORKER_ADDR=127.0.0.1:8082 make run-worker
 - `console worker` 按 `WorkerModule` 装配各特性消费者与周期维护任务，通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`）；已关闭特性的历史残留任务由 `disabledSkipHandler` 自动按 `job.Skip` 归档，不污染 `dead` 队列。抓取目标 URL 前在 `DialContext` 与 `CheckRedirect` 拦截私网/回环/云元数据及 NAT64（`64:ff9b::/96`）/6to4（`2002::/16`）地址并支持出口端口白名单（`RISK_ALLOWED_PORTS`），命中规则后调用 `BanIfURL` 以 `ban_source=risk` 下架并写负缓存（若租户已改写 URL 则跳过旧任务）。
 - Redis 可选：配置 `REDIS_URL` 时只存扫描结果短时缓存（fail-open，且不缓存 4xx 响应），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，不重抓外网 URL，旧正缓存按 5 分钟 TTL 自然失效（[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）；未配置 `REDIS_URL` 时直接跳过缓存。
 - worker 启动时始终调用 `EnsureAuditPartitions` 预建 `audit_logs` 未来 2 个月分区，仅在 `FEATURE_ANALYTICS=true` 时调用 `EnsureStatsPartitions` 预建三张统计表未来分区；后台按 `WORKER_CLEANUP_INTERVAL`（默认 1 小时）分批清理过期 `sessions`、`done`/`dead` 任务（`dead` 默认 30 天）、过期/撤销/被取代 `invitations`（默认 30 天），运行 `audit_partitions.maintain`（`WORKER_AUDIT_RETENTION_DAYS=180`），并按开关运行 `stats_partitions.maintain`（`WORKER_STATS_RETENTION_DAYS=90`）与 `webhooks.cleanup_deliveries`（永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
-- 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站（编译期隔离在 `//go:build devtest`），不提供关闭 SSRF 检查的全局环境变量。
+- 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站（命令行严格限制仅放行 `localhost` 或回环 IP），不提供关闭 SSRF 检查的全局环境变量。
 
 ## 后台任务与异步风控基准测试（2026-11-23）
 

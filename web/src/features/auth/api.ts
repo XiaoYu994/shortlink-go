@@ -110,10 +110,10 @@ export function useAnalyticsEnabled(): boolean {
   return Boolean(data?.features.analytics);
 }
 
-// 报告后端是否启用了异步邀请邮件（SMTP_HOST）；加载中或能力接口异常时返回 undefined，供调用方回退中性提示。
-export function useEmailEnabled(enabled = true): boolean | undefined {
+// 报告后端是否启用了异步邀请邮件（SMTP_HOST）；加载中或能力接口异常时保守返回 false。
+export function useEmailEnabled(enabled = true): boolean {
   const { data } = useCapabilities(enabled);
-  return data?.features.email;
+  return Boolean(data?.features.email);
 }
 
 export function useMe() {

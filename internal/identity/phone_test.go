@@ -61,10 +61,7 @@ func TestMaskPhone(t *testing.T) {
 }
 
 func TestOTPCodeGenerationAndHashVerification(t *testing.T) {
-	code, err := NewOTPCode()
-	if err != nil {
-		t.Fatalf("NewOTPCode: %v", err)
-	}
+	code := NewOTPCode()
 	if !ValidOTPCode(code) {
 		t.Fatalf("generated code %q is not valid 6-digit OTP", code)
 	}
@@ -74,10 +71,7 @@ func TestOTPCodeGenerationAndHashVerification(t *testing.T) {
 		}
 	}
 
-	salt, err := NewOTPSalt()
-	if err != nil {
-		t.Fatalf("NewOTPSalt: %v", err)
-	}
+	salt := NewOTPSalt()
 	phone := "+8613800138000"
 	hash := HashOTPCode(salt, phone, code)
 	if !VerifyOTPCodeHash(salt, hash, phone, code) {

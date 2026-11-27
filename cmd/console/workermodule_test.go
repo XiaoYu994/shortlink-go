@@ -376,7 +376,7 @@ func TestInitPhoneOTPAuthMethod(t *testing.T) {
 		t.Fatalf("log initPhoneOTPAuthMethod = (%v, %v)", m, err)
 	}
 
-	// webhook 指向回环地址且无 devtest allowlist 时必须在启动期拒绝。
+	// webhook 指向回环地址且无测试 allowlist 时必须在启动期拒绝。
 	if _, err := initPhoneOTPAuthMethod(PhoneOTPConfig{
 		Provider:   sms.ProviderWebhook,
 		WebhookURL: "http://127.0.0.1:18092/sms",

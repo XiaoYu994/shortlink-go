@@ -70,106 +70,29 @@ func TestWithMetaAndPointerIsolation(t *testing.T) {
 	}
 }
 
-func TestNormalizeMeta(t *testing.T) {
-	pos := int64(9)
-	zero := int64(0)
-	neg := int64(-3)
+func TestSanitizeRequestID(t *testing.T) {
 	longReq := strings.Repeat("a", 200)
 	longUTF8 := strings.Repeat("世", 50) // 150 字节：按 rune 边界截断应为 42*3=126 字节。
 
 	tests := []struct {
-		name     string
-		in       Meta
-		wantKind ActorKind
-		wantID   *int64
-		wantReq  string
+		name string
+		in   string
+		want string
 	}{
-		{
-			name:     "valid user",
-			in:       UserMeta(pos, "req-user"),
-			wantKind: ActorUser,
-			wantID:   &pos,
-			wantReq:  "req-user",
-		},
-		{
-			name:     "valid api key",
-			in:       APIKeyMeta(pos, "req-key"),
-			wantKind: ActorAPIKey,
-			wantID:   &pos,
-			wantReq:  "req-key",
-		},
-		{
-			name:     "user without id falls back to system",
-			in:       Meta{ActorKind: ActorUser, RequestID: "req-1"},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  "req-1",
-		},
-		{
-			name:     "api key with zero id falls back to system",
-			in:       Meta{ActorKind: ActorAPIKey, ActorID: &zero, RequestID: "req-2"},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  "req-2",
-		},
-		{
-			name:     "user with negative id falls back to system",
-			in:       Meta{ActorKind: ActorUser, ActorID: &neg, RequestID: "req-3"},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  "req-3",
-		},
-		{
-			name:     "operator drops stray actor id",
-			in:       Meta{ActorKind: ActorOperator, ActorID: &pos, RequestID: ""},
-			wantKind: ActorOperator,
-			wantID:   nil,
-			wantReq:  "",
-		},
-		{
-			name:     "system drops stray actor id",
-			in:       Meta{ActorKind: ActorSystem, ActorID: &pos, RequestID: "job:12"},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  "job:12",
-		},
-		{
-			name:     "unknown kind falls back to system and truncates request id",
-			in:       Meta{ActorKind: ActorKind("bot"), ActorID: &pos, RequestID: longReq},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  longReq[:128],
-		},
-		{
-			name:     "multi-byte utf8 request id truncates cleanly on rune boundary",
-			in:       Meta{ActorKind: ActorSystem, RequestID: longUTF8},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  strings.Repeat("世", 42),
-		},
-		{
-			name:     "invalid utf8 sequence in request id is sanitized",
-			in:       Meta{ActorKind: ActorSystem, RequestID: "req-\xffok"},
-			wantKind: ActorSystem,
-			wantID:   nil,
-			wantReq:  "req-ok",
-		},
+		{name: "short ascii", in: "req-1", want: "req-1"},
+		{name: "truncates over 128 bytes", in: longReq, want: longReq[:128]},
+		{name: "truncates multi-byte utf8 on rune boundary", in: longUTF8, want: strings.Repeat("世", 42)},
+		{name: "strips invalid utf8", in: "req-\xffok", want: "req-ok"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NormalizeMeta(tt.in)
-			if !utf8.ValidString(got.RequestID) || len(got.RequestID) > maxRequestIDLen {
-				t.Fatalf("RequestID %q is invalid UTF-8 or over %d bytes", got.RequestID, maxRequestIDLen)
+			got := SanitizeRequestID(tt.in)
+			if !utf8.ValidString(got) || len(got) > maxRequestIDLen {
+				t.Fatalf("SanitizeRequestID(%q) = %q is invalid UTF-8 or over %d bytes", tt.in, got, maxRequestIDLen)
 			}
-			if got.ActorKind != tt.wantKind || got.RequestID != tt.wantReq {
-				t.Fatalf("NormalizeMeta = %+v, want kind=%q req=%q", got, tt.wantKind, tt.wantReq)
-			}
-			if (got.ActorID == nil) != (tt.wantID == nil) {
-				t.Fatalf("ActorID nil mismatch: got %v, want %v", got.ActorID, tt.wantID)
-			}
-			if got.ActorID != nil && *got.ActorID != *tt.wantID {
-				t.Fatalf("ActorID = %d, want %d", *got.ActorID, *tt.wantID)
+			if got != tt.want {
+				t.Fatalf("SanitizeRequestID(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

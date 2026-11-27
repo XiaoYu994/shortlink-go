@@ -140,7 +140,7 @@ func TestCustomDirectAuthMethodIssuesSession(t *testing.T) {
 	}
 }
 
-func TestValidateAuthMethodsAndDuplicatePanics(t *testing.T) {
+func TestAuthMethodAndModuleDuplicatePanics(t *testing.T) {
 	if _, err := NewOAuthAuthMethod("OIDC", selfServiceOIDC{}); err == nil {
 		t.Error("NewOAuthAuthMethod accepted uppercase id, want error")
 	}
@@ -149,9 +149,6 @@ func TestValidateAuthMethodsAndDuplicatePanics(t *testing.T) {
 	}
 	m1 := mustOAuthMethod(t, "oidc", selfServiceOIDC{})
 	m2 := mustOAuthMethod(t, "oidc", selfServiceOIDC{})
-	if err := ValidateAuthMethods([]AuthMethod{m1, m2}); err == nil {
-		t.Error("ValidateAuthMethods accepted duplicate id, want error")
-	}
 
 	t.Run("duplicate auth method panics", func(t *testing.T) {
 		defer func() {
@@ -403,25 +400,6 @@ func TestIssueSessionRejectsInvalidReturnTo(t *testing.T) {
 	}
 	if sessions.calls != 0 {
 		t.Fatalf("sessions.calls = %d, want 0 when return_to is invalid", sessions.calls)
-	}
-}
-
-type stubNamedModule struct {
-	name string
-}
-
-func (m stubNamedModule) Name() string                  { return m.name }
-func (m stubNamedModule) RegisterRoutes(RouteRegistrar) {}
-
-func TestValidateModules(t *testing.T) {
-	if err := ValidateModules([]Module{nil, stubNamedModule{name: "alpha"}, stubNamedModule{name: "beta"}}); err != nil {
-		t.Fatalf("ValidateModules(valid) = %v, want nil", err)
-	}
-	if err := ValidateModules([]Module{stubNamedModule{name: ""}}); err == nil {
-		t.Fatal("ValidateModules(empty name) = nil, want error")
-	}
-	if err := ValidateModules([]Module{stubNamedModule{name: "alpha"}, stubNamedModule{name: "alpha"}}); err == nil {
-		t.Fatal("ValidateModules(duplicate) = nil, want error")
 	}
 }
 

@@ -177,8 +177,7 @@ test-integration: test-db ## 跑全部测试，包含需要 PostgreSQL/Redis 的
 	go test -race -count=1 ./...
 
 smoke: test-db build ## 启动真实进程做冒烟测试（独立端口，使用测试库）
-	go build -tags devtest -o bin/console-smoke ./cmd/console
-	CONSOLE_BIN=./bin/console-smoke ./scripts/smoke.sh
+	./scripts/smoke.sh
 
 selfcheck: test-db verify test-integration smoke ## agent 自测：完整检查、集成测试和冒烟
 

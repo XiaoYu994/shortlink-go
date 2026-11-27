@@ -124,21 +124,19 @@ func MaskPhone(phone string) string {
 }
 
 // NewOTPCode 使用 crypto/rand 均匀生成 6 位数字验证码，避免取模偏差。
-func NewOTPCode() (string, error) {
+func NewOTPCode() string {
 	n, err := rand.Int(rand.Reader, otpCodeMax)
 	if err != nil {
-		return "", fmt.Errorf("generate otp code: %w", err)
+		panic(fmt.Sprintf("identity: generate otp code: %v", err))
 	}
-	return fmt.Sprintf("%06d", n.Int64()), nil
+	return fmt.Sprintf("%06d", n.Int64())
 }
 
-// NewOTPSalt 生成 16 字节随机盐，每条验证码挑战独立使用。
-func NewOTPSalt() ([]byte, error) {
+// NewOTPSalt 生成 16 字节随机盐，每条验证码挑战独立使用；Go 1.24+ 保证 crypto/rand.Read 永不返回错误。
+func NewOTPSalt() []byte {
 	salt := make([]byte, OTPSaltBytes)
-	if _, err := rand.Read(salt); err != nil {
-		return nil, fmt.Errorf("generate otp salt: %w", err)
-	}
-	return salt, nil
+	_, _ = rand.Read(salt)
+	return salt
 }
 
 // HashOTPCode 计算绑定手机号与随机盐的 HMAC-SHA256 摘要，数据库绝不存明文验证码。

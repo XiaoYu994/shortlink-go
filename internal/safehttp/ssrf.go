@@ -91,7 +91,7 @@ type HostResolver interface {
 
 /*
 ClientOptions 控制防 SSRF 客户端的超时、重定向策略和仅测试用的精确放行地址。
-AllowedHostPorts 只在单测和 devtest 冒烟中显式传入（形如 127.0.0.1:18089），
+AllowedHostPorts 只在单测和本地冒烟测试中显式传入（形如 127.0.0.1:18089），
 不提供关闭 SSRF 检查的全局开关（ADR 0020、ADR 0027）。
 */
 type ClientOptions struct {
@@ -103,7 +103,7 @@ type ClientOptions struct {
 	Resolver         HostResolver
 }
 
-// URLValidationOptions 控制静态入口 URL 校验的端口与 devtest 精确放行地址。
+// URLValidationOptions 控制静态入口 URL 校验的端口与测试/冒烟精确放行地址。
 type URLValidationOptions struct {
 	AllowedPorts     []int
 	AllowedHostPorts []string
@@ -119,7 +119,7 @@ func DefaultAllowedPorts() []int {
 ValidateURL 在订阅创建/更新等同步入口预先拦截明显非法的出站 URL：
 - 只允许 http/https，拒绝控制字符、userinfo 与 #fragment；
 - 要求合法主机名与允许的端口（默认 80/443）；
-- 除非显式命中 AllowedHostPorts（仅 devtest），否则直接拦截 localhost 与字面量内网/保留 IP。
+- 除非显式命中 AllowedHostPorts（仅测试/本地冒烟使用），否则直接拦截 localhost 与字面量内网/保留 IP。
 动态域名在真实出站时仍由 safeDialContext 二次防 DNS Rebinding 校验。
 */
 func ValidateURL(raw string, opts URLValidationOptions) (*url.URL, error) {

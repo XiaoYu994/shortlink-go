@@ -4,7 +4,6 @@ package console
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -177,10 +176,7 @@ func newServer(d serverDeps) *Server {
 		auth = newAuthHandler(logger, d.authMethods, d.sessionMgr, csrf, d.sessionTTL)
 	}
 
-	modules, moduleSet, err := indexModules(d.modules)
-	if err != nil {
-		panic(fmt.Sprintf("console: %v", err))
-	}
+	modules, moduleSet := indexModules(d.modules)
 
 	var web http.Handler
 	if d.webDistDir != "" {

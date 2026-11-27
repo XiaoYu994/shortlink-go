@@ -229,41 +229,9 @@ func ValidateMeta(m Meta) error {
 	return nil
 }
 
-/*
-NormalizeMeta 强制满足数据库约束 ck_audit_logs_actor_consistency 与长度限制：
-  - user / api_key 必须携带正整数 ActorID，否则退回为 system + nil ActorID；
-  - operator / system 一律清掉 ActorID；
-  - 未知执行主体退回为 system + nil ActorID；
-  - RequestID 清洗非法字节并按 UTF-8 rune 边界截断到最多 128 字节，避免半个多字节字符触发 PG 22021 错误。
-*/
-func NormalizeMeta(m Meta) Meta {
-	reqID := truncateUTF8(m.RequestID, maxRequestIDLen)
-
-	switch m.ActorKind {
-	case ActorUser, ActorAPIKey:
-		if m.ActorID == nil || *m.ActorID <= 0 {
-			return Meta{
-				ActorKind: ActorSystem,
-				RequestID: reqID,
-			}
-		}
-		id := *m.ActorID
-		return Meta{
-			ActorKind: m.ActorKind,
-			ActorID:   &id,
-			RequestID: reqID,
-		}
-	case ActorOperator, ActorSystem:
-		return Meta{
-			ActorKind: m.ActorKind,
-			RequestID: reqID,
-		}
-	default:
-		return Meta{
-			ActorKind: ActorSystem,
-			RequestID: reqID,
-		}
-	}
+// SanitizeRequestID 清洗非法 UTF-8 字节并按 rune 边界截断到最多 128 字节，避免触发 PostgreSQL UTF-8 写入错误。
+func SanitizeRequestID(s string) string {
+	return truncateUTF8(s, maxRequestIDLen)
 }
 
 func truncateUTF8(s string, maxBytes int) string {

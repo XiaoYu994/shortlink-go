@@ -51,12 +51,11 @@ LIMIT $4`
 )
 
 func auditMetaTuple(m audit.Meta) (string, sql.NullInt64, string) {
-	norm := audit.NormalizeMeta(m)
 	var actorID sql.NullInt64
-	if norm.ActorID != nil {
-		actorID = sql.NullInt64{Int64: *norm.ActorID, Valid: true}
+	if m.ActorID != nil {
+		actorID = sql.NullInt64{Int64: *m.ActorID, Valid: true}
 	}
-	return string(norm.ActorKind), actorID, norm.RequestID
+	return string(m.ActorKind), actorID, audit.SanitizeRequestID(m.RequestID)
 }
 
 // requireAuditMeta 强制校验 ctx 携带合法审计元数据（fail-closed，见 ADR 0025）。
