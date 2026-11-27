@@ -11,6 +11,7 @@ README 只保留项目概览和入口，架构、接口、运行方式和演进�
 | [runbook.md](runbook.md) | 本地启动、创建短链、数据库操作、排错 |
 | [conventions.md](conventions.md) | Go 工程规范、编码约定与新项目起手参考 |
 | [roadmap.md](roadmap.md) | 学习路线和阶段进度 |
+| [saas-evolution-plan.md](saas-evolution-plan.md) | 真实 SaaS 平台闭环演进与全栈 / SQL 进阶规划 |
 | [adr/README.md](adr/README.md) | 架构决策记录索引（向前看的决定） |
 | [postmortems/README.md](postmortems/README.md) | 问题复盘与调优记录（向后看的证据与护栏） |
 
