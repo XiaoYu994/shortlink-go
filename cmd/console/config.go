@@ -4,9 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
-	"net/netip"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -14,11 +11,8 @@ import (
 	"shortlink/internal/cache"
 	"shortlink/internal/config"
 	"shortlink/internal/identity"
-	"shortlink/internal/job"
-	"shortlink/internal/link"
 	"shortlink/internal/logx"
 	"shortlink/internal/mailer"
-	"shortlink/internal/risk"
 	"shortlink/internal/sms"
 	"shortlink/internal/webhook"
 )
@@ -27,29 +21,23 @@ const (
 	defaultConsoleAddr        = ":8081"
 	defaultConsoleIPRateLimit = 60
 	defaultConsoleIPRateBurst = 120
-
-	defaultWorkerCleanupInterval = time.Hour
-	defaultWorkerRetention       = 7 * 24 * time.Hour
-	defaultWorkerLongRetention   = 30 * 24 * time.Hour
-	defaultStatsRetentionDays    = 90
-	defaultAuditRetentionDays    = 180
 )
 
 // ConsoleConfig 是管理进程 HTTP 模式（cmd/console serve）的完整启动配置。
 type ConsoleConfig struct {
 	config.BaseConfig
 
-	Features            config.FeatureFlags
-	EmailEnabled        bool
-	OIDC                OIDCConfig
-	GitHub              GitHubConfig
-	PhoneOTP            PhoneOTPConfig
-	WebDistDir          string
-	PublicBaseURL       string
-	WebhookSecretKey    string
-	WebhookAllowedPorts []int
-	TrustProxyHeaders   bool
-	TrustedProxyCIDRs   []netip.Prefix
+	Features             config.FeatureFlags
+	EmailEnabled         bool
+	OIDC                 OIDCConfig
+	GitHub               GitHubConfig
+	PhoneOTP             PhoneOTPConfig
+	PublicURL            string
+	PublicBaseURL        string
+	WebDistDir           string
+	WebhookSecretKey     string
+	OutboundAllowedPorts []int
+	Proxy                config.ProxyConfig
 	// IPRateLimit 与 IPRateBurst 控制管理 API 鉴权前按源 IP 限流（0 表示关闭）。
 	IPRateLimit int
 	IPRateBurst int
@@ -73,7 +61,7 @@ type OIDCConfig struct {
 	RedirectURL  string
 }
 
-// Enabled 报告是否配置了 OIDC 登录。validate 已保证四个字段同空或同非空。
+// Enabled 报告是否配置了 OIDC 登录。validate 已保证所需参数全配或全空。
 func (c OIDCConfig) Enabled() bool {
 	return c.Issuer != ""
 }
@@ -100,7 +88,7 @@ type GitHubConfig struct {
 	RedirectURL  string
 }
 
-// Enabled 报告是否配置了 GitHub 登录。validate 已保证三个字段同空或同非空。
+// Enabled 报告是否配置了 GitHub 登录。validate 已保证所需参数全配或全空。
 func (c GitHubConfig) Enabled() bool {
 	return c.ClientID != ""
 }
@@ -138,11 +126,11 @@ func (c PhoneOTPConfig) Enabled() bool {
 	return c.Provider != ""
 }
 
-// LogValue 掩码 WebhookToken，避免日志泄露短信网关凭据。
+// LogValue 掩码 WebhookToken 与 WebhookURL 潜在凭据，避免日志泄露短信网关凭据。
 func (c PhoneOTPConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("provider", c.Provider),
-		slog.String("webhook_url", c.WebhookURL),
+		slog.String("webhook_url", logx.RedactURL(c.WebhookURL)),
 		slog.String("webhook_token", logx.RedactSecret(c.WebhookToken)),
 		slog.Int("allowed_ports_count", len(c.AllowedPorts)),
 		slog.Duration("timeout", c.Timeout),
@@ -159,21 +147,21 @@ func (c PhoneOTPConfig) String() string {
 	return c.LogValue().String()
 }
 
-// LogValue 掩码基础连接串及 OIDC/GitHub/SMS 客户端密钥。
+// LogValue 掩码基础连接串及 OIDC/GitHub/SMS/Webhook 客户端密钥。
 func (cfg ConsoleConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Any("base", cfg.BaseConfig.LogValue()),
 		slog.Any("features", cfg.Features.LogValue()),
 		slog.Bool("email_enabled", cfg.EmailEnabled),
+		slog.String("public_url", cfg.PublicURL),
 		slog.Any("oidc", cfg.OIDC.LogValue()),
 		slog.Any("github", cfg.GitHub.LogValue()),
 		slog.Any("phone_otp", cfg.PhoneOTP.LogValue()),
 		slog.String("web_dist_dir", cfg.WebDistDir),
 		slog.String("public_base_url", cfg.PublicBaseURL),
 		slog.String("webhook_secret_key", logx.RedactSecret(cfg.WebhookSecretKey)),
-		slog.Int("webhook_allowed_ports_count", len(cfg.WebhookAllowedPorts)),
-		slog.Bool("trust_proxy_headers", cfg.TrustProxyHeaders),
-		slog.Int("trusted_proxy_cidrs_count", len(cfg.TrustedProxyCIDRs)),
+		slog.Int("outbound_allowed_ports_count", len(cfg.OutboundAllowedPorts)),
+		slog.Any("proxy", cfg.Proxy.LogValue()),
 		slog.Int("ip_rate_limit", cfg.IPRateLimit),
 		slog.Int("ip_rate_burst", cfg.IPRateBurst),
 	)
@@ -184,184 +172,115 @@ func (cfg ConsoleConfig) String() string {
 	return cfg.LogValue().String()
 }
 
-// RiskGSBConfig 配置可选的 Google Safe Browsing v4 威胁情报源。APIKey 为空时关闭。
-type RiskGSBConfig struct {
-	APIKey  string
-	BaseURL string
-	Timeout time.Duration
+type consoleSection struct {
+	Addr          string          `yaml:"addr"`
+	OpsAddr       string          `yaml:"ops_addr"`
+	PublicURL     string          `yaml:"public_url"`
+	PublicBaseURL string          `yaml:"public_base_url"`
+	WebDistDir    string          `yaml:"web_dist_dir"`
+	IPRateLimit   *int            `yaml:"ip_rate_limit"`
+	IPRateBurst   *int            `yaml:"ip_rate_burst"`
+	Auth          consoleAuthYAML `yaml:"auth"`
 }
 
-// Enabled 报告是否启用 Google Safe Browsing 查验。
-func (c RiskGSBConfig) Enabled() bool {
-	return c.APIKey != ""
+type consoleAuthYAML struct {
+	OIDC     consoleOIDCYAML     `yaml:"oidc"`
+	GitHub   consoleGitHubYAML   `yaml:"github"`
+	PhoneOTP consolePhoneOTPYAML `yaml:"phone_otp"`
 }
 
-// LogValue 掩码 APIKey。
-func (c RiskGSBConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("api_key", logx.RedactSecret(c.APIKey)),
-		slog.String("base_url", c.BaseURL),
-		slog.Duration("timeout", c.Timeout),
-	)
+type consoleOIDCYAML struct {
+	Issuer   string `yaml:"issuer"`
+	ClientID string `yaml:"client_id"`
+	// client_secret 仅从 OIDC_CLIENT_SECRET 环境变量读取，不定义 yaml tag。
 }
 
-// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 GSB API Key。
-func (c RiskGSBConfig) String() string {
-	return c.LogValue().String()
+type consoleGitHubYAML struct {
+	ClientID string `yaml:"client_id"`
+	// client_secret 仅从 GITHUB_CLIENT_SECRET 环境变量读取，不定义 yaml tag。
 }
 
-// RiskLLMConfig 配置可选的 OpenAI 兼容 LLM 语义风控器（L3）。BaseURL 与 Model 均非空时启用。
-type RiskLLMConfig struct {
-	BaseURL       string
-	APIKey        string
-	Model         string
-	Mode          string
-	MinConfidence float64
-	Timeout       time.Duration
-	MaxPerMin     int
+type consolePhoneOTPYAML struct {
+	Provider    string           `yaml:"provider"`
+	WebhookURL  string           `yaml:"webhook_url"`
+	Timeout     *config.Duration `yaml:"timeout"`
+	TTL         *config.Duration `yaml:"ttl"`
+	Cooldown    *config.Duration `yaml:"cooldown"`
+	MaxPerHour  *int             `yaml:"max_per_hour"`
+	MaxAttempts *int             `yaml:"max_attempts"`
+	// webhook_token 仅从 SMS_WEBHOOK_TOKEN 环境变量读取，不定义 yaml tag。
 }
 
-// Enabled 报告是否启用 LLM 语义风控。
-func (c RiskLLMConfig) Enabled() bool {
-	return c.BaseURL != "" && c.Model != ""
-}
-
-// LogValue 掩码 APIKey。
-func (c RiskLLMConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("base_url", c.BaseURL),
-		slog.String("api_key", logx.RedactSecret(c.APIKey)),
-		slog.String("model", c.Model),
-		slog.String("mode", c.Mode),
-		slog.Float64("min_confidence", c.MinConfidence),
-		slog.Duration("timeout", c.Timeout),
-		slog.Int("max_per_min", c.MaxPerMin),
-	)
-}
-
-// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出 LLM API Key。
-func (c RiskLLMConfig) String() string {
-	return c.LogValue().String()
+type smtpSection struct {
+	Host     string           `yaml:"host"`
+	Port     *int             `yaml:"port"`
+	Username string           `yaml:"username"`
+	From     string           `yaml:"from"`
+	TLSMode  string           `yaml:"tls_mode"`
+	Timeout  *config.Duration `yaml:"timeout"`
+	// password 仅从 SMTP_PASSWORD 环境变量读取，不定义 yaml tag。
 }
 
 /*
-WorkerConfig 是后台任务进程（cmd/console worker）的完整启动配置（阶段 12、ADR 0020）。
-Addr 来自 WORKER_ADDR，默认空表示不开启运维 HTTP 端口；设置后暴露 /healthz、/readyz 和 /metrics。
+loadConsoleConfig 加载并校验管理进程 HTTP 模式配置（ADR 0035）。
+主监听地址优先读 CONSOLE_ADDR，其次 console.addr（默认 :8081）；独立运维端口读 CONSOLE_OPS_ADDR / console.ops_addr。
+OIDC/GitHub 回调与 PhoneOTP SecureCookies 均由 console.public_url 自动推导（单一事实来源）。
 */
-type WorkerConfig struct {
-	config.BaseConfig
-
-	Features                      config.FeatureFlags
-	Concurrency                   int
-	MaxPerTenant                  int
-	PollInterval                  time.Duration
-	LeaseDuration                 time.Duration
-	JobTimeout                    time.Duration
-	ReapInterval                  time.Duration
-	CleanupInterval               time.Duration
-	SessionRetention              time.Duration
-	DoneJobRetention              time.Duration
-	DeadJobRetention              time.Duration
-	InvitationRetention           time.Duration
-	OTPRetention                  time.Duration
-	StatsRetentionDays            int
-	AuditRetentionDays            int
-	RiskFetchTimeout              time.Duration
-	RiskHostRateLimit             int
-	RiskAllowedHosts              []string
-	RiskBlockedHosts              map[string]link.BanReason
-	RiskBlockedKeywords           map[string]link.BanReason
-	RiskAllowedPorts              []int
-	RiskGSB                       RiskGSBConfig
-	RiskLLM                       RiskLLMConfig
-	WebhookSecretKey              string
-	WebhookAllowedPorts           []int
-	WebhookTimeout                time.Duration
-	WebhookHostRateLimit          int
-	WebhookRetryBaseDelay         time.Duration
-	WebhookRetryMaxDelay          time.Duration
-	WebhookMaxConsecutiveFailures int
-	WebhookDeliveryRetention      time.Duration
-	ConsolePublicURL              string
-	SMTP                          mailer.SMTPConfig
-}
-
-// StoreFeatures 推导后台任务进程写路径（如风控 BanIfURL）需要挂载的事务钩子特性集。
-func (cfg WorkerConfig) StoreFeatures() StoreFeatures {
-	return StoreFeatures{
-		Analytics: cfg.Features.Analytics,
-		RiskScan:  cfg.Features.RiskScan,
-		Webhooks:  cfg.WebhookSecretKey != "",
-		Email:     cfg.SMTP.Enabled(),
+func loadConsoleConfig(configPath string) (ConsoleConfig, error) {
+	file, err := config.LoadFile(config.ResolvePath(configPath))
+	if err != nil {
+		return ConsoleConfig{}, err
 	}
-}
 
-// LogValue 掩码基础连接串、Webhook 主密钥、SMTP 密码与风控外部 API 密钥，保留非敏感调度与风控参数。
-func (cfg WorkerConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.Any("base", cfg.BaseConfig.LogValue()),
-		slog.Any("features", cfg.Features.LogValue()),
-		slog.Int("concurrency", cfg.Concurrency),
-		slog.Int("max_per_tenant", cfg.MaxPerTenant),
-		slog.Duration("poll_interval", cfg.PollInterval),
-		slog.Duration("lease_duration", cfg.LeaseDuration),
-		slog.Duration("job_timeout", cfg.JobTimeout),
-		slog.Duration("reap_interval", cfg.ReapInterval),
-		slog.Duration("cleanup_interval", cfg.CleanupInterval),
-		slog.Duration("session_retention", cfg.SessionRetention),
-		slog.Duration("done_job_retention", cfg.DoneJobRetention),
-		slog.Duration("dead_job_retention", cfg.DeadJobRetention),
-		slog.Duration("invitation_retention", cfg.InvitationRetention),
-		slog.Duration("otp_retention", cfg.OTPRetention),
-		slog.Int("stats_retention_days", cfg.StatsRetentionDays),
-		slog.Int("audit_retention_days", cfg.AuditRetentionDays),
-		slog.Duration("risk_fetch_timeout", cfg.RiskFetchTimeout),
-		slog.Int("risk_host_rate_limit", cfg.RiskHostRateLimit),
-		slog.Int("risk_allowed_hosts_count", len(cfg.RiskAllowedHosts)),
-		slog.Int("risk_blocked_hosts_count", len(cfg.RiskBlockedHosts)),
-		slog.Int("risk_blocked_keywords_count", len(cfg.RiskBlockedKeywords)),
-		slog.Int("risk_allowed_ports_count", len(cfg.RiskAllowedPorts)),
-		slog.Any("risk_gsb", cfg.RiskGSB.LogValue()),
-		slog.Any("risk_llm", cfg.RiskLLM.LogValue()),
-		slog.String("webhook_secret_key", logx.RedactSecret(cfg.WebhookSecretKey)),
-		slog.Int("webhook_allowed_ports_count", len(cfg.WebhookAllowedPorts)),
-		slog.Duration("webhook_timeout", cfg.WebhookTimeout),
-		slog.Int("webhook_host_rate_limit", cfg.WebhookHostRateLimit),
-		slog.Duration("webhook_retry_base_delay", cfg.WebhookRetryBaseDelay),
-		slog.Duration("webhook_retry_max_delay", cfg.WebhookRetryMaxDelay),
-		slog.Int("webhook_max_consecutive_failures", cfg.WebhookMaxConsecutiveFailures),
-		slog.Duration("webhook_delivery_retention", cfg.WebhookDeliveryRetention),
-		slog.String("console_public_url", cfg.ConsolePublicURL),
-		slog.Any("smtp", cfg.SMTP.LogValue()),
-	)
-}
+	var sec consoleSection
+	if err := config.DecodeSection(file.Console, &sec); err != nil {
+		return ConsoleConfig{}, fmt.Errorf("console: %w", err)
+	}
 
-// String 实现 fmt.Stringer，防止 %+v/%v 意外打印出基础连接串凭据。
-func (cfg WorkerConfig) String() string {
-	return cfg.LogValue().String()
-}
+	addr := defaultConsoleAddr
+	if v := strings.TrimSpace(sec.Addr); v != "" {
+		addr = v
+	}
+	opsAddr := strings.TrimSpace(sec.OpsAddr)
+	addr = config.EnvString("CONSOLE_ADDR", addr)
+	opsAddr = config.EnvString("CONSOLE_OPS_ADDR", opsAddr)
 
-/*
-loadConsoleConfig 加载并校验管理进程 HTTP 模式配置。
-监听地址只读 CONSOLE_ADDR（默认 :8081），独立运维端口只读 CONSOLE_OPS_ADDR，
-避免在共享 .env 中与跳转进程 ADDR/OPS_ADDR 发生端口碰撞。
-*/
-func loadConsoleConfig() (ConsoleConfig, error) {
-	base, err := config.LoadBaseConfig(config.BaseConfigDefaults{
-		Addr:              config.EnvString("CONSOLE_ADDR", defaultConsoleAddr),
-		OpsAddr:           os.Getenv("CONSOLE_OPS_ADDR"),
+	base, err := config.LoadBaseConfig(file, config.BaseConfigDefaults{
+		Addr:              addr,
+		OpsAddr:           opsAddr,
 		CacheFetchTimeout: cache.DefaultFetchTimeout,
 	})
 	if err != nil {
 		return ConsoleConfig{}, err
 	}
-	features, err := config.LoadFeatureFlags()
+	features, err := config.LoadFeatureFlags(file)
 	if err != nil {
 		return ConsoleConfig{}, err
 	}
-	emailEnabled, err := loadEmailEnabledFromEnv()
+	proxy, err := config.LoadProxyConfig(file)
 	if err != nil {
 		return ConsoleConfig{}, err
+	}
+	outboundPorts, err := config.LoadOutboundAllowedPorts(file)
+	if err != nil {
+		return ConsoleConfig{}, err
+	}
+	emailEnabled, err := loadEmailEnabled(file)
+	if err != nil {
+		return ConsoleConfig{}, err
+	}
+
+	publicURL := strings.TrimRight(strings.TrimSpace(sec.PublicURL), "/")
+	if publicURL != "" {
+		if err := config.ValidateIssuerURL("console.public_url", publicURL); err != nil {
+			return ConsoleConfig{}, err
+		}
+	}
+	publicBaseURL := strings.TrimRight(strings.TrimSpace(sec.PublicBaseURL), "/")
+	if publicBaseURL != "" {
+		if err := config.ValidateIssuerURL("console.public_base_url", publicBaseURL); err != nil {
+			return ConsoleConfig{}, err
+		}
 	}
 
 	cfg := ConsoleConfig{
@@ -369,530 +288,177 @@ func loadConsoleConfig() (ConsoleConfig, error) {
 		Features:     features,
 		EmailEnabled: emailEnabled,
 		OIDC: OIDCConfig{
-			Issuer:       os.Getenv("OIDC_ISSUER"),
-			ClientID:     os.Getenv("OIDC_CLIENT_ID"),
+			Issuer:       strings.TrimSpace(sec.Auth.OIDC.Issuer),
+			ClientID:     strings.TrimSpace(sec.Auth.OIDC.ClientID),
 			ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
-			RedirectURL:  os.Getenv("OIDC_REDIRECT_URL"),
 		},
 		GitHub: GitHubConfig{
-			ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+			ClientID:     strings.TrimSpace(sec.Auth.GitHub.ClientID),
 			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
-			RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
 		},
 		PhoneOTP: PhoneOTPConfig{
-			Provider:     strings.ToLower(strings.TrimSpace(os.Getenv("SMS_PROVIDER"))),
-			WebhookURL:   strings.TrimSpace(os.Getenv("SMS_WEBHOOK_URL")),
-			WebhookToken: strings.TrimSpace(os.Getenv("SMS_WEBHOOK_TOKEN")),
-			Timeout:      sms.DefaultTimeout,
-			TTL:          identity.DefaultOTPTTL,
-			Cooldown:     identity.DefaultOTPCooldown,
-			MaxPerHour:   identity.DefaultOTPMaxPerHour,
-			MaxAttempts:  identity.DefaultOTPMaxAttempts,
+			Provider:      strings.ToLower(strings.TrimSpace(sec.Auth.PhoneOTP.Provider)),
+			WebhookURL:    strings.TrimSpace(sec.Auth.PhoneOTP.WebhookURL),
+			WebhookToken:  strings.TrimSpace(os.Getenv("SMS_WEBHOOK_TOKEN")),
+			AllowedPorts:  outboundPorts,
+			Timeout:       sms.DefaultTimeout,
+			TTL:           identity.DefaultOTPTTL,
+			Cooldown:      identity.DefaultOTPCooldown,
+			MaxPerHour:    identity.DefaultOTPMaxPerHour,
+			MaxAttempts:   identity.DefaultOTPMaxAttempts,
+			SecureCookies: strings.HasPrefix(strings.ToLower(publicURL), "https://"),
 		},
-		WebDistDir:       strings.TrimSpace(os.Getenv("WEB_DIST_DIR")),
-		PublicBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
-		WebhookSecretKey: strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
-		IPRateLimit:      defaultConsoleIPRateLimit,
-		IPRateBurst:      defaultConsoleIPRateBurst,
+		PublicURL:            publicURL,
+		PublicBaseURL:        publicBaseURL,
+		WebDistDir:           strings.TrimSpace(sec.WebDistDir),
+		WebhookSecretKey:     strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
+		OutboundAllowedPorts: outboundPorts,
+		Proxy:                proxy,
+		IPRateLimit:          defaultConsoleIPRateLimit,
+		IPRateBurst:          defaultConsoleIPRateBurst,
+	}
+
+	if sec.Auth.PhoneOTP.Timeout != nil {
+		cfg.PhoneOTP.Timeout = sec.Auth.PhoneOTP.Timeout.Std()
+	}
+	if sec.Auth.PhoneOTP.TTL != nil {
+		cfg.PhoneOTP.TTL = sec.Auth.PhoneOTP.TTL.Std()
+	}
+	if sec.Auth.PhoneOTP.Cooldown != nil {
+		cfg.PhoneOTP.Cooldown = sec.Auth.PhoneOTP.Cooldown.Std()
+	}
+	if sec.Auth.PhoneOTP.MaxPerHour != nil {
+		cfg.PhoneOTP.MaxPerHour = *sec.Auth.PhoneOTP.MaxPerHour
+	}
+	if sec.Auth.PhoneOTP.MaxAttempts != nil {
+		cfg.PhoneOTP.MaxAttempts = *sec.Auth.PhoneOTP.MaxAttempts
+	}
+
+	if sec.IPRateLimit != nil {
+		cfg.IPRateLimit = *sec.IPRateLimit
+	}
+	if sec.IPRateBurst != nil {
+		cfg.IPRateBurst = *sec.IPRateBurst
+	} else if sec.IPRateLimit != nil && cfg.IPRateLimit > 0 {
+		cfg.IPRateBurst = max(cfg.IPRateLimit*2, 1)
+	}
+
+	if cfg.OpsAddr != "" && cfg.OpsAddr == cfg.Addr {
+		return ConsoleConfig{}, errors.New("console.ops_addr must differ from addr")
 	}
 	if cfg.WebhookSecretKey != "" {
 		if _, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey); err != nil {
 			return ConsoleConfig{}, err
 		}
 	}
-	if raw := os.Getenv("WEBHOOK_ALLOWED_PORTS"); raw != "" {
-		ports, err := config.ParsePorts(raw)
-		if err != nil {
-			return ConsoleConfig{}, fmt.Errorf("WEBHOOK_ALLOWED_PORTS: %w", err)
-		}
-		cfg.WebhookAllowedPorts = ports
-	}
-	if cfg.OpsAddr != "" && cfg.OpsAddr == cfg.Addr {
-		return ConsoleConfig{}, errors.New("CONSOLE_OPS_ADDR must differ from CONSOLE_ADDR")
-	}
-	if err := validateOIDC(cfg.OIDC); err != nil {
+	if err := validateOIDC(cfg.OIDC, cfg.PublicURL); err != nil {
 		return ConsoleConfig{}, err
 	}
-	if err := validateGitHub(cfg.GitHub); err != nil {
+	if cfg.OIDC.Enabled() {
+		cfg.OIDC.RedirectURL = cfg.PublicURL + "/api/v1/auth/oidc/callback"
+	}
+	if err := validateGitHub(cfg.GitHub, cfg.PublicURL); err != nil {
 		return ConsoleConfig{}, err
 	}
-	if raw := os.Getenv("SMS_ALLOWED_PORTS"); raw != "" {
-		ports, err := config.ParsePorts(raw)
-		if err != nil {
-			return ConsoleConfig{}, fmt.Errorf("SMS_ALLOWED_PORTS: %w", err)
-		}
-		cfg.PhoneOTP.AllowedPorts = ports
-	}
-	if cfg.PhoneOTP.Timeout, err = config.EnvDuration("SMS_TIMEOUT", cfg.PhoneOTP.Timeout); err != nil {
-		return ConsoleConfig{}, err
-	}
-	if cfg.PhoneOTP.TTL, err = config.EnvDuration("SMS_OTP_TTL", cfg.PhoneOTP.TTL); err != nil {
-		return ConsoleConfig{}, err
-	}
-	if cfg.PhoneOTP.Cooldown, err = config.EnvDuration("SMS_OTP_COOLDOWN", cfg.PhoneOTP.Cooldown); err != nil {
-		return ConsoleConfig{}, err
-	}
-	if cfg.PhoneOTP.MaxPerHour, err = config.EnvInt("SMS_OTP_MAX_PER_HOUR", cfg.PhoneOTP.MaxPerHour); err != nil {
-		return ConsoleConfig{}, err
-	}
-	if cfg.PhoneOTP.MaxAttempts, err = config.EnvInt("SMS_OTP_MAX_ATTEMPTS", cfg.PhoneOTP.MaxAttempts); err != nil {
-		return ConsoleConfig{}, err
-	}
-	if cfg.PhoneOTP.SecureCookies, err = config.EnvBool("SMS_SECURE_COOKIES", false); err != nil {
-		return ConsoleConfig{}, err
+	if cfg.GitHub.Enabled() {
+		cfg.GitHub.RedirectURL = cfg.PublicURL + "/api/v1/auth/github/callback"
 	}
 	if err := validatePhoneOTP(cfg.PhoneOTP); err != nil {
 		return ConsoleConfig{}, err
 	}
-	if cfg.PublicBaseURL != "" {
-		if err := config.ValidateIssuerURL("PUBLIC_BASE_URL", cfg.PublicBaseURL); err != nil {
-			return ConsoleConfig{}, err
-		}
-	}
-	if cfg.TrustProxyHeaders, err = config.EnvBool("TRUST_PROXY_HEADERS", false); err != nil {
-		return ConsoleConfig{}, err
-	}
-	if raw := os.Getenv("TRUSTED_PROXY_CIDRS"); raw != "" {
-		cidrs, err := config.ParseCIDRs(raw)
-		if err != nil {
-			return ConsoleConfig{}, fmt.Errorf("TRUSTED_PROXY_CIDRS: %w", err)
-		}
-		if !cfg.TrustProxyHeaders {
-			return ConsoleConfig{}, errors.New("TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HEADERS=true")
-		}
-		cfg.TrustedProxyCIDRs = cidrs
-	}
-	if cfg.IPRateLimit, err = config.EnvInt("CONSOLE_IP_RATE_LIMIT", cfg.IPRateLimit); err != nil {
-		return ConsoleConfig{}, err
-	}
 	if cfg.IPRateLimit < 0 {
-		return ConsoleConfig{}, errors.New("CONSOLE_IP_RATE_LIMIT must not be negative")
-	}
-	if os.Getenv("CONSOLE_IP_RATE_BURST") != "" {
-		if cfg.IPRateBurst, err = config.EnvInt("CONSOLE_IP_RATE_BURST", cfg.IPRateBurst); err != nil {
-			return ConsoleConfig{}, err
-		}
-	} else if cfg.IPRateLimit > 0 && os.Getenv("CONSOLE_IP_RATE_LIMIT") != "" {
-		cfg.IPRateBurst = max(cfg.IPRateLimit*2, 1)
+		return ConsoleConfig{}, errors.New("console.ip_rate_limit must not be negative")
 	}
 	if cfg.IPRateLimit > 0 && cfg.IPRateBurst <= 0 {
-		return ConsoleConfig{}, errors.New("CONSOLE_IP_RATE_BURST must be positive when CONSOLE_IP_RATE_LIMIT is enabled")
+		return ConsoleConfig{}, errors.New("console.ip_rate_burst must be positive when console.ip_rate_limit is enabled")
 	}
 	return cfg, nil
 }
 
-/*
-loadWorkerConfig 加载并校验后台任务进程（cmd/console worker）的配置。
-监听地址只读 WORKER_ADDR（默认空不开），不要求 VISITOR_SALT，不读取 OIDC_* / GITHUB_*。
-*/
-func loadWorkerConfig() (WorkerConfig, error) {
-	base, err := config.LoadBaseConfig(config.BaseConfigDefaults{
-		Addr:              os.Getenv("WORKER_ADDR"),
-		CacheFetchTimeout: cache.DefaultFetchTimeout,
-	})
-	if err != nil {
-		return WorkerConfig{}, err
+func loadSMTPFromFile(file *config.File) (mailer.SMTPConfig, error) {
+	cfg := mailer.SMTPConfig{
+		Port:     mailer.DefaultSMTPPort,
+		Password: os.Getenv("SMTP_PASSWORD"),
+		TLSMode:  mailer.TLSModeStartTLS,
+		Timeout:  mailer.DefaultSMTPTimeout,
 	}
-	features, err := config.LoadFeatureFlags()
-	if err != nil {
-		return WorkerConfig{}, err
+	if file == nil {
+		return cfg, nil
 	}
-
-	cfg := WorkerConfig{
-		BaseConfig:          base,
-		Features:            features,
-		Concurrency:         job.DefaultConcurrency,
-		MaxPerTenant:        job.DefaultMaxPerTenant,
-		PollInterval:        job.DefaultPollInterval,
-		LeaseDuration:       job.DefaultLeaseDuration,
-		JobTimeout:          job.DefaultJobTimeout,
-		ReapInterval:        job.DefaultReapInterval,
-		CleanupInterval:     defaultWorkerCleanupInterval,
-		SessionRetention:    defaultWorkerRetention,
-		DoneJobRetention:    defaultWorkerRetention,
-		DeadJobRetention:    defaultWorkerLongRetention,
-		InvitationRetention: defaultWorkerLongRetention,
-		OTPRetention:        identity.DefaultOTPRetention,
-		StatsRetentionDays:  defaultStatsRetentionDays,
-		AuditRetentionDays:  defaultAuditRetentionDays,
-		RiskFetchTimeout:    risk.DefaultFetchTimeout,
-		RiskHostRateLimit:   risk.DefaultHostRateLimit,
-		RiskGSB: RiskGSBConfig{
-			APIKey:  strings.TrimSpace(os.Getenv("RISK_GSB_API_KEY")),
-			BaseURL: strings.TrimRight(strings.TrimSpace(config.EnvString("RISK_GSB_BASE_URL", risk.DefaultGSBBaseURL)), "/"),
-			Timeout: risk.DefaultGSBTimeout,
-		},
-		RiskLLM: RiskLLMConfig{
-			BaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("RISK_LLM_BASE_URL")), "/"),
-			APIKey:        strings.TrimSpace(os.Getenv("RISK_LLM_API_KEY")),
-			Model:         strings.TrimSpace(os.Getenv("RISK_LLM_MODEL")),
-			Mode:          strings.ToLower(strings.TrimSpace(config.EnvString("RISK_LLM_MODE", risk.LLMModeBan))),
-			MinConfidence: risk.DefaultLLMMinConfidence,
-			Timeout:       risk.DefaultLLMTimeout,
-			MaxPerMin:     risk.DefaultLLMMaxPerMin,
-		},
-		WebhookSecretKey:              strings.TrimSpace(os.Getenv("WEBHOOK_SECRET_KEY")),
-		WebhookTimeout:                webhook.DefaultTimeout,
-		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
-		WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
-		WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
-		WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
-		WebhookDeliveryRetention:      webhook.DefaultDeliveryRetention,
-		ConsolePublicURL:              strings.TrimRight(strings.TrimSpace(os.Getenv("CONSOLE_PUBLIC_URL")), "/"),
-		SMTP: mailer.SMTPConfig{
-			Host:     strings.TrimSpace(os.Getenv("SMTP_HOST")),
-			Port:     mailer.DefaultSMTPPort,
-			Username: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
-			Password: os.Getenv("SMTP_PASSWORD"),
-			From:     strings.TrimSpace(os.Getenv("SMTP_FROM")),
-			TLSMode:  strings.ToLower(config.EnvString("SMTP_TLS_MODE", mailer.TLSModeStartTLS)),
-			Timeout:  mailer.DefaultSMTPTimeout,
-		},
+	var sec smtpSection
+	if err := config.DecodeSection(file.SMTP, &sec); err != nil {
+		return mailer.SMTPConfig{}, fmt.Errorf("smtp: %w", err)
 	}
-
-	if cfg.Concurrency, err = config.EnvInt("WORKER_CONCURRENCY", cfg.Concurrency); err != nil {
-		return WorkerConfig{}, err
+	cfg.Host = strings.TrimSpace(sec.Host)
+	if sec.Port != nil {
+		cfg.Port = *sec.Port
 	}
-	if cfg.MaxPerTenant, err = config.EnvInt("WORKER_MAX_PER_TENANT", cfg.MaxPerTenant); err != nil {
-		return WorkerConfig{}, err
+	cfg.Username = strings.TrimSpace(sec.Username)
+	cfg.From = strings.TrimSpace(sec.From)
+	if mode := strings.ToLower(strings.TrimSpace(sec.TLSMode)); mode != "" {
+		cfg.TLSMode = mode
 	}
-	if cfg.PollInterval, err = config.EnvDuration("WORKER_POLL_INTERVAL", cfg.PollInterval); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.LeaseDuration, err = config.EnvDuration("WORKER_LEASE_DURATION", cfg.LeaseDuration); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.JobTimeout, err = config.EnvDuration("WORKER_JOB_TIMEOUT", cfg.JobTimeout); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.ReapInterval, err = config.EnvDuration("WORKER_REAP_INTERVAL", cfg.ReapInterval); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.CleanupInterval, err = config.EnvDuration("WORKER_CLEANUP_INTERVAL", cfg.CleanupInterval); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.SessionRetention, err = config.EnvDuration("WORKER_SESSION_RETENTION", cfg.SessionRetention); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.DoneJobRetention, err = config.EnvDuration("WORKER_DONE_JOB_RETENTION", cfg.DoneJobRetention); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.DeadJobRetention, err = config.EnvDuration("WORKER_DEAD_JOB_RETENTION", cfg.DeadJobRetention); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.InvitationRetention, err = config.EnvDuration("WORKER_INVITATION_RETENTION", cfg.InvitationRetention); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.OTPRetention, err = config.EnvDuration("WORKER_OTP_RETENTION", cfg.OTPRetention); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.StatsRetentionDays, err = config.EnvInt("WORKER_STATS_RETENTION_DAYS", cfg.StatsRetentionDays); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.AuditRetentionDays, err = config.EnvInt("WORKER_AUDIT_RETENTION_DAYS", cfg.AuditRetentionDays); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.RiskFetchTimeout, err = config.EnvDuration("RISK_FETCH_TIMEOUT", cfg.RiskFetchTimeout); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.RiskHostRateLimit, err = config.EnvInt("RISK_HOST_RATE_LIMIT", cfg.RiskHostRateLimit); err != nil {
-		return WorkerConfig{}, err
-	}
-	if raw := os.Getenv("RISK_ALLOWED_HOSTS"); raw != "" {
-		cfg.RiskAllowedHosts = risk.ParseHostList(raw)
-	}
-	if raw := os.Getenv("RISK_BLOCKED_HOSTS"); raw != "" {
-		rules, err := risk.ParseHostRules(raw)
-		if err != nil {
-			return WorkerConfig{}, fmt.Errorf("RISK_BLOCKED_HOSTS: %w", err)
-		}
-		cfg.RiskBlockedHosts = rules
-	}
-	if raw := os.Getenv("RISK_BLOCKED_KEYWORDS"); raw != "" {
-		rules, err := risk.ParseKeywordRules(raw)
-		if err != nil {
-			return WorkerConfig{}, fmt.Errorf("RISK_BLOCKED_KEYWORDS: %w", err)
-		}
-		cfg.RiskBlockedKeywords = rules
-	}
-	if raw := os.Getenv("RISK_ALLOWED_PORTS"); raw != "" {
-		ports, err := config.ParsePorts(raw)
-		if err != nil {
-			return WorkerConfig{}, fmt.Errorf("RISK_ALLOWED_PORTS: %w", err)
-		}
-		cfg.RiskAllowedPorts = ports
-	}
-	if cfg.RiskGSB.Timeout, err = config.EnvDuration("RISK_GSB_TIMEOUT", cfg.RiskGSB.Timeout); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.RiskLLM.MinConfidence, err = config.EnvFloat("RISK_LLM_MIN_CONFIDENCE", cfg.RiskLLM.MinConfidence); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.RiskLLM.Timeout, err = config.EnvDuration("RISK_LLM_TIMEOUT", cfg.RiskLLM.Timeout); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.RiskLLM.MaxPerMin, err = config.EnvInt("RISK_LLM_MAX_PER_MIN", cfg.RiskLLM.MaxPerMin); err != nil {
-		return WorkerConfig{}, err
-	}
-	if raw := os.Getenv("WEBHOOK_ALLOWED_PORTS"); raw != "" {
-		ports, err := config.ParsePorts(raw)
-		if err != nil {
-			return WorkerConfig{}, fmt.Errorf("WEBHOOK_ALLOWED_PORTS: %w", err)
-		}
-		cfg.WebhookAllowedPorts = ports
-	}
-	if cfg.WebhookTimeout, err = config.EnvDuration("WEBHOOK_TIMEOUT", cfg.WebhookTimeout); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.WebhookHostRateLimit, err = config.EnvInt("WEBHOOK_HOST_RATE_LIMIT", cfg.WebhookHostRateLimit); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.WebhookRetryBaseDelay, err = config.EnvDuration("WEBHOOK_RETRY_BASE_DELAY", cfg.WebhookRetryBaseDelay); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.WebhookRetryMaxDelay, err = config.EnvDuration("WEBHOOK_RETRY_MAX_DELAY", cfg.WebhookRetryMaxDelay); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.WebhookMaxConsecutiveFailures, err = config.EnvInt("WEBHOOK_MAX_CONSECUTIVE_FAILURES", cfg.WebhookMaxConsecutiveFailures); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.WebhookDeliveryRetention, err = config.EnvDuration("WORKER_WEBHOOK_DELIVERY_RETENTION", cfg.WebhookDeliveryRetention); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.SMTP.Port, err = config.EnvInt("SMTP_PORT", cfg.SMTP.Port); err != nil {
-		return WorkerConfig{}, err
-	}
-	if cfg.SMTP.Timeout, err = config.EnvDuration("SMTP_TIMEOUT", cfg.SMTP.Timeout); err != nil {
-		return WorkerConfig{}, err
-	}
-
-	if err := validateWorker(cfg); err != nil {
-		return WorkerConfig{}, err
+	if sec.Timeout != nil {
+		cfg.Timeout = sec.Timeout.Std()
 	}
 	return cfg, nil
 }
 
-func validateOIDC(c OIDCConfig) error {
-	set := config.CountNonEmpty(c.Issuer, c.ClientID, c.ClientSecret, c.RedirectURL)
-	if set == 0 {
-		return nil
-	}
-	if set != 4 {
-		return errors.New("OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty")
-	}
-	if err := config.ValidateIssuerURL("OIDC_ISSUER", c.Issuer); err != nil {
-		return err
-	}
-	return config.ValidateRedirectURL("OIDC_REDIRECT_URL", c.RedirectURL)
-}
-
-func validateGitHub(c GitHubConfig) error {
-	set := config.CountNonEmpty(c.ClientID, c.ClientSecret, c.RedirectURL)
+func validateOIDC(c OIDCConfig, publicURL string) error {
+	set := config.CountNonEmpty(c.Issuer, c.ClientID, c.ClientSecret)
 	if set == 0 {
 		return nil
 	}
 	if set != 3 {
-		return errors.New("GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL must all be set or all be empty")
+		return errors.New("console.auth.oidc.issuer, console.auth.oidc.client_id, and OIDC_CLIENT_SECRET must all be set or all be empty")
 	}
-	return config.ValidateRedirectURL("GITHUB_REDIRECT_URL", c.RedirectURL)
+	if publicURL == "" {
+		return errors.New("console.public_url is required when OIDC auth is enabled")
+	}
+	return config.ValidateIssuerURL("console.auth.oidc.issuer", c.Issuer)
+}
+
+func validateGitHub(c GitHubConfig, publicURL string) error {
+	set := config.CountNonEmpty(c.ClientID, c.ClientSecret)
+	if set == 0 {
+		return nil
+	}
+	if set != 2 {
+		return errors.New("console.auth.github.client_id and GITHUB_CLIENT_SECRET must both be set or both be empty")
+	}
+	if publicURL == "" {
+		return errors.New("console.public_url is required when GitHub auth is enabled")
+	}
+	return nil
 }
 
 func validatePhoneOTP(c PhoneOTPConfig) error {
 	if c.Provider == "" {
 		if c.WebhookURL != "" || c.WebhookToken != "" {
-			return errors.New("SMS_PROVIDER is required when SMS_WEBHOOK_URL or SMS_WEBHOOK_TOKEN is set")
+			return errors.New("console.auth.phone_otp.provider is required when webhook_url or SMS_WEBHOOK_TOKEN is set")
 		}
 		return nil
 	}
 	if !sms.ValidProvider(c.Provider) {
-		return fmt.Errorf("SMS_PROVIDER must be %q or %q, got %q", sms.ProviderWebhook, sms.ProviderLog, c.Provider)
+		return fmt.Errorf("console.auth.phone_otp.provider must be %q or %q, got %q", sms.ProviderWebhook, sms.ProviderLog, c.Provider)
 	}
 	if c.Provider == sms.ProviderWebhook && c.WebhookURL == "" {
-		return errors.New("SMS_WEBHOOK_URL is required when SMS_PROVIDER=webhook")
+		return errors.New("console.auth.phone_otp.webhook_url is required when provider=webhook")
 	}
 	if c.Timeout <= 0 {
-		return errors.New("SMS_TIMEOUT must be positive")
+		return errors.New("console.auth.phone_otp.timeout must be positive")
 	}
 	if c.TTL <= 0 {
-		return errors.New("SMS_OTP_TTL must be positive")
+		return errors.New("console.auth.phone_otp.ttl must be positive")
 	}
 	if c.Cooldown <= 0 {
-		return errors.New("SMS_OTP_COOLDOWN must be positive")
+		return errors.New("console.auth.phone_otp.cooldown must be positive")
 	}
 	if c.MaxPerHour <= 0 {
-		return errors.New("SMS_OTP_MAX_PER_HOUR must be positive")
+		return errors.New("console.auth.phone_otp.max_per_hour must be positive")
 	}
 	if c.MaxAttempts <= 0 {
-		return errors.New("SMS_OTP_MAX_ATTEMPTS must be positive")
-	}
-	return nil
-}
-
-func validateWorker(cfg WorkerConfig) error {
-	if cfg.Concurrency <= 0 {
-		return errors.New("WORKER_CONCURRENCY must be positive")
-	}
-	if cfg.MaxPerTenant < 0 {
-		return errors.New("WORKER_MAX_PER_TENANT must not be negative")
-	}
-	if cfg.PollInterval <= 0 {
-		return errors.New("WORKER_POLL_INTERVAL must be positive")
-	}
-	if cfg.LeaseDuration <= 0 {
-		return errors.New("WORKER_LEASE_DURATION must be positive")
-	}
-	if cfg.JobTimeout <= 0 {
-		return errors.New("WORKER_JOB_TIMEOUT must be positive")
-	}
-	if cfg.JobTimeout+job.CommitTimeout > cfg.LeaseDuration {
-		return fmt.Errorf("WORKER_JOB_TIMEOUT + %s commit margin must not exceed WORKER_LEASE_DURATION", job.CommitTimeout)
-	}
-	if cfg.ReapInterval <= 0 {
-		return errors.New("WORKER_REAP_INTERVAL must be positive")
-	}
-	if cfg.CleanupInterval <= 0 {
-		return errors.New("WORKER_CLEANUP_INTERVAL must be positive")
-	}
-	if cfg.SessionRetention < 0 {
-		return errors.New("WORKER_SESSION_RETENTION must not be negative")
-	}
-	if cfg.DoneJobRetention < 0 {
-		return errors.New("WORKER_DONE_JOB_RETENTION must not be negative")
-	}
-	if cfg.DeadJobRetention < 0 {
-		return errors.New("WORKER_DEAD_JOB_RETENTION must not be negative")
-	}
-	if cfg.InvitationRetention < 0 {
-		return errors.New("WORKER_INVITATION_RETENTION must not be negative")
-	}
-	if cfg.OTPRetention < 0 {
-		return errors.New("WORKER_OTP_RETENTION must not be negative")
-	}
-	if cfg.StatsRetentionDays <= 0 {
-		return errors.New("WORKER_STATS_RETENTION_DAYS must be positive")
-	}
-	if cfg.AuditRetentionDays <= 0 {
-		return errors.New("WORKER_AUDIT_RETENTION_DAYS must be positive")
-	}
-	if cfg.RiskFetchTimeout <= 0 {
-		return errors.New("RISK_FETCH_TIMEOUT must be positive")
-	}
-	if cfg.RiskFetchTimeout >= cfg.JobTimeout {
-		return errors.New("RISK_FETCH_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
-	}
-	if cfg.RiskHostRateLimit < 0 {
-		return errors.New("RISK_HOST_RATE_LIMIT must not be negative")
-	}
-	if err := validateRiskGSB(cfg.RiskGSB, cfg.JobTimeout); err != nil {
-		return err
-	}
-	if err := validateRiskLLM(cfg.RiskLLM, cfg.JobTimeout); err != nil {
-		return err
-	}
-	if cfg.WebhookSecretKey != "" {
-		if _, err := webhook.ParseMasterKeyHex(cfg.WebhookSecretKey); err != nil {
-			return err
-		}
-	}
-	if cfg.WebhookTimeout <= 0 {
-		return errors.New("WEBHOOK_TIMEOUT must be positive")
-	}
-	if cfg.WebhookTimeout >= cfg.JobTimeout {
-		return errors.New("WEBHOOK_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
-	}
-	if cfg.WebhookHostRateLimit < 0 {
-		return errors.New("WEBHOOK_HOST_RATE_LIMIT must not be negative")
-	}
-	if cfg.WebhookRetryBaseDelay <= 0 {
-		return errors.New("WEBHOOK_RETRY_BASE_DELAY must be positive")
-	}
-	if cfg.WebhookRetryMaxDelay < cfg.WebhookRetryBaseDelay {
-		return errors.New("WEBHOOK_RETRY_MAX_DELAY must not be less than WEBHOOK_RETRY_BASE_DELAY")
-	}
-	if cfg.WebhookMaxConsecutiveFailures < 0 {
-		return errors.New("WEBHOOK_MAX_CONSECUTIVE_FAILURES must not be negative")
-	}
-	if cfg.WebhookDeliveryRetention < 0 {
-		return errors.New("WORKER_WEBHOOK_DELIVERY_RETENTION must not be negative")
-	}
-	if cfg.ConsolePublicURL != "" {
-		if err := config.ValidateIssuerURL("CONSOLE_PUBLIC_URL", cfg.ConsolePublicURL); err != nil {
-			return err
-		}
-	}
-	if cfg.SMTP.Port < 1 || cfg.SMTP.Port > 65535 {
-		return errors.New("SMTP_PORT must be in 1..65535")
-	}
-	if !mailer.ValidTLSMode(cfg.SMTP.TLSMode) {
-		return fmt.Errorf("SMTP_TLS_MODE must be starttls, smtps, or none, got %q", cfg.SMTP.TLSMode)
-	}
-	if cfg.SMTP.Timeout <= 0 {
-		return errors.New("SMTP_TIMEOUT must be positive")
-	}
-	if cfg.SMTP.Timeout >= cfg.JobTimeout {
-		return errors.New("SMTP_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
-	}
-	if (cfg.SMTP.Username == "") != (cfg.SMTP.Password == "") {
-		return errors.New("SMTP_USERNAME and SMTP_PASSWORD must both be set or both be empty")
-	}
-	if cfg.SMTP.Enabled() {
-		if _, err := mailer.NewSMTPSender(cfg.SMTP); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateRiskGSB(g RiskGSBConfig, jobTimeout time.Duration) error {
-	if g.Timeout <= 0 {
-		return errors.New("RISK_GSB_TIMEOUT must be positive")
-	}
-	if !g.Enabled() {
-		return nil
-	}
-	if err := validateRiskEndpointURL("RISK_GSB_BASE_URL", g.BaseURL); err != nil {
-		return err
-	}
-	if g.Timeout >= jobTimeout {
-		return errors.New("RISK_GSB_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
-	}
-	return nil
-}
-
-func validateRiskLLM(l RiskLLMConfig, jobTimeout time.Duration) error {
-	if l.BaseURL != "" || l.Model != "" || l.APIKey != "" {
-		if l.BaseURL == "" || l.Model == "" {
-			return errors.New("RISK_LLM_BASE_URL and RISK_LLM_MODEL must both be set when LLM risk scan is configured")
-		}
-		if err := validateRiskEndpointURL("RISK_LLM_BASE_URL", l.BaseURL); err != nil {
-			return err
-		}
-	}
-	if !risk.ValidLLMMode(l.Mode) {
-		return fmt.Errorf("RISK_LLM_MODE must be %q or %q, got %q", risk.LLMModeBan, risk.LLMModeShadow, l.Mode)
-	}
-	if math.IsNaN(l.MinConfidence) || math.IsInf(l.MinConfidence, 0) || l.MinConfidence <= 0 || l.MinConfidence > 1 {
-		return errors.New("RISK_LLM_MIN_CONFIDENCE must be in (0, 1]")
-	}
-	if l.Timeout <= 0 {
-		return errors.New("RISK_LLM_TIMEOUT must be positive")
-	}
-	if l.Enabled() && l.Timeout >= jobTimeout {
-		return errors.New("RISK_LLM_TIMEOUT must be less than WORKER_JOB_TIMEOUT")
-	}
-	if l.MaxPerMin < 0 {
-		return errors.New("RISK_LLM_MAX_PER_MIN must not be negative")
-	}
-	return nil
-}
-
-func validateRiskEndpointURL(envName, raw string) error {
-	if err := config.ValidateIssuerURL(envName, raw); err != nil {
-		return err
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.User != nil {
-		return fmt.Errorf("%s must not contain userinfo", envName)
+		return errors.New("console.auth.phone_otp.max_attempts must be positive")
 	}
 	return nil
 }

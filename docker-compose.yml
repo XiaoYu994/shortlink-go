@@ -89,7 +89,7 @@ services:
       DATABASE_URL: postgres://shortlink:shortlink@postgres:5432/shortlink?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       VISITOR_SALT: dev-only-visitor-salt
-      TRUST_PROXY_HEADERS: "true"
+      TRUSTED_PROXIES: "*"
       LOG_FORMAT: json
       LOG_LEVEL: info
     ports:

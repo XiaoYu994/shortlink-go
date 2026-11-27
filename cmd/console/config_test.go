@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -26,86 +30,27 @@ import (
 
 func baseConsoleTestEnv() map[string]string {
 	return map[string]string{
-		"ADDR":                              "",
-		"CONSOLE_ADDR":                      "",
-		"CONSOLE_OPS_ADDR":                  "",
-		"DATABASE_URL":                      "postgres://localhost/shortlink",
-		"REDIS_URL":                         "redis://localhost:6379/0",
-		"LOG_LEVEL":                         "",
-		"LOG_FORMAT":                        "",
-		"PPROF_ADDR":                        "",
-		"TRUST_PROXY_HEADERS":               "",
-		"TRUSTED_PROXY_CIDRS":               "",
-		"CONSOLE_IP_RATE_LIMIT":             "",
-		"CONSOLE_IP_RATE_BURST":             "",
-		"OIDC_ISSUER":                       "",
-		"OIDC_CLIENT_ID":                    "",
-		"OIDC_CLIENT_SECRET":                "",
-		"OIDC_REDIRECT_URL":                 "",
-		"GITHUB_CLIENT_ID":                  "",
-		"GITHUB_CLIENT_SECRET":              "",
-		"GITHUB_REDIRECT_URL":               "",
-		"SMS_PROVIDER":                      "",
-		"SMS_WEBHOOK_URL":                   "",
-		"SMS_WEBHOOK_TOKEN":                 "",
-		"SMS_ALLOWED_PORTS":                 "",
-		"SMS_TIMEOUT":                       "",
-		"SMS_OTP_TTL":                       "",
-		"SMS_OTP_COOLDOWN":                  "",
-		"SMS_OTP_MAX_PER_HOUR":              "",
-		"SMS_OTP_MAX_ATTEMPTS":              "",
-		"SMS_SECURE_COOKIES":                "",
-		"WEB_DIST_DIR":                      "",
-		"PUBLIC_BASE_URL":                   "",
-		"WORKER_ADDR":                       "",
-		"WORKER_CONCURRENCY":                "",
-		"WORKER_MAX_PER_TENANT":             "",
-		"WORKER_POLL_INTERVAL":              "",
-		"WORKER_LEASE_DURATION":             "",
-		"WORKER_JOB_TIMEOUT":                "",
-		"WORKER_REAP_INTERVAL":              "",
-		"WORKER_CLEANUP_INTERVAL":           "",
-		"WORKER_SESSION_RETENTION":          "",
-		"WORKER_DONE_JOB_RETENTION":         "",
-		"WORKER_DEAD_JOB_RETENTION":         "",
-		"WORKER_INVITATION_RETENTION":       "",
-		"WORKER_OTP_RETENTION":              "",
-		"RISK_FETCH_TIMEOUT":                "",
-		"RISK_HOST_RATE_LIMIT":              "",
-		"RISK_ALLOWED_HOSTS":                "",
-		"RISK_BLOCKED_HOSTS":                "",
-		"RISK_BLOCKED_KEYWORDS":             "",
-		"RISK_ALLOWED_PORTS":                "",
-		"RISK_GSB_API_KEY":                  "",
-		"RISK_GSB_BASE_URL":                 "",
-		"RISK_GSB_TIMEOUT":                  "",
-		"RISK_LLM_BASE_URL":                 "",
-		"RISK_LLM_API_KEY":                  "",
-		"RISK_LLM_MODEL":                    "",
-		"RISK_LLM_MODE":                     "",
-		"RISK_LLM_MIN_CONFIDENCE":           "",
-		"RISK_LLM_TIMEOUT":                  "",
-		"RISK_LLM_MAX_PER_MIN":              "",
-		"WEBHOOK_SECRET_KEY":                "",
-		"WEBHOOK_ALLOWED_PORTS":             "",
-		"WEBHOOK_TIMEOUT":                   "",
-		"WEBHOOK_HOST_RATE_LIMIT":           "",
-		"WEBHOOK_RETRY_BASE_DELAY":          "",
-		"WEBHOOK_RETRY_MAX_DELAY":           "",
-		"WEBHOOK_MAX_CONSECUTIVE_FAILURES":  "",
-		"WORKER_WEBHOOK_DELIVERY_RETENTION": "",
-		"CONSOLE_PUBLIC_URL":                "",
-		"SMTP_HOST":                         "",
-		"SMTP_PORT":                         "",
-		"SMTP_USERNAME":                     "",
-		"SMTP_PASSWORD":                     "",
-		"SMTP_FROM":                         "",
-		"SMTP_TLS_MODE":                     "",
-		"SMTP_TIMEOUT":                      "",
-		"FEATURE_ANALYTICS":                 "",
-		"FEATURE_RISK_SCAN":                 "",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":       "",
-		"OTEL_TRACES_SAMPLE_RATE":           "",
+		config.EnvConfigPath:          "",
+		"ADDR":                        "",
+		"CONSOLE_ADDR":                "",
+		"CONSOLE_OPS_ADDR":            "",
+		"WORKER_ADDR":                 "",
+		"DATABASE_URL":                "postgres://localhost/shortlink",
+		"REDIS_URL":                   "redis://localhost:6379/0",
+		"LOG_LEVEL":                   "",
+		"LOG_FORMAT":                  "",
+		"DRAIN_DELAY":                 "",
+		"TRUSTED_PROXIES":             "",
+		"OIDC_CLIENT_SECRET":          "",
+		"GITHUB_CLIENT_SECRET":        "",
+		"SMS_WEBHOOK_TOKEN":           "",
+		"WEBHOOK_SECRET_KEY":          "",
+		"SMTP_PASSWORD":               "",
+		"RISK_GSB_API_KEY":            "",
+		"RISK_LLM_API_KEY":            "",
+		"FEATURE_ANALYTICS":           "",
+		"FEATURE_RISK_SCAN":           "",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
 	}
 }
 
@@ -125,9 +70,8 @@ func defaultBaseConfig(addr string) config.BaseConfig {
 	}
 }
 
-func TestLoadConsoleConfig(t *testing.T) {
-	base := baseConsoleTestEnv()
-	defaults := ConsoleConfig{
+func defaultConsoleConfig() ConsoleConfig {
+	return ConsoleConfig{
 		BaseConfig: defaultBaseConfig(defaultConsoleAddr),
 		Features:   config.FeatureFlags{Analytics: true, RiskScan: true},
 		PhoneOTP: PhoneOTPConfig{
@@ -140,24 +84,83 @@ func TestLoadConsoleConfig(t *testing.T) {
 		IPRateLimit: defaultConsoleIPRateLimit,
 		IPRateBurst: defaultConsoleIPRateBurst,
 	}
+}
+
+func defaultWorkerConfig() WorkerConfig {
+	return WorkerConfig{
+		BaseConfig:         defaultBaseConfig(""),
+		Features:           config.FeatureFlags{Analytics: true, RiskScan: true},
+		Concurrency:        job.DefaultConcurrency,
+		MaxPerTenant:       job.DefaultMaxPerTenant,
+		PollInterval:       job.DefaultPollInterval,
+		LeaseDuration:      job.DefaultLeaseDuration,
+		JobTimeout:         job.DefaultJobTimeout,
+		ReapInterval:       job.DefaultReapInterval,
+		CleanupInterval:    defaultWorkerCleanupInterval,
+		RetentionShort:     defaultWorkerShortRetention,
+		RetentionLong:      defaultWorkerLongRetention,
+		StatsRetentionDays: defaultStatsRetentionDays,
+		AuditRetentionDays: defaultAuditRetentionDays,
+		RiskFetchTimeout:   risk.DefaultFetchTimeout,
+		RiskHostRateLimit:  risk.DefaultHostRateLimit,
+		RiskGSB: RiskGSBConfig{
+			BaseURL: risk.DefaultGSBBaseURL,
+			Timeout: risk.DefaultGSBTimeout,
+		},
+		RiskLLM: RiskLLMConfig{
+			Mode:          risk.LLMModeBan,
+			MinConfidence: risk.DefaultLLMMinConfidence,
+			Timeout:       risk.DefaultLLMTimeout,
+			MaxPerMin:     risk.DefaultLLMMaxPerMin,
+		},
+		WebhookTimeout:                webhook.DefaultTimeout,
+		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
+		WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
+		WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
+		WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
+		SMTP: mailer.SMTPConfig{
+			Port:    mailer.DefaultSMTPPort,
+			TLSMode: mailer.TLSModeStartTLS,
+			Timeout: mailer.DefaultSMTPTimeout,
+		},
+	}
+}
+
+func writeTempYAML(t *testing.T, content string) string {
+	t.Helper()
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestLoadConsoleConfig(t *testing.T) {
+	base := baseConsoleTestEnv()
+	defaults := defaultConsoleConfig()
 
 	tests := []struct {
 		name    string
+		yaml    string
 		env     map[string]string
+		flagCfg bool
 		want    ConsoleConfig
 		wantErr string
 	}{
 		{
-			name: "defaults ignore ADDR and redirector-only env",
+			name: "defaults ignore ADDR and redirector section",
+			yaml: "redirector:\n  addr: \":8080\"\n  pprof_addr: \"0.0.0.0:6060\"\n  cache_miss_concurrency: 0\n",
 			env: map[string]string{
-				"ADDR":                   ":8080",
-				"PPROF_ADDR":             "0.0.0.0:6060",
-				"CACHE_MISS_CONCURRENCY": "0",
+				"ADDR": ":8080",
 			},
 			want: defaults,
 		},
 		{
-			name: "prefers CONSOLE_ADDR and CONSOLE_OPS_ADDR",
+			name: "prefers CONSOLE_ADDR and CONSOLE_OPS_ADDR env over yaml",
+			yaml: "console:\n  addr: \":8088\"\n  ops_addr: \"127.0.0.1:9088\"\n",
 			env: map[string]string{
 				"CONSOLE_ADDR":     ":18081",
 				"CONSOLE_OPS_ADDR": "127.0.0.1:9091",
@@ -171,16 +174,19 @@ func TestLoadConsoleConfig(t *testing.T) {
 			}(),
 		},
 		{
-			name: "trusted proxies and custom ip limit",
-			env: map[string]string{
-				"TRUST_PROXY_HEADERS":   "true",
-				"TRUSTED_PROXY_CIDRS":   "10.0.0.0/8",
-				"CONSOLE_IP_RATE_LIMIT": "25",
-			},
+			name: "trusted proxies and derived ip burst",
+			yaml: `
+trusted_proxies:
+  - 10.0.0.0/8
+console:
+  ip_rate_limit: 25
+`,
 			want: func() ConsoleConfig {
 				c := defaults
-				c.TrustProxyHeaders = true
-				c.TrustedProxyCIDRs = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+				c.Proxy = config.ProxyConfig{
+					TrustHeaders: true,
+					TrustedCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+				}
 				c.IPRateLimit = 25
 				c.IPRateBurst = 50
 				return c
@@ -188,7 +194,7 @@ func TestLoadConsoleConfig(t *testing.T) {
 		},
 		{
 			name: "disable ip rate limit",
-			env:  map[string]string{"CONSOLE_IP_RATE_LIMIT": "0"},
+			yaml: "console:\n  ip_rate_limit: 0\n",
 			want: func() ConsoleConfig {
 				c := defaults
 				c.IPRateLimit = 0
@@ -197,52 +203,57 @@ func TestLoadConsoleConfig(t *testing.T) {
 		},
 		{
 			name:    "ops addr equals console addr",
-			env:     map[string]string{"CONSOLE_ADDR": ":8081", "CONSOLE_OPS_ADDR": ":8081"},
-			wantErr: "CONSOLE_OPS_ADDR must differ from CONSOLE_ADDR",
-		},
-		{
-			name:    "trusted cidrs without trust header",
-			env:     map[string]string{"TRUSTED_PROXY_CIDRS": "10.0.0.0/8"},
-			wantErr: "TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HEADERS=true",
+			yaml:    "console:\n  addr: \":8081\"\n  ops_addr: \":8081\"\n",
+			wantErr: "console.ops_addr must differ from addr",
 		},
 		{
 			name:    "negative ip rate limit",
-			env:     map[string]string{"CONSOLE_IP_RATE_LIMIT": "-1"},
-			wantErr: "CONSOLE_IP_RATE_LIMIT must not be negative",
+			yaml:    "console:\n  ip_rate_limit: -1\n",
+			wantErr: "console.ip_rate_limit must not be negative",
 		},
 		{
 			name:    "zero ip burst when limit enabled",
-			env:     map[string]string{"CONSOLE_IP_RATE_LIMIT": "10", "CONSOLE_IP_RATE_BURST": "0"},
-			wantErr: "CONSOLE_IP_RATE_BURST must be positive",
+			yaml:    "console:\n  ip_rate_limit: 10\n  ip_rate_burst: 0\n",
+			wantErr: "console.ip_rate_burst must be positive",
 		},
 		{
-			name: "web dist dir trimmed",
-			env: map[string]string{
-				"WEB_DIST_DIR":    "  web/dist  ",
-				"PUBLIC_BASE_URL": " http://127.0.0.1:8080/ ",
-			},
+			name: "web dist dir and public urls trimmed",
+			yaml: "console:\n  web_dist_dir: \"  web/dist  \"\n  public_base_url: \" http://127.0.0.1:8080/ \"\n  public_url: \" https://console.example.com/ \"\n",
 			want: func() ConsoleConfig {
 				c := defaults
 				c.WebDistDir = "web/dist"
 				c.PublicBaseURL = "http://127.0.0.1:8080"
+				c.PublicURL = "https://console.example.com"
+				c.PhoneOTP.SecureCookies = true
 				return c
 			}(),
 		},
 		{
 			name:    "invalid public base url",
-			env:     map[string]string{"PUBLIC_BASE_URL": "ftp://example.com"},
-			wantErr: "PUBLIC_BASE_URL",
+			yaml:    "console:\n  public_base_url: ftp://example.com\n",
+			wantErr: "console.public_base_url",
 		},
 		{
-			name: "oidc all set",
+			name:    "invalid public url",
+			yaml:    "console:\n  public_url: https://console.example.com?foo=1\n",
+			wantErr: "console.public_url",
+		},
+		{
+			name: "oidc derives redirect url from public_url",
+			yaml: `
+console:
+  public_url: http://127.0.0.1:8081/
+  auth:
+    oidc:
+      issuer: http://127.0.0.1:5556/dex
+      client_id: shortlink-console
+`,
 			env: map[string]string{
-				"OIDC_ISSUER":        "http://127.0.0.1:5556/dex",
-				"OIDC_CLIENT_ID":     "shortlink-console",
 				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
 			},
 			want: func() ConsoleConfig {
 				c := defaults
+				c.PublicURL = "http://127.0.0.1:8081"
 				c.OIDC = OIDCConfig{
 					Issuer:       "http://127.0.0.1:5556/dex",
 					ClientID:     "shortlink-console",
@@ -253,83 +264,58 @@ func TestLoadConsoleConfig(t *testing.T) {
 			}(),
 		},
 		{
-			name: "oidc partially set",
-			env: map[string]string{
-				"OIDC_ISSUER":    "http://127.0.0.1:5556/dex",
-				"OIDC_CLIENT_ID": "shortlink-console",
-			},
-			wantErr: "OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL",
+			name:    "oidc partially set without secret",
+			yaml:    "console:\n  public_url: http://127.0.0.1:8081\n  auth:\n    oidc:\n      issuer: http://127.0.0.1:5556/dex\n      client_id: shortlink-console\n",
+			wantErr: "OIDC_CLIENT_SECRET",
 		},
 		{
-			name: "oidc invalid issuer scheme",
-			env: map[string]string{
-				"OIDC_ISSUER":        "ftp://127.0.0.1:5556/dex",
-				"OIDC_CLIENT_ID":     "shortlink-console",
-				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
-			},
-			wantErr: "OIDC_ISSUER",
+			name:    "oidc requires console.public_url",
+			yaml:    "console:\n  auth:\n    oidc:\n      issuer: http://127.0.0.1:5556/dex\n      client_id: shortlink-console\n",
+			env:     map[string]string{"OIDC_CLIENT_SECRET": "shortlink-console-secret"},
+			wantErr: "console.public_url is required when OIDC auth is enabled",
 		},
 		{
-			name: "oidc issuer with query rejected",
-			env: map[string]string{
-				"OIDC_ISSUER":        "http://127.0.0.1:5556/dex?foo=1",
-				"OIDC_CLIENT_ID":     "shortlink-console",
-				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/oidc/callback",
-			},
-			wantErr: "OIDC_ISSUER",
+			name:    "oidc invalid issuer scheme",
+			yaml:    "console:\n  public_url: http://127.0.0.1:8081\n  auth:\n    oidc:\n      issuer: ftp://127.0.0.1:5556/dex\n      client_id: shortlink-console\n",
+			env:     map[string]string{"OIDC_CLIENT_SECRET": "shortlink-console-secret"},
+			wantErr: "console.auth.oidc.issuer",
 		},
 		{
-			name: "oidc invalid redirect url",
-			env: map[string]string{
-				"OIDC_ISSUER":        "http://127.0.0.1:5556/dex",
-				"OIDC_CLIENT_ID":     "shortlink-console",
-				"OIDC_CLIENT_SECRET": "shortlink-console-secret",
-				"OIDC_REDIRECT_URL":  "/api/v1/auth/oidc/callback",
-			},
-			wantErr: "OIDC_REDIRECT_URL",
+			name:    "rejects oidc client_secret in yaml",
+			yaml:    "console:\n  auth:\n    oidc:\n      client_secret: leaked\n",
+			wantErr: "client_secret",
 		},
 		{
-			name: "github all set",
-			env: map[string]string{
-				"GITHUB_CLIENT_ID":     "gh-client",
-				"GITHUB_CLIENT_SECRET": "gh-secret",
-				"GITHUB_REDIRECT_URL":  "http://127.0.0.1:8081/api/v1/auth/github/callback",
-			},
+			name: "github derives redirect url from public_url",
+			yaml: "console:\n  public_url: https://console.example.com\n  auth:\n    github:\n      client_id: gh-client\n",
+			env:  map[string]string{"GITHUB_CLIENT_SECRET": "gh-secret"},
 			want: func() ConsoleConfig {
 				c := defaults
+				c.PublicURL = "https://console.example.com"
+				c.PhoneOTP.SecureCookies = true
 				c.GitHub = GitHubConfig{
 					ClientID:     "gh-client",
 					ClientSecret: "gh-secret",
-					RedirectURL:  "http://127.0.0.1:8081/api/v1/auth/github/callback",
+					RedirectURL:  "https://console.example.com/api/v1/auth/github/callback",
 				}
 				return c
 			}(),
 		},
 		{
 			name:    "github partially set",
-			env:     map[string]string{"GITHUB_CLIENT_ID": "gh-client"},
-			wantErr: "GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL",
+			yaml:    "console:\n  public_url: https://console.example.com\n  auth:\n    github:\n      client_id: gh-client\n",
+			wantErr: "GITHUB_CLIENT_SECRET",
 		},
 		{
-			name: "github invalid redirect url",
-			env: map[string]string{
-				"GITHUB_CLIENT_ID":     "gh-client",
-				"GITHUB_CLIENT_SECRET": "gh-secret",
-				"GITHUB_REDIRECT_URL":  "/api/v1/auth/github/callback",
-			},
-			wantErr: "GITHUB_REDIRECT_URL",
+			name:    "github requires console.public_url",
+			yaml:    "console:\n  auth:\n    github:\n      client_id: gh-client\n",
+			env:     map[string]string{"GITHUB_CLIENT_SECRET": "gh-secret"},
+			wantErr: "console.public_url is required when GitHub auth is enabled",
 		},
 		{
 			name: "minimal single-pg mode with feature flags disabled",
-			env: map[string]string{
-				"REDIS_URL":         "",
-				"FEATURE_ANALYTICS": "false",
-				"FEATURE_RISK_SCAN": "false",
-				"SMTP_HOST":         "smtp.example.com",
-				"SMTP_FROM":         "noreply@example.com",
-			},
+			yaml: "features:\n  analytics: false\n  risk_scan: false\nsmtp:\n  host: smtp.example.com\n  from: noreply@example.com\n",
+			env:  map[string]string{"REDIS_URL": ""},
 			want: func() ConsoleConfig {
 				c := defaults
 				c.RedisURL = ""
@@ -340,25 +326,33 @@ func TestLoadConsoleConfig(t *testing.T) {
 		},
 		{
 			name:    "smtp host without smtp from rejected",
-			env:     map[string]string{"SMTP_HOST": "smtp.example.com"},
-			wantErr: "SMTP_FROM is required",
+			yaml:    "smtp:\n  host: smtp.example.com\n",
+			wantErr: "smtp.from is required",
 		},
 		{
-			name: "phone otp webhook configured",
+			name: "phone otp webhook configured with https public_url and outbound ports",
+			yaml: `
+outbound:
+  allowed_ports: [443, 8443]
+console:
+  public_url: https://console.example.com
+  auth:
+    phone_otp:
+      provider: webhook
+      webhook_url: https://sms.example.com/otp
+      timeout: 3s
+      ttl: 10m
+      cooldown: 30s
+      max_per_hour: 8
+      max_attempts: 4
+`,
 			env: map[string]string{
-				"SMS_PROVIDER":         "webhook",
-				"SMS_WEBHOOK_URL":      "https://sms.example.com/otp",
-				"SMS_WEBHOOK_TOKEN":    "sms-secret",
-				"SMS_ALLOWED_PORTS":    "443,8443",
-				"SMS_TIMEOUT":          "3s",
-				"SMS_OTP_TTL":          "10m",
-				"SMS_OTP_COOLDOWN":     "30s",
-				"SMS_OTP_MAX_PER_HOUR": "8",
-				"SMS_OTP_MAX_ATTEMPTS": "4",
-				"SMS_SECURE_COOKIES":   "true",
+				"SMS_WEBHOOK_TOKEN": "sms-secret",
 			},
 			want: func() ConsoleConfig {
 				c := defaults
+				c.PublicURL = "https://console.example.com"
+				c.OutboundAllowedPorts = []int{443, 8443}
 				c.PhoneOTP = PhoneOTPConfig{
 					Provider:      "webhook",
 					WebhookURL:    "https://sms.example.com/otp",
@@ -375,27 +369,37 @@ func TestLoadConsoleConfig(t *testing.T) {
 			}(),
 		},
 		{
+			name:    "rejects sms webhook_token in yaml",
+			yaml:    "console:\n  auth:\n    phone_otp:\n      webhook_token: leaked\n",
+			wantErr: "webhook_token",
+		},
+		{
 			name:    "sms webhook url without provider rejected",
-			env:     map[string]string{"SMS_WEBHOOK_URL": "https://sms.example.com/otp"},
-			wantErr: "SMS_PROVIDER is required",
+			yaml:    "console:\n  auth:\n    phone_otp:\n      webhook_url: https://sms.example.com/otp\n",
+			wantErr: "console.auth.phone_otp.provider is required",
 		},
 		{
 			name:    "sms webhook provider without url rejected",
-			env:     map[string]string{"SMS_PROVIDER": "webhook"},
-			wantErr: "SMS_WEBHOOK_URL is required",
+			yaml:    "console:\n  auth:\n    phone_otp:\n      provider: webhook\n",
+			wantErr: "console.auth.phone_otp.webhook_url is required",
 		},
 		{
 			name:    "sms unsupported provider rejected",
-			env:     map[string]string{"SMS_PROVIDER": "aliyun"},
-			wantErr: "SMS_PROVIDER must be",
+			yaml:    "console:\n  auth:\n    phone_otp:\n      provider: aliyun\n",
+			wantErr: "console.auth.phone_otp.provider must be",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			applyEnv(t, base, tt.env)
+			cfgPath := writeTempYAML(t, tt.yaml)
+			if cfgPath != "" && !tt.flagCfg {
+				t.Setenv(config.EnvConfigPath, cfgPath)
+				cfgPath = ""
+			}
 
-			got, err := loadConsoleConfig()
+			got, err := loadConsoleConfig(cfgPath)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("loadConsoleConfig() error = %v, want substring %q", err, tt.wantErr)
@@ -414,96 +418,65 @@ func TestLoadConsoleConfig(t *testing.T) {
 
 func TestLoadWorkerConfig(t *testing.T) {
 	base := baseConsoleTestEnv()
-
-	defaults := WorkerConfig{
-		BaseConfig:          defaultBaseConfig(""),
-		Features:            config.FeatureFlags{Analytics: true, RiskScan: true},
-		Concurrency:         job.DefaultConcurrency,
-		MaxPerTenant:        job.DefaultMaxPerTenant,
-		PollInterval:        job.DefaultPollInterval,
-		LeaseDuration:       job.DefaultLeaseDuration,
-		JobTimeout:          job.DefaultJobTimeout,
-		ReapInterval:        job.DefaultReapInterval,
-		CleanupInterval:     defaultWorkerCleanupInterval,
-		SessionRetention:    defaultWorkerRetention,
-		DoneJobRetention:    defaultWorkerRetention,
-		DeadJobRetention:    defaultWorkerLongRetention,
-		InvitationRetention: defaultWorkerLongRetention,
-		OTPRetention:        identity.DefaultOTPRetention,
-		StatsRetentionDays:  defaultStatsRetentionDays,
-		AuditRetentionDays:  defaultAuditRetentionDays,
-		RiskFetchTimeout:    risk.DefaultFetchTimeout,
-		RiskHostRateLimit:   risk.DefaultHostRateLimit,
-		RiskGSB: RiskGSBConfig{
-			BaseURL: risk.DefaultGSBBaseURL,
-			Timeout: risk.DefaultGSBTimeout,
-		},
-		RiskLLM: RiskLLMConfig{
-			Mode:          risk.LLMModeBan,
-			MinConfidence: risk.DefaultLLMMinConfidence,
-			Timeout:       risk.DefaultLLMTimeout,
-			MaxPerMin:     risk.DefaultLLMMaxPerMin,
-		},
-		WebhookTimeout:                webhook.DefaultTimeout,
-		WebhookHostRateLimit:          webhook.DefaultHostRateLimit,
-		WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
-		WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
-		WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
-		WebhookDeliveryRetention:      webhook.DefaultDeliveryRetention,
-		SMTP: mailer.SMTPConfig{
-			Port:    mailer.DefaultSMTPPort,
-			TLSMode: mailer.TLSModeStartTLS,
-			Timeout: mailer.DefaultSMTPTimeout,
-		},
-	}
+	defaults := defaultWorkerConfig()
 
 	tests := []struct {
 		name    string
+		yaml    string
 		env     map[string]string
 		want    WorkerConfig
 		wantErr string
 	}{
 		{
-			name: "defaults ignore redirector-only env",
-			env: map[string]string{
-				"CACHE_MISS_CONCURRENCY": "0",
-			},
+			name: "defaults ignore redirector section",
+			yaml: "redirector:\n  cache_miss_concurrency: 0\n",
 			want: defaults,
 		},
 		{
-			name: "explicit worker values",
+			name: "explicit worker values from yaml and env",
+			yaml: `
+outbound:
+  allowed_ports: [80, 443, 8443]
+worker:
+  addr: 127.0.0.1:9082
+  concurrency: 16
+  max_per_tenant: 2
+  poll_interval: 100ms
+  lease_duration: 45s
+  job_timeout: 15s
+  reap_interval: 10s
+  cleanup_interval: 30m
+  retention:
+    short: 24h
+    long: 168h
+    stats_days: 45
+    audit_days: 365
+  risk:
+    fetch_timeout: 3s
+    host_rate_limit: 5
+    allowed_hosts:
+      - github.com.
+      - docs.go.dev
+    blocked_hosts:
+      "Bad.Example.": malware
+      "[2001:db8::1]": phishing
+    blocked_keywords:
+      smoke-phish: phishing
+    gsb:
+      base_url: https://safebrowsing.example.com/
+      timeout: 4s
+    llm:
+      base_url: https://llm.example.com/v1/
+      model: deepseek-chat
+      mode: shadow
+      min_confidence: 0.9
+      timeout: 6s
+      max_per_min: 60
+`,
 			env: map[string]string{
-				"WORKER_ADDR":                 "127.0.0.1:8082",
-				"WORKER_CONCURRENCY":          "16",
-				"WORKER_MAX_PER_TENANT":       "2",
-				"WORKER_POLL_INTERVAL":        "100ms",
-				"WORKER_LEASE_DURATION":       "45s",
-				"WORKER_JOB_TIMEOUT":          "15s",
-				"WORKER_REAP_INTERVAL":        "10s",
-				"WORKER_CLEANUP_INTERVAL":     "30m",
-				"WORKER_SESSION_RETENTION":    "24h",
-				"WORKER_DONE_JOB_RETENTION":   "48h",
-				"WORKER_DEAD_JOB_RETENTION":   "168h",
-				"WORKER_INVITATION_RETENTION": "168h",
-				"WORKER_OTP_RETENTION":        "12h",
-				"WORKER_STATS_RETENTION_DAYS": "45",
-				"WORKER_AUDIT_RETENTION_DAYS": "365",
-				"RISK_FETCH_TIMEOUT":          "3s",
-				"RISK_HOST_RATE_LIMIT":        "5",
-				"RISK_ALLOWED_HOSTS":          "github.com., docs.go.dev",
-				"RISK_BLOCKED_HOSTS":          "Bad.Example.:malware, [2001:db8::1]:phishing",
-				"RISK_BLOCKED_KEYWORDS":       "smoke-phish:phishing",
-				"RISK_ALLOWED_PORTS":          "80, 443, 8443",
-				"RISK_GSB_API_KEY":            "gsb-key",
-				"RISK_GSB_BASE_URL":           "https://safebrowsing.example.com/",
-				"RISK_GSB_TIMEOUT":            "4s",
-				"RISK_LLM_BASE_URL":           "https://llm.example.com/v1/",
-				"RISK_LLM_API_KEY":            "llm-key",
-				"RISK_LLM_MODEL":              "deepseek-chat",
-				"RISK_LLM_MODE":               "shadow",
-				"RISK_LLM_MIN_CONFIDENCE":     "0.9",
-				"RISK_LLM_TIMEOUT":            "6s",
-				"RISK_LLM_MAX_PER_MIN":        "60",
+				"WORKER_ADDR":      "127.0.0.1:8082",
+				"RISK_GSB_API_KEY": "gsb-key",
+				"RISK_LLM_API_KEY": "llm-key",
 			},
 			want: WorkerConfig{
 				BaseConfig:                    defaultBaseConfig("127.0.0.1:8082"),
@@ -515,11 +488,8 @@ func TestLoadWorkerConfig(t *testing.T) {
 				JobTimeout:                    15 * time.Second,
 				ReapInterval:                  10 * time.Second,
 				CleanupInterval:               30 * time.Minute,
-				SessionRetention:              24 * time.Hour,
-				DoneJobRetention:              48 * time.Hour,
-				DeadJobRetention:              168 * time.Hour,
-				InvitationRetention:           168 * time.Hour,
-				OTPRetention:                  12 * time.Hour,
+				RetentionShort:                24 * time.Hour,
+				RetentionLong:                 168 * time.Hour,
 				StatsRetentionDays:            45,
 				AuditRetentionDays:            365,
 				RiskFetchTimeout:              3 * time.Second,
@@ -527,7 +497,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 				RiskAllowedHosts:              []string{"docs.go.dev", "github.com"},
 				RiskBlockedHosts:              map[string]link.BanReason{"bad.example": link.BanReasonMalware, "2001:db8::1": link.BanReasonPhishing},
 				RiskBlockedKeywords:           map[string]link.BanReason{"smoke-phish": link.BanReasonPhishing},
-				RiskAllowedPorts:              []int{80, 443, 8443},
+				OutboundAllowedPorts:          []int{80, 443, 8443},
 				RiskGSB:                       RiskGSBConfig{APIKey: "gsb-key", BaseURL: "https://safebrowsing.example.com", Timeout: 4 * time.Second},
 				RiskLLM:                       RiskLLMConfig{BaseURL: "https://llm.example.com/v1", APIKey: "llm-key", Model: "deepseek-chat", Mode: "shadow", MinConfidence: 0.9, Timeout: 6 * time.Second, MaxPerMin: 60},
 				WebhookTimeout:                webhook.DefaultTimeout,
@@ -535,7 +505,6 @@ func TestLoadWorkerConfig(t *testing.T) {
 				WebhookRetryBaseDelay:         webhook.DefaultRetryBaseDelay,
 				WebhookRetryMaxDelay:          webhook.DefaultRetryMaxDelay,
 				WebhookMaxConsecutiveFailures: webhook.DefaultMaxConsecutiveFailures,
-				WebhookDeliveryRetention:      webhook.DefaultDeliveryRetention,
 				SMTP: mailer.SMTPConfig{
 					Port:    mailer.DefaultSMTPPort,
 					TLSMode: mailer.TLSModeStartTLS,
@@ -544,35 +513,40 @@ func TestLoadWorkerConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "webhook and smtp explicit values",
+			name: "webhook, smtp, and console public_url shared",
+			yaml: `
+outbound:
+  allowed_ports: [443]
+console:
+  public_url: https://console.example.com/
+worker:
+  webhook:
+    timeout: 4s
+    host_rate_limit: 10
+    retry_base_delay: 5s
+    retry_max_delay: 2m
+    max_consecutive_failures: 0
+smtp:
+  host: smtp.example.com
+  port: 2525
+  username: mailer
+  from: "Shortlink <noreply@example.com>"
+  tls_mode: NONE
+  timeout: 8s
+`,
 			env: map[string]string{
-				"WEBHOOK_SECRET_KEY":                strings.Repeat("ab", 32),
-				"WEBHOOK_ALLOWED_PORTS":             "443",
-				"WEBHOOK_TIMEOUT":                   "4s",
-				"WEBHOOK_HOST_RATE_LIMIT":           "10",
-				"WEBHOOK_RETRY_BASE_DELAY":          "5s",
-				"WEBHOOK_RETRY_MAX_DELAY":           "2m",
-				"WEBHOOK_MAX_CONSECUTIVE_FAILURES":  "0",
-				"WORKER_WEBHOOK_DELIVERY_RETENTION": "48h",
-				"CONSOLE_PUBLIC_URL":                "https://console.example.com/",
-				"SMTP_HOST":                         "smtp.example.com",
-				"SMTP_PORT":                         "2525",
-				"SMTP_USERNAME":                     "mailer",
-				"SMTP_PASSWORD":                     "mail-pass",
-				"SMTP_FROM":                         "Shortlink <noreply@example.com>",
-				"SMTP_TLS_MODE":                     "NONE",
-				"SMTP_TIMEOUT":                      "8s",
+				"WEBHOOK_SECRET_KEY": strings.Repeat("ab", 32),
+				"SMTP_PASSWORD":      "mail-pass",
 			},
 			want: func() WorkerConfig {
 				c := defaults
 				c.WebhookSecretKey = strings.Repeat("ab", 32)
-				c.WebhookAllowedPorts = []int{443}
+				c.OutboundAllowedPorts = []int{443}
 				c.WebhookTimeout = 4 * time.Second
 				c.WebhookHostRateLimit = 10
 				c.WebhookRetryBaseDelay = 5 * time.Second
 				c.WebhookRetryMaxDelay = 2 * time.Minute
 				c.WebhookMaxConsecutiveFailures = 0
-				c.WebhookDeliveryRetention = 48 * time.Hour
 				c.ConsolePublicURL = "https://console.example.com"
 				c.SMTP = mailer.SMTPConfig{
 					Host:     "smtp.example.com",
@@ -587,99 +561,120 @@ func TestLoadWorkerConfig(t *testing.T) {
 			}(),
 		},
 		{
+			name:    "rejects webhook secret_key in yaml",
+			yaml:    "worker:\n  webhook:\n    secret_key: abcd\n",
+			wantErr: "secret_key",
+		},
+		{
+			name:    "rejects smtp password in yaml",
+			yaml:    "smtp:\n  password: secret\n",
+			wantErr: "password",
+		},
+		{
+			name:    "rejects gsb api_key in yaml",
+			yaml:    "worker:\n  risk:\n    gsb:\n      api_key: secret\n",
+			wantErr: "api_key",
+		},
+		{
+			name:    "rejects llm api_key in yaml",
+			yaml:    "worker:\n  risk:\n    llm:\n      api_key: secret\n",
+			wantErr: "api_key",
+		},
+		{
 			name:    "invalid webhook secret key",
 			env:     map[string]string{"WEBHOOK_SECRET_KEY": "not-hex"},
 			wantErr: "WEBHOOK_SECRET_KEY",
 		},
 		{
 			name:    "webhook timeout must be less than job timeout",
-			env:     map[string]string{"WEBHOOK_TIMEOUT": "20s", "WORKER_JOB_TIMEOUT": "20s"},
-			wantErr: "WEBHOOK_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+			yaml:    "worker:\n  job_timeout: 20s\n  webhook:\n    timeout: 20s\n",
+			wantErr: "worker.webhook.timeout must be less than worker.job_timeout",
 		},
 		{
 			name:    "smtp host requires smtp from",
-			env:     map[string]string{"SMTP_HOST": "smtp.example.com"},
+			yaml:    "smtp:\n  host: smtp.example.com\n",
 			wantErr: "from is required",
 		},
 		{
 			name:    "smtp invalid tls mode",
-			env:     map[string]string{"SMTP_TLS_MODE": "plain"},
-			wantErr: "SMTP_TLS_MODE",
+			yaml:    "smtp:\n  tls_mode: plain\n",
+			wantErr: "smtp.tls_mode",
 		},
 		{
 			name:    "job timeout without commit margin exceeds lease",
-			env:     map[string]string{"WORKER_LEASE_DURATION": "30s", "WORKER_JOB_TIMEOUT": "28s"},
-			wantErr: "WORKER_JOB_TIMEOUT + 5s commit margin must not exceed WORKER_LEASE_DURATION",
+			yaml:    "worker:\n  lease_duration: 30s\n  job_timeout: 28s\n",
+			wantErr: "worker.job_timeout + 5s commit margin must not exceed worker.lease_duration",
 		},
 		{
 			name:    "zero concurrency",
-			env:     map[string]string{"WORKER_CONCURRENCY": "0"},
-			wantErr: "WORKER_CONCURRENCY must be positive",
+			yaml:    "worker:\n  concurrency: 0\n",
+			wantErr: "worker.concurrency must be positive",
 		},
 		{
 			name:    "negative max per tenant",
-			env:     map[string]string{"WORKER_MAX_PER_TENANT": "-1"},
-			wantErr: "WORKER_MAX_PER_TENANT must not be negative",
+			yaml:    "worker:\n  max_per_tenant: -1\n",
+			wantErr: "worker.max_per_tenant must not be negative",
 		},
 		{
 			name:    "invalid risk blocked hosts",
-			env:     map[string]string{"RISK_BLOCKED_HOSTS": "badrule"},
-			wantErr: "RISK_BLOCKED_HOSTS",
+			yaml:    "worker:\n  risk:\n    blocked_hosts:\n      evil.test: bad_reason\n",
+			wantErr: "worker.risk.blocked_hosts",
 		},
 		{
 			name:    "invalid risk blocked keywords",
-			env:     map[string]string{"RISK_BLOCKED_KEYWORDS": "badrule"},
-			wantErr: "RISK_BLOCKED_KEYWORDS",
+			yaml:    "worker:\n  risk:\n    blocked_keywords:\n      foo: bad_reason\n",
+			wantErr: "worker.risk.blocked_keywords",
 		},
 		{
-			name:    "invalid risk allowed ports",
-			env:     map[string]string{"RISK_ALLOWED_PORTS": "80,99999"},
-			wantErr: "RISK_ALLOWED_PORTS",
+			name:    "invalid outbound allowed ports",
+			yaml:    "outbound:\n  allowed_ports: [80, 99999]\n",
+			wantErr: "outbound.allowed_ports",
 		},
 		{
 			name:    "risk fetch timeout exceeds job timeout",
-			env:     map[string]string{"WORKER_JOB_TIMEOUT": "5s", "RISK_FETCH_TIMEOUT": "5s"},
-			wantErr: "RISK_FETCH_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+			yaml:    "worker:\n  job_timeout: 5s\n  risk:\n    fetch_timeout: 5s\n",
+			wantErr: "worker.risk.fetch_timeout must be less than worker.job_timeout",
 		},
 		{
 			name:    "gsb timeout exceeds job timeout when enabled",
-			env:     map[string]string{"RISK_GSB_API_KEY": "k", "RISK_GSB_TIMEOUT": "20s"},
-			wantErr: "RISK_GSB_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+			yaml:    "worker:\n  risk:\n    gsb:\n      timeout: 20s\n",
+			env:     map[string]string{"RISK_GSB_API_KEY": "k"},
+			wantErr: "worker.risk.gsb.timeout must be less than worker.job_timeout",
 		},
 		{
 			name:    "llm base url without model",
-			env:     map[string]string{"RISK_LLM_BASE_URL": "https://api.deepseek.com"},
-			wantErr: "RISK_LLM_BASE_URL and RISK_LLM_MODEL must both be set",
+			yaml:    "worker:\n  risk:\n    llm:\n      base_url: https://api.deepseek.com\n",
+			wantErr: "worker.risk.llm.base_url and worker.risk.llm.model must both be set",
 		},
 		{
 			name:    "llm invalid mode",
-			env:     map[string]string{"RISK_LLM_MODE": "audit"},
-			wantErr: "RISK_LLM_MODE",
+			yaml:    "worker:\n  risk:\n    llm:\n      mode: audit\n",
+			wantErr: "worker.risk.llm.mode",
 		},
 		{
 			name:    "llm invalid confidence",
-			env:     map[string]string{"RISK_LLM_MIN_CONFIDENCE": "1.2"},
-			wantErr: "RISK_LLM_MIN_CONFIDENCE",
+			yaml:    "worker:\n  risk:\n    llm:\n      min_confidence: 1.2\n",
+			wantErr: "worker.risk.llm.min_confidence",
 		},
 		{
 			name:    "llm timeout exceeds job timeout when enabled",
-			env:     map[string]string{"RISK_LLM_BASE_URL": "http://127.0.0.1:11434/v1", "RISK_LLM_MODEL": "qwen2.5", "RISK_LLM_TIMEOUT": "20s"},
-			wantErr: "RISK_LLM_TIMEOUT must be less than WORKER_JOB_TIMEOUT",
+			yaml:    "worker:\n  risk:\n    llm:\n      base_url: http://127.0.0.1:11434/v1\n      model: qwen2.5\n      timeout: 20s\n",
+			wantErr: "worker.risk.llm.timeout must be less than worker.job_timeout",
 		},
 		{
 			name:    "llm negative max per min",
-			env:     map[string]string{"RISK_LLM_MAX_PER_MIN": "-1"},
-			wantErr: "RISK_LLM_MAX_PER_MIN must not be negative",
+			yaml:    "worker:\n  risk:\n    llm:\n      max_per_min: -1\n",
+			wantErr: "worker.risk.llm.max_per_min must not be negative",
 		},
 		{
 			name:    "non-positive stats retention days",
-			env:     map[string]string{"WORKER_STATS_RETENTION_DAYS": "0"},
-			wantErr: "WORKER_STATS_RETENTION_DAYS must be positive",
+			yaml:    "worker:\n  retention:\n    stats_days: 0\n",
+			wantErr: "worker.retention.stats_days must be positive",
 		},
 		{
 			name:    "non-positive audit retention days",
-			env:     map[string]string{"WORKER_AUDIT_RETENTION_DAYS": "-5"},
-			wantErr: "WORKER_AUDIT_RETENTION_DAYS must be positive",
+			yaml:    "worker:\n  retention:\n    audit_days: -5\n",
+			wantErr: "worker.retention.audit_days must be positive",
 		},
 		{
 			name: "minimal worker mode without redis and with features disabled",
@@ -700,7 +695,11 @@ func TestLoadWorkerConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			applyEnv(t, base, tt.env)
-			got, err := loadWorkerConfig()
+			cfgPath := writeTempYAML(t, tt.yaml)
+			if cfgPath != "" {
+				t.Setenv(config.EnvConfigPath, cfgPath)
+			}
+			got, err := loadWorkerConfig("")
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("loadWorkerConfig() error = %v, want substring %q", err, tt.wantErr)
@@ -714,12 +713,146 @@ func TestLoadWorkerConfig(t *testing.T) {
 				!slices.Equal(got.RiskAllowedHosts, tt.want.RiskAllowedHosts) ||
 				!maps.Equal(got.RiskBlockedHosts, tt.want.RiskBlockedHosts) ||
 				!maps.Equal(got.RiskBlockedKeywords, tt.want.RiskBlockedKeywords) ||
-				!slices.Equal(got.RiskAllowedPorts, tt.want.RiskAllowedPorts) ||
-				!slices.Equal(got.WebhookAllowedPorts, tt.want.WebhookAllowedPorts) {
+				!slices.Equal(got.OutboundAllowedPorts, tt.want.OutboundAllowedPorts) {
 				t.Errorf("loadWorkerConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
+}
+
+func TestLoadConsoleAndWorkerExampleYAMLMatchesDefaults(t *testing.T) {
+	applyEnv(t, baseConsoleTestEnv(), nil)
+	examplePath := filepath.Join("..", "..", "config.example.yaml")
+
+	gotConsole, err := loadConsoleConfig(examplePath)
+	if err != nil {
+		t.Fatalf("loadConsoleConfig(config.example.yaml) = %v", err)
+	}
+	if !consoleConfigEqual(gotConsole, defaultConsoleConfig()) {
+		t.Errorf("console config.example.yaml drifted from defaults:\n got:  %+v\n want: %+v", gotConsole, defaultConsoleConfig())
+	}
+
+	gotWorker, err := loadWorkerConfig(examplePath)
+	if err != nil {
+		t.Fatalf("loadWorkerConfig(config.example.yaml) = %v", err)
+	}
+	wantWorker := defaultWorkerConfig()
+	if !workerConfigEqual(gotWorker, wantWorker) ||
+		!slices.Equal(gotWorker.RiskAllowedHosts, wantWorker.RiskAllowedHosts) ||
+		!maps.Equal(gotWorker.RiskBlockedHosts, wantWorker.RiskBlockedHosts) ||
+		!maps.Equal(gotWorker.RiskBlockedKeywords, wantWorker.RiskBlockedKeywords) ||
+		!slices.Equal(gotWorker.OutboundAllowedPorts, wantWorker.OutboundAllowedPorts) {
+		t.Errorf("worker config.example.yaml drifted from defaults:\n got:  %+v\n want: %+v", gotWorker, wantWorker)
+	}
+}
+
+func TestParseConfigCommand(t *testing.T) {
+	t.Run("valid dump flags", func(t *testing.T) {
+		var stderr bytes.Buffer
+		opts, ok, err := parseConfigCommand([]string{"dump", "--config", " /tmp/c.yaml ", "--format", "TEXT"}, &stderr)
+		if err != nil || !ok {
+			t.Fatalf("parseConfigCommand = (%+v, %v, %v), want ok", opts, ok, err)
+		}
+		if opts.configPath != "/tmp/c.yaml" || opts.format != logx.FormatText {
+			t.Fatalf("opts = %+v", opts)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("unexpected stderr: %s", stderr.String())
+		}
+	})
+
+	t.Run("invalid format writes to stderr", func(t *testing.T) {
+		var stderr bytes.Buffer
+		_, ok, err := parseConfigCommand([]string{"dump", "--format", "xml"}, &stderr)
+		if ok || !errors.Is(err, errUsage) {
+			t.Fatalf("parseConfigCommand = (%v, %v), want false and errUsage", ok, err)
+		}
+		if !strings.Contains(stderr.String(), "--format must be json or text") {
+			t.Fatalf("stderr = %q, want format error hint", stderr.String())
+		}
+	})
+
+	t.Run("missing subcommand writes usage", func(t *testing.T) {
+		var stderr bytes.Buffer
+		_, ok, err := parseConfigCommand(nil, &stderr)
+		if ok || !errors.Is(err, errUsage) {
+			t.Fatalf("parseConfigCommand = (%v, %v), want false and errUsage", ok, err)
+		}
+		if stderr.Len() == 0 {
+			t.Fatal("expected usage on stderr")
+		}
+	})
+}
+
+func TestRunConfigDump(t *testing.T) {
+	t.Run("outputs valid redacted json", func(t *testing.T) {
+		webhookKey := strings.Repeat("cd", 32)
+		applyEnv(t, baseConsoleTestEnv(), map[string]string{
+			"DATABASE_URL":         "postgres://shortlink:pg-secret@db:5432/shortlink?sslmode=disable",
+			"REDIS_URL":            "rediss://:redis-secret@redis:6380/0",
+			"OIDC_CLIENT_SECRET":   "oidc-top-secret",
+			"WEBHOOK_SECRET_KEY":   webhookKey,
+			"SMTP_PASSWORD":        "smtp-top-secret",
+			"RISK_GSB_API_KEY":     "gsb-top-secret",
+			"RISK_LLM_API_KEY":     "llm-top-secret",
+			"GITHUB_CLIENT_SECRET": "gh-top-secret",
+			"SMS_WEBHOOK_TOKEN":    "sms-top-secret",
+		})
+		cfgPath := writeTempYAML(t, `
+console:
+  public_url: https://console.example.com
+  auth:
+    oidc:
+      issuer: https://dex.example.com
+      client_id: shortlink-console
+    github:
+      client_id: gh-id
+    phone_otp:
+      provider: webhook
+      webhook_url: https://sms.example.com/send
+worker:
+  risk:
+    llm:
+      base_url: https://llm.example.com/v1
+      model: deepseek-chat
+smtp:
+  host: smtp.example.com
+  username: mailer
+  from: noreply@example.com
+`)
+		var out bytes.Buffer
+		if err := runConfigDump(configDumpOptions{configPath: cfgPath, format: logx.FormatJSON}, &out); err != nil {
+			t.Fatalf("runConfigDump error = %v", err)
+		}
+		text := out.String()
+		for _, secret := range []string{
+			"pg-secret", "redis-secret", "oidc-top-secret", webhookKey,
+			"smtp-top-secret", "gsb-top-secret", "llm-top-secret", "gh-top-secret", "sms-top-secret",
+		} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("secret %q leaked in config dump: %s", secret, text)
+			}
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &decoded); err != nil {
+			t.Fatalf("config dump not valid json: %v\n%s", err, text)
+		}
+		if decoded["console"] == nil || decoded["worker"] == nil {
+			t.Fatalf("expected console and worker in dump: %+v", decoded)
+		}
+	})
+
+	t.Run("fails on invalid worker or console config", func(t *testing.T) {
+		applyEnv(t, baseConsoleTestEnv(), nil)
+		cfgPath := writeTempYAML(t, "worker:\n  concurrency: 0\n")
+		var out bytes.Buffer
+		if err := runConfigDump(configDumpOptions{configPath: cfgPath, format: logx.FormatJSON}, &out); err == nil {
+			t.Fatal("expected error for invalid worker config")
+		}
+		if out.Len() != 0 {
+			t.Fatalf("unexpected stdout on error: %s", out.String())
+		}
+	})
 }
 
 func phoneOTPConfigEqual(a, b PhoneOTPConfig) bool {
@@ -742,12 +875,13 @@ func consoleConfigEqual(a, b ConsoleConfig) bool {
 		a.OIDC == b.OIDC &&
 		a.GitHub == b.GitHub &&
 		phoneOTPConfigEqual(a.PhoneOTP, b.PhoneOTP) &&
+		a.PublicURL == b.PublicURL &&
 		a.WebDistDir == b.WebDistDir &&
 		a.PublicBaseURL == b.PublicBaseURL &&
 		a.WebhookSecretKey == b.WebhookSecretKey &&
-		slices.Equal(a.WebhookAllowedPorts, b.WebhookAllowedPorts) &&
-		a.TrustProxyHeaders == b.TrustProxyHeaders &&
-		slices.Equal(a.TrustedProxyCIDRs, b.TrustedProxyCIDRs) &&
+		slices.Equal(a.OutboundAllowedPorts, b.OutboundAllowedPorts) &&
+		a.Proxy.TrustHeaders == b.Proxy.TrustHeaders &&
+		slices.Equal(a.Proxy.TrustedCIDRs, b.Proxy.TrustedCIDRs) &&
 		a.IPRateLimit == b.IPRateLimit &&
 		a.IPRateBurst == b.IPRateBurst
 }
@@ -762,11 +896,8 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.JobTimeout == b.JobTimeout &&
 		a.ReapInterval == b.ReapInterval &&
 		a.CleanupInterval == b.CleanupInterval &&
-		a.SessionRetention == b.SessionRetention &&
-		a.DoneJobRetention == b.DoneJobRetention &&
-		a.DeadJobRetention == b.DeadJobRetention &&
-		a.InvitationRetention == b.InvitationRetention &&
-		a.OTPRetention == b.OTPRetention &&
+		a.RetentionShort == b.RetentionShort &&
+		a.RetentionLong == b.RetentionLong &&
 		a.StatsRetentionDays == b.StatsRetentionDays &&
 		a.AuditRetentionDays == b.AuditRetentionDays &&
 		a.RiskFetchTimeout == b.RiskFetchTimeout &&
@@ -779,7 +910,6 @@ func workerConfigEqual(a, b WorkerConfig) bool {
 		a.WebhookRetryBaseDelay == b.WebhookRetryBaseDelay &&
 		a.WebhookRetryMaxDelay == b.WebhookRetryMaxDelay &&
 		a.WebhookMaxConsecutiveFailures == b.WebhookMaxConsecutiveFailures &&
-		a.WebhookDeliveryRetention == b.WebhookDeliveryRetention &&
 		a.ConsolePublicURL == b.ConsolePublicURL &&
 		a.SMTP == b.SMTP
 }

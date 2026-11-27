@@ -15,15 +15,22 @@ import (
 
 func TestParseWorkerArgs(t *testing.T) {
 	tests := []struct {
-		name      string
-		args      []string
-		wantOK    bool
-		wantUsage bool
+		name       string
+		args       []string
+		wantOK     bool
+		wantUsage  bool
+		wantConfig string
 	}{
 		{
 			name:   "no flags",
 			args:   nil,
 			wantOK: true,
+		},
+		{
+			name:       "with config flag",
+			args:       []string{"--config", "/etc/shortlink.yaml"},
+			wantOK:     true,
+			wantConfig: "/etc/shortlink.yaml",
 		},
 		{
 			name:   "help flag",
@@ -41,7 +48,7 @@ func TestParseWorkerArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			_, ok, err := parseWorkerArgs(tt.args, &stderr)
+			opts, ok, err := parseWorkerArgs(tt.args, &stderr)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v (err=%v)", ok, tt.wantOK, err)
 			}
@@ -51,7 +58,33 @@ func TestParseWorkerArgs(t *testing.T) {
 			if !tt.wantUsage && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			if opts.configPath != tt.wantConfig {
+				t.Fatalf("configPath = %q, want %q", opts.configPath, tt.wantConfig)
+			}
 		})
+	}
+}
+
+func TestStripLeadingConfigFlagAndParseConfigCommand(t *testing.T) {
+	cfg, rest, err := stripLeadingConfigFlag([]string{"--config", "/tmp/a.yaml", "key", "issue"})
+	if err != nil || cfg != "/tmp/a.yaml" || len(rest) != 2 || rest[0] != "key" {
+		t.Fatalf("stripLeadingConfigFlag = (%q, %v, %v)", cfg, rest, err)
+	}
+	cfg, rest, err = stripLeadingConfigFlag([]string{"--config=/tmp/b.yaml", "serve"})
+	if err != nil || cfg != "/tmp/b.yaml" || len(rest) != 1 || rest[0] != "serve" {
+		t.Fatalf("stripLeadingConfigFlag(=) = (%q, %v, %v)", cfg, rest, err)
+	}
+	if _, _, err := stripLeadingConfigFlag([]string{"--config"}); !errors.Is(err, errUsage) {
+		t.Fatalf("missing config value err = %v, want errUsage", err)
+	}
+
+	var stderr bytes.Buffer
+	dumpOpts, ok, err := parseConfigCommand([]string{"dump", "--config", "/tmp/c.yaml", "--format", "text"}, &stderr)
+	if !ok || err != nil || dumpOpts.configPath != "/tmp/c.yaml" || dumpOpts.format != "text" {
+		t.Fatalf("parseConfigCommand = (%+v, %v, %v)", dumpOpts, ok, err)
+	}
+	if _, ok, err := parseConfigCommand([]string{"unknown"}, &stderr); ok || !errors.Is(err, errUsage) {
+		t.Fatalf("parseConfigCommand(unknown) = (%v, %v), want errUsage", ok, err)
 	}
 }
 

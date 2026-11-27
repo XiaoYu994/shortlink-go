@@ -3,7 +3,7 @@
 ## 前置条件
 
 - 本机 Docker 中有一个可用的 PostgreSQL 和 Redis，或者用项目自带的 `docker-compose.yml` 启动。
-- 项目根目录有 `.env`，至少包含：
+- 项目根目录有 `.env`（密钥与连接串），可选配合共享 `config.yaml`（复制 `config.example.yaml` 后设置 `SHORTLINK_CONFIG=config.yaml`，或启动时传 `--config`）：
 
 ```txt
 DATABASE_URL=postgres://user:password@127.0.0.1:5432/dbname?sslmode=disable
@@ -11,7 +11,7 @@ REDIS_URL=redis://localhost:6379/0
 VISITOR_SALT=dev-only-visitor-salt
 ```
 
-`REDIS_URL` 可选，支持密码、TLS（`rediss://`）和 DB 编号；配置时启动会 Ping Redis，留空时跳过缓存层直连 PostgreSQL（适合极简单 PG 部署，见 [ADR 0029](adr/0029-modular-feature-plugins.md)）。`VISITOR_SALT` 是访客哈希的密钥，`FEATURE_ANALYTICS=true`（默认）时 redirector 启动必填，设 `FEATURE_ANALYTICS=false` 关闭点击统计时可留空；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`TRUST_PROXY_HEADERS` 默认 `false`，只有部署在可信反向代理后面才设为 `true`，多跳代理场景需同时配置 `TRUSTED_PROXY_CIDRS` 右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。
+`REDIS_URL` 可选，支持密码、TLS（`rediss://`）和 DB 编号；配置时启动会 Ping Redis，留空时跳过缓存层直连 PostgreSQL（适合极简单 PG 部署，见 [ADR 0029](adr/0029-modular-feature-plugins.md)）。`VISITOR_SALT` 是访客哈希的密钥，`FEATURE_ANALYTICS=true`（默认）时 redirector 启动必填，设 `FEATURE_ANALYTICS=false` 关闭点击统计时可留空；开发用固定占位值即可，生产从密钥管理注入，不要提交真实值。`trusted_proxies` / `TRUSTED_PROXIES` 默认空（不信任转发头），设为 `["*"]` / `*` 为单跳反代，配置 CIDR 列表则右向剥离可信跳数提取真实客户 IP（防 UV 塌缩，见 [ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)、[ADR 0035](adr/0035-layered-config-and-secret-separation.md)）。redirector/console 可分别配置 `OPS_ADDR` 与 `CONSOLE_OPS_ADDR` 将 `/healthz`、`/readyz`、`/metrics` 物理隔离到独立运维端口；未设时共端口，由 `deploy/nginx.conf`（已含边缘 `limit_req` 限流）屏蔽运维路径。需要时执行 `docker compose --profile edge up -d nginx`，入口是 `http://127.0.0.1:8088`。容器里跑应用用 `make stack`，见下面的「应用栈」。可用 `make console ARGS="config dump --config config.yaml"` 校验并脱敏输出生效配置。
 
 `.env` 已被 gitignore，不会提交。
 
@@ -98,7 +98,7 @@ make run-worker       # 可选后台任务（异步风控 / Webhook / 邀请邮�
 
 > **默认热更新说明**：`make run-redirector`、`make run-console` 与 `make run-worker` 默认通过仓库根目录的 [`.air.toml`](../.air.toml) 启用热更新，修改各自依赖的 `.go` 文件后会自动重编译并优雅重启，三进程使用独立临时目录（`tmp/air/*`）互不干扰；为避免每次保存被 `.env` 的 `DRAIN_DELAY=5s` 卡住或触发端口复用冲突，热更新模式默认注入 `DEV_DRAIN_DELAY=0s`（需演练摘流时可传 `DEV_DRAIN_DELAY=5s`）。如需回退普通 `go run`，传 `HOT_RELOAD=0`（例如 `make run-console HOT_RELOAD=0`）。注意修改 `.env` 环境变量仍需手动重启对应进程。
 
-看到 `connected to postgres`、`connected to redis`（配置了 `REDIS_URL` 时；未配置则打印 `redis cache disabled`）和 `listening addr=...` 表示对应进程启动成功。两个 `make` 目标都会加载 `.env`。跳转进程用 `ADDR`，默认 `:8080`；管理进程只用 `CONSOLE_ADDR`，默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。当 `FEATURE_ANALYTICS=true` 时 redirector 没有 `VISITOR_SALT` 会直接退出，避免 UV 被静默记成 0；若只需最简短链服务，可仅配 `DATABASE_URL` 并设 `REDIS_URL="" FEATURE_ANALYTICS=false FEATURE_RISK_SCAN=false` 启动无 Redis/无统计/无风控的极简模式（注意跨进程与运维 CLI 保持开关一致）。密钥、租户和成员命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 在未配置 `REDIS_URL` 时也只写 PostgreSQL。
+看到 `connected to postgres`、`connected to redis`（配置了 `REDIS_URL` 时；未配置则打印 `redis cache disabled`）和 `listening addr=...` 表示对应进程启动成功。三个 `make` 目标都会加载 `.env`（若设置了 `SHORTLINK_CONFIG=config.yaml` 则同时读取该 YAML）。跳转进程用 `ADDR`（或 `redirector.addr`），默认 `:8080`；管理进程用 `CONSOLE_ADDR`（或 `console.addr`），默认 `:8081`。临时换端口可以写在命令上，例如 `make run-console CONSOLE_ADDR=:18081`。当 `FEATURE_ANALYTICS=true` 时 redirector 没有 `VISITOR_SALT` 会直接退出，避免 UV 被静默记成 0；若只需最简短链服务，可不传配置文件、仅配 `DATABASE_URL` 并设 `REDIS_URL="" FEATURE_ANALYTICS=false FEATURE_RISK_SCAN=false` 启动无 Redis/无统计/无风控的极简模式（注意跨进程与运维 CLI 保持开关一致）。密钥、租户和成员命令 `make console ...` 不启动 HTTP，也不需要 Redis；`link ban/unban` 在未配置 `REDIS_URL` 时也只写 PostgreSQL。
 
 检查：
 
@@ -161,7 +161,7 @@ Prometheus 每 5 秒抓取一次 `/metrics`，抓取请求不计入访问日志�
 - 跳转查询先走 Redis：key 是 `shortlink:link:<code>`，value 是完整 `Link` 的 JSON。
 - 正缓存 TTL 取剩余寿命和 5 分钟里更短的那个；没有到期时间时是 5 分钟（[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）。查不到的短码写 JSON `null` 做负缓存，TTL 1 分钟。
 - 回源写缓存（正、负）都用 `SET NX`，只有 key 不存在时才写。console 在创建、修改、删除、封禁、解封提交后无条件覆盖缓存；删除和封禁写负缓存，修改后的链接不可跳转也写负缓存，解封后如果仍然停用或过期同样写负缓存。这样在途旧回源不会盖掉管理写的新值。
-- 并发未命中用 singleflight 合并回源。普通未命中和 Redis 读失败（fallback）各有一条回源限流：许可数分别是 `CACHE_MISS_CONCURRENCY`（默认 8）和固定 8，拿不到许可立即返回 503。单次回源超时由 `CACHE_FETCH_TIMEOUT`（默认 1s）控制，独立于 `REQUEST_TIMEOUT`。启动时 Ping 失败进程会退出，属于部署配置错误。
+- 并发未命中用 singleflight 合并回源。普通未命中和 Redis 读失败（fallback）各有一条回源限流：许可数分别是 `redirector.cache_miss_concurrency`（默认 8）和固定 8，拿不到许可立即返回 503。单次回源超时由 `cache.fetch_timeout`（默认 1s）控制，独立于 `http.request_timeout`。启动时 Ping 失败进程会退出，属于部署配置错误。
 - 修改或删除后 Redis 写失败只影响一致性：旧值最多保留到正缓存 TTL（5 分钟）。删除不是强撤销，已经在途的跳转仍可能返回 302。封禁和解封例外：缓存没写上会返回错误，命令退出码非 0，按「封禁和解封链接」一节重跑。
 - 查看某个短码的缓存：
 
@@ -188,9 +188,8 @@ Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程�
 # 1. 按需启动本地 Jaeger（UI :16686，OTLP HTTP 接收 :4318）
 make tracing
 
-# 2. 在 .env 或进程环境配置导出端点与采样率（建议生产同时开启 LOG_FORMAT=json）
+# 2. 在 .env 或进程环境配置导出端点（采样率可在 config.yaml 的 tracing.sample_rate 调整；建议生产开启 LOG_FORMAT=json）
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-export OTEL_TRACES_SAMPLE_RATE=1
 export LOG_FORMAT=json
 ```
 
@@ -625,10 +624,10 @@ go test ./internal/postgres -run '^$' -bench RecordClicks -benchtime 5s -cpuprof
 go tool pprof -http :0 cpu.out
 ```
 
-真实进程要先打开剖析端口（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)），再在压测期间采样：
+真实进程要先在 `config.yaml` 中配置 `redirector.pprof_addr: "127.0.0.1:6060"`（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)），再在压测期间采样：
 
 ```bash
-PPROF_ADDR=127.0.0.1:6060 make run-redirector
+make run-redirector ARGS="--config config.yaml"
 
 go tool pprof -http :0 'http://127.0.0.1:6060/debug/pprof/profile?seconds=10'   # CPU
 curl -o trace.out 'http://127.0.0.1:6060/debug/pprof/trace?seconds=2'           # 执行跟踪
@@ -756,7 +755,7 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
 
 ## 本地 OIDC 登录与成员管理（Dex）
 
-默认 `.env.example` 把四个 `OIDC_*` 注释掉了，只开 API Key 路径。本地联调登录、会话、`/me` 和成员管理时：
+默认不开启任何登录插件，只开 API Key 路径。本地联调登录、会话、`/me` 和成员管理时：
 
 1. 启动 PostgreSQL、Redis 和本地 Dex（`127.0.0.1:5556`）：
 
@@ -764,13 +763,22 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
    make deps-up
    ```
 
-2. 取消 `.env` 末尾 `OIDC_*` 四行的注释（保持全开，只配一部分 `console serve` 会拒绝启动）：
+2. 在 `config.yaml`（设置 `SHORTLINK_CONFIG=config.yaml`）中配置控制台基址与 OIDC 提供方（回调地址自动推导为 `http://127.0.0.1:8081/api/v1/auth/oidc/callback`），并在 `.env` 中注入密钥：
+
+   ```yaml
+   # config.yaml
+   console:
+     public_url: "http://127.0.0.1:8081"
+     auth:
+       oidc:
+         issuer: "http://127.0.0.1:5556/dex"
+         client_id: "shortlink-console"
+   ```
 
    ```txt
-   OIDC_ISSUER=http://127.0.0.1:5556/dex
-   OIDC_CLIENT_ID=shortlink-console
+   # .env
+   SHORTLINK_CONFIG=config.yaml
    OIDC_CLIENT_SECRET=shortlink-console-secret
-   OIDC_REDIRECT_URL=http://127.0.0.1:8081/api/v1/auth/oidc/callback
    ```
 
 3. 预先把至少一个租户和静态账号的邀请写入库（`--tenant` 填 `key issue` 输出的 `tenant_id`，空库首次签发为 `1`），然后启动 `make run-console`（另一终端可同时启动 `make run-redirector`）：
@@ -807,12 +815,20 @@ make console ARGS="member invite --tenant 1 --email bob@example.com --role membe
 如果要在本地真实联调 GitHub OAuth 2.0（可单独开启，也可与上面的 Dex OIDC 并存）：
 
 1. 在 GitHub Developer Settings 创建一个 OAuth App，将 Authorization callback URL 设为 `http://127.0.0.1:8081/api/v1/auth/github/callback`。
-2. 在 `.env` 取消 `GITHUB_*` 三行注释并填入对应凭据：
+2. 在 `config.yaml` 填入 `console.public_url` 与 `console.auth.github.client_id`，并在 `.env` 注入 `GITHUB_CLIENT_SECRET`（回调地址自动推导）：
+
+   ```yaml
+   # config.yaml
+   console:
+     public_url: "http://127.0.0.1:8081"
+     auth:
+       github:
+         client_id: "<你的 Client ID>"
+   ```
 
    ```txt
-   GITHUB_CLIENT_ID=<你的 Client ID>
+   # .env
    GITHUB_CLIENT_SECRET=<你的 Client Secret>
-   GITHUB_REDIRECT_URL=http://127.0.0.1:8081/api/v1/auth/github/callback
    ```
 
 3. 启动 `make run-console` 后，在浏览器打开 `http://127.0.0.1:8081/api/v1/auth/github/login` 完成授权（若要自动兑现组织邀请，需要用 `console member invite` 预先登记该 GitHub 账号主邮箱且该邮箱在 GitHub 已验证）。GitHub 与 Dex 按 `(issuer, subject)` 隔离，即使邮箱相同也不会自动合并账号。
@@ -842,7 +858,7 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 - 用量不能再从 `links` 重算：删除是硬删除，本月创建后又删掉的链接数不回来，绕过应用直接往 `links` 插行也不会计入。不要手工改 `link_usage` 对账。
 - 限流是进程内令牌桶，速率和突发容量都等于 `rate_limit_per_second`，`0` 关闭。超限返回 429 和 `Retry-After`。
 - 改完库下一次请求就生效，不用重启。console 多副本时每个副本各限各的，实际总量是配置值乘以副本数；扩缩容后按需要调整。
-- 鉴权前按源 IP 设有有界进程内限流（`CONSOLE_IP_RATE_LIMIT` / `CONSOLE_IP_RATE_BURST`，默认 `60`/s、突发 `120`，`0` 关闭），配合入口层 nginx `limit_req` 防止大量伪造密钥穿透查询 `api_keys`（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。
+- 鉴权前按源 IP 设有有界进程内限流（`console.ip_rate_limit` / `console.ip_rate_burst`，默认 `60`/s、突发 `120`，`0` 关闭），配合入口层 nginx `limit_req` 防止大量伪造密钥穿透查询 `api_keys`（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）。
 
 ## 最小前端控制台（`web/`）
 
@@ -853,8 +869,9 @@ make console ARGS="tenant set --tenant 1 --rate-limit 0"
 ```bash
 make web-install
 make web-check    # tsc + eslint + vitest + vite build
-# 同时启动 redirector（:8080），并用 PUBLIC_BASE_URL 让前端生成的短链与二维码指向 redirector
-PUBLIC_BASE_URL=http://127.0.0.1:8080 WEB_DIST_DIR=web/dist make run-console
+# 在 config.yaml 中设置 console.public_base_url: "http://127.0.0.1:8080" 与 console.web_dist_dir: "web/dist"
+# 并同时启动 redirector（:8080）和 console（:8081）
+make run-console
 ```
 
 浏览器打开 `http://127.0.0.1:8081`（或 `.env` 中 `CONSOLE_ADDR` 对应端口），即可通过 Dex/GitHub 登录后自助创建组织、管理短链与查看统计、管理成员与邀请、签发与吊销组织 API Key。
@@ -862,7 +879,7 @@ PUBLIC_BASE_URL=http://127.0.0.1:8080 WEB_DIST_DIR=web/dist make run-console
 方式二：前端热更新开发
 
 ```bash
-# 1. 确保 deploy/dex.yaml 已包含 http://127.0.0.1:5173/api/v1/auth/oidc/callback，并把 .env 的 OIDC_REDIRECT_URL 指到 5173 端口
+# 1. 确保 deploy/dex.yaml 已包含 http://127.0.0.1:5173/api/v1/auth/oidc/callback，并把 config.yaml 的 console.public_url 指到 http://127.0.0.1:5173
 # 2. 启动 redirector 与 console
 make run-redirector
 make run-console
@@ -881,10 +898,10 @@ make web-dev
 WORKER_ADDR=127.0.0.1:8082 make run-worker
 ```
 
-- 写库路径通过 `postgres.TxHook`（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）在核心租户事务内按已启用特性分发异步任务：`FEATURE_RISK_SCAN=true` 时创建短链与改 URL 入队 `link.risk_scan`；`FEATURE_ANALYTICS=true` 时 `Delete` 入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行；配置 `WEBHOOK_SECRET_KEY` 时扇出 `webhook.deliver`；配置 `SMTP_HOST` 时邀请入队 `invitation.email`。
-- `console worker` 按 `WorkerModule` 装配各特性消费者与周期维护任务，仅按已注册 `kind` 白名单通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `WORKER_MAX_PER_TENANT=4`，滚动发布新任务类型时旧 worker 不会误抢并标 `dead`，[ADR 0033](adr/0033-job-claim-kind-filtering.md)）；已关闭特性的历史残留任务由 `disabledSkipHandler` 自动按 `job.Skip` 归档，不污染 `dead` 队列。风控扫描按 [ADR 0034](adr/0034-layered-risk-scan-and-ai-judge.md) 分层执行：L0 先判 `RISK_BLOCKED_HOSTS` / `RISK_ALLOWED_HOSTS` / URL 关键词；L1 可选查 Google Safe Browsing v4（`RISK_GSB_API_KEY`）；L2 在 `DialContext`、`CheckRedirect` 与重定向跨域名处做防 SSRF（私网/回环/云元数据/NAT64/6to4 与 `RISK_ALLOWED_PORTS`）与按 host 限速，跳过二进制 `Content-Type` 并从 HTML 流式剥离脚本样式提取 `4 KiB` 可见净文本；L3 可选接 OpenAI 兼容 LLM（`RISK_LLM_BASE_URL` + `RISK_LLM_MODEL`，支持 `RISK_LLM_MODE=ban|shadow` 与每分钟预算限流），显式处理 `429 Retry-After` 与上游内容审核拦截（`outcome=filtered`）。命中风险后调用 `BanIfURL` 以 `ban_source=risk` 下架；SSRF/端口拦截/超跳数或重试耗尽仍不可达的外部 URL 记入 `shortlink_risk_scans_total` 后按 `job.Skip` 收尾，不污染 `dead` 队列告警。
+- 写库路径通过 `postgres.TxHook`（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）在核心租户事务内按已启用特性分发异步任务：`features.risk_scan=true` 时创建短链与改 URL 入队 `link.risk_scan`；`features.analytics=true` 时 `Delete` 入队 `link.purge_stats` 异步按 PK 元组分批清空日统计残留行；配置 `WEBHOOK_SECRET_KEY` 时扇出 `webhook.deliver`；配置 `smtp.host` 时邀请入队 `invitation.email`。
+- `console worker` 按 `WorkerModule` 装配各特性消费者与周期维护任务，仅按已注册 `kind` 白名单通过 `FOR UPDATE SKIP LOCKED` 抢占任务并做单租户并发软上限（默认 `worker.max_per_tenant=4`，滚动发布新任务类型时旧 worker 不会误抢并标 `dead`，[ADR 0033](adr/0033-job-claim-kind-filtering.md)）；已关闭特性的历史残留任务由 `disabledSkipHandler` 自动按 `job.Skip` 归档，不污染 `dead` 队列。风控扫描按 [ADR 0034](adr/0034-layered-risk-scan-and-ai-judge.md) 分层执行：L0 先判 `worker.risk.{blocked_hosts, allowed_hosts, blocked_keywords}`；L1 可选查 Google Safe Browsing v4（`RISK_GSB_API_KEY`）；L2 在 `DialContext`、`CheckRedirect` 与重定向跨域名处做防 SSRF（私网/回环/云元数据/NAT64/6to4 与 `outbound.allowed_ports`）与按 host 限速，跳过二进制 `Content-Type` 并从 HTML 流式剥离脚本样式提取 `4 KiB` 可见净文本；L3 可选接 OpenAI 兼容 LLM（`worker.risk.llm.{base_url, model}` + `RISK_LLM_API_KEY`，支持 `mode: ban|shadow` 与每分钟预算限流），显式处理 `429 Retry-After` 与上游内容审核拦截（`outcome=filtered`）。命中风险后调用 `BanIfURL` 以 `ban_source=risk` 下架；SSRF/端口拦截/超跳数或重试耗尽仍不可达的外部 URL 记入 `shortlink_risk_scans_total` 后按 `job.Skip` 收尾，不污染 `dead` 队列告警。
 - Redis 可选：配置 `REDIS_URL` 时 `VerdictCache` 按 `ComputeRuleVersion` 规则指纹分版本存扫描结果（fail-open，4xx、降级与 `shadow`/低置信度/审核拦截结果不写入安全缓存），不承载任务队列；封禁遇 `cache.ErrNotUpdated` 记 Warn 日志返回，不重抓外网 URL，旧正缓存按 5 分钟 TTL 自然失效（[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）；未配置 `REDIS_URL` 时直接跳过缓存。
-- worker 启动时始终调用 `EnsureAuditPartitions` 预建 `audit_logs` 未来 2 个月分区，仅在 `FEATURE_ANALYTICS=true` 时调用 `EnsureStatsPartitions` 预建三张统计表未来分区；后台按 `WORKER_CLEANUP_INTERVAL`（默认 1 小时）分批清理过期 `sessions`、`done`/`dead` 任务（`dead` 默认 30 天）、过期/撤销/被取代 `invitations`（默认 30 天），运行 `audit_partitions.maintain`（`WORKER_AUDIT_RETENTION_DAYS=180`），并按开关运行 `stats_partitions.maintain`（`WORKER_STATS_RETENTION_DAYS=90`）与 `webhooks.cleanup_deliveries`（永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
+- worker 启动时始终调用 `EnsureAuditPartitions` 预建 `audit_logs` 未来 2 个月分区，仅在 `features.analytics=true` 时调用 `EnsureStatsPartitions` 预建三张统计表未来分区；后台按 `worker.cleanup_interval`（默认 1 小时）分批清理过期 `sessions` / `done_jobs` / `webhook_deliveries`（`worker.retention.short` 默认 `168h`）、`dead_jobs` / `invitations`（`worker.retention.long` 默认 `720h`）、过期 OTP 挑战（默认 `24h`），运行 `audit_partitions.maintain`（`worker.retention.audit_days=180`），并按开关运行 `stats_partitions.maintain`（`worker.retention.stats_days=90`）（永不删除 `*_default` 兜底分区，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）。
 - 仅本地联调或冒烟测试可用 `--allow-test-host 127.0.0.1:<port>` 精确放行单个回环测试站（命令行严格限制仅放行 `localhost` 或回环 IP），不提供关闭 SSRF 检查的全局环境变量。
 
 ## 后台任务与异步风控基准测试（2026-11-23）
@@ -1000,7 +1017,7 @@ curl -s localhost:8081/api/v1/links/AbC123xy/stats \
 
 默认查最近 8 个 UTC 日（`to` 为今天，`from` 为 `to - 7 天`）。可以用 `?from=...&to=...` 指定 RFC3339 时间，跨度不超过 90 天。`total_clicks` 是终身累计，`clicks` 是日趋势；`devices` 和 `clients` 固定返回全部类别，没有数据的为 0。`unique_visitors` 是每天 UV 相加，不是跨天去重。
 
-访客哈希依赖 `VISITOR_SALT`。换盐会让当天的新旧哈希分裂，UV 可能偏高，安排在 UTC 零点后换。`TRUST_PROXY_HEADERS=false` 时用连接地址，代理后面看到的 IP 会都一样，UV 会偏低；确认代理可信后再打开。打开后使用 `X-Forwarded-For` 的最右一段。不要用会把客户端原头留在左边的追加方式；`deploy/nginx.conf` 覆盖成 `$remote_addr`。
+访客哈希依赖 `VISITOR_SALT`。换盐会让当天的新旧哈希分裂，UV 可能偏高，安排在 UTC 零点后换。`trusted_proxies` / `TRUSTED_PROXIES` 为空时用连接地址，代理后面看到的 IP 会都一样，UV 会偏低；确认代理可信后再配置（单跳反代设 `["*"]` / `*`，多跳配置可信 CIDR 列表）。不要用会把客户端原头留在左边的追加方式；`deploy/nginx.conf` 覆盖成 `$remote_addr`。
 
 ## 查看数据库
 
@@ -1055,7 +1072,7 @@ make selfcheck        # test-db + verify + test-integration + smoke
 先用 API Key 验证健康检查、创建、写穿缓存、跳转、HEAD、404、非法参数、过期链接、列表和三种排序、
 修改后缓存写穿、停用和启用、封禁和解封、删除、统计、配额、限流、API Key scope、租户隔离和路由隔离，
 再邀请本地 Dex 测试用户并用 curl 走完 OIDC 授权码登录、`/api/v1/me`、`/api/v1/members`、会话 Cookie 加 `X-Org-ID` 创建并跳转、跨站写拒绝（403）和登出后重放返回 401，最后检查指标和 SIGTERM 优雅退出。
-脚本会自己设置一个 `VISITOR_SALT`（如果环境里没有），并在启动 `console serve` 时注入指向 `127.0.0.1:5556/dex`（可用 `SMOKE_OIDC_*` 覆盖）与 `$SMOKE_CONSOLE_ADDR` 回调地址的 `OIDC_*` 环境变量；同样会重建测试库，不碰开发库。
+脚本会自己设置一个 `VISITOR_SALT`（如果环境里没有），并在临时目录生成 `smoke.yaml` 配置（使用 `127.0.0.1:5556/dex` 与 `$SMOKE_CONSOLE_ADDR` 作为 `console.public_url`，同时先跑一遍 `console config dump` 校验脱敏输出），再追加一轮无 YAML 的极简单 PG 模式冒烟；同样会重建测试库，不碰开发库。
 
 测试配置在 `.env` 里：
 
@@ -1093,12 +1110,12 @@ Redis 缓存测试只读 `TEST_REDIS_URL`，未设置时自动跳过。测试用
 | `connect postgres` 失败 | 检查容器是否运行、端口、用户名密码 |
 | `connect redis` 失败 | 检查 Redis 是否运行、`REDIS_URL` 是否正确；配置了 `REDIS_URL` 时启动 Ping 失败进程会退出，不需要缓存可留空 `REDIS_URL` |
 | `VISITOR_SALT is required` | `FEATURE_ANALYTICS=true` 时 redirector 需要访客哈希盐；从 `.env.example` 补一行开发占位值，或设 `FEATURE_ANALYTICS=false` 关闭点击统计 |
-| `OIDC 服务不可达` | 冒烟或启动开启 `OIDC_*` 的 console 前没起 Dex；使用项目自带 compose 时先跑 `make deps-up` |
-| `OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and OIDC_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `OIDC_*`；要么四个全配（参考上面的 Dex 示例），要么全部留空 |
-| `GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URL must all be set or all be empty` | 只配了一部分 `GITHUB_*`；要么三个全配，要么全部留空 |
-| 统计里 `unique_visitors` 一直是 0 | 检查 redirector 是否配置了 `VISITOR_SALT`；代理后面还需要 `TRUST_PROXY_HEADERS=true`，否则所有请求的 IP 都一样 |
+| `OIDC 服务不可达` | 冒烟或启动开启 OIDC 的 console 前没起 Dex；使用项目自带 compose 时先跑 `make deps-up` |
+| `console.auth.oidc.issuer, console.auth.oidc.client_id, and OIDC_CLIENT_SECRET must all be set or all be empty` | 只配了一部分 OIDC 参数；要么连同 `console.public_url` 一起配齐，要么全部留空 |
+| `console.auth.github.client_id and GITHUB_CLIENT_SECRET must both be set or both be empty` | 只配了一部分 GitHub 参数；要么连同 `console.public_url` 一起配齐，要么全部留空 |
+| 统计里 `unique_visitors` 一直是 0 | 检查 redirector 是否配置了 `VISITOR_SALT`；代理后面还需要配置 `trusted_proxies` / `TRUSTED_PROXIES`，否则所有请求的 IP 都一样 |
 | `PATCH` 成功后仍跳旧地址 | 看 console 的 `shortlink_cache_writes_total{result="error"}`；Redis 写失败时旧值最多保留到 TTL（5 分钟） |
-| 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `CACHE_MISS_CONCURRENCY` |
+| 跳转大量 503 | 回源并发已满。先看 `shortlink_cache_shed_total{path}` 和 `shortlink_cache_gets_total{result}`：`path="fallback"` 查 Redis，`path="miss"` 说明长尾短码或随机扫描打满了 `redirector.cache_miss_concurrency` |
 | cache 测试被跳过 | `.env` 里没有 `TEST_REDIS_URL`；`make test` 会自动加载 `.env` |
 | `relation "links" does not exist` | 在仓库根目录执行 `make migrate` |
 | `relation "links" already exists` | 库是旧初始化脚本建的，没有 `schema_migrations`。学习用的 compose 库可以 `docker compose down -v`，再 `make deps-up` 和 `make migrate` |

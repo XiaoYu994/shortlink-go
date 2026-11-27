@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"shortlink/internal/config"
 	"shortlink/internal/identity"
 	"shortlink/internal/postgres"
 )
@@ -27,7 +29,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	externalID := "seam-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"key", "issue", "--name", "seam", "--external-id", externalID}, &stdout, &stderr, openStore, failLinkOpen(t))
+	err := run([]string{"key", "issue", "--name", "seam", "--external-id", externalID}, &stdout, &stderr, openTestStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("issue: %v\nstderr: %s", err, stderr.String())
 	}
@@ -55,7 +57,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	err = run([]string{"key", "issue", "--tenant", strconv.FormatInt(tenantID, 10), "--scope", "stats:read", "--scope", "links:read"},
-		&stdout, &stderr, openStore, failLinkOpen(t))
+		&stdout, &stderr, openTestStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("issue scoped key: %v\nstderr: %s", err, stderr.String())
 	}
@@ -75,7 +77,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	err = run([]string{"key", "list", "--tenant", strconv.FormatInt(tenantID, 10)}, &stdout, &stderr, openStore, failLinkOpen(t))
+	err = run([]string{"key", "list", "--tenant", strconv.FormatInt(tenantID, 10)}, &stdout, &stderr, openTestStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("list: %v\nstderr: %s", err, stderr.String())
 	}
@@ -90,7 +92,7 @@ func TestConsoleKeyCommandsUseDatabase(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	err = run([]string{"key", "revoke", "--id", strconv.FormatInt(keyID, 10)}, &stdout, &stderr, openStore, failLinkOpen(t))
+	err = run([]string{"key", "revoke", "--id", strconv.FormatInt(keyID, 10)}, &stdout, &stderr, openTestStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("revoke: %v\nstderr: %s", err, stderr.String())
 	}
@@ -121,7 +123,7 @@ func TestConsoleMemberInviteUsesDatabase(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := run([]string{"member", "invite", "--tenant", strconv.FormatInt(tenantID, 10), "--email", mixedEmail, "--role", "admin"},
-		&stdout, &stderr, openStore, failLinkOpen(t))
+		&stdout, &stderr, openTestStore, failLinkOpen(t))
 	if err != nil {
 		t.Fatalf("member invite: %v\nstderr: %s", err, stderr.String())
 	}
@@ -148,12 +150,12 @@ func TestConsoleMemberInviteUsesDatabase(t *testing.T) {
 	// 同租户重复邀请同邮箱返回 ErrInvitationPending；不存在租户返回 ErrTenantNotFound。
 	stdout.Reset()
 	err = run([]string{"member", "invite", "--tenant", strconv.FormatInt(tenantID, 10), "--email", email, "--role", "viewer"},
-		&stdout, &stderr, openStore, failLinkOpen(t))
+		&stdout, &stderr, openTestStore, failLinkOpen(t))
 	if !errors.Is(err, postgres.ErrInvitationPending) {
 		t.Fatalf("duplicate invite err = %v, want ErrInvitationPending", err)
 	}
 	err = run([]string{"member", "invite", "--tenant", "999999999", "--email", email, "--role", "viewer"},
-		&stdout, &stderr, openStore, failLinkOpen(t))
+		&stdout, &stderr, openTestStore, failLinkOpen(t))
 	if !errors.Is(err, postgres.ErrTenantNotFound) {
 		t.Fatalf("missing tenant invite err = %v, want ErrTenantNotFound", err)
 	}
@@ -195,6 +197,10 @@ func TestConsoleMemberInviteUsesDatabase(t *testing.T) {
 	}
 }
 
+func openTestStore(ctx context.Context) (adminStore, io.Closer, error) {
+	return openStore(ctx, "")
+}
+
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -224,7 +230,8 @@ func openTestDB(t *testing.T) *sql.DB {
 		release()
 		_ = db.Close()
 	})
-	// openStore 读的是 DATABASE_URL。指到测试库，避免命令写进开发库。
+	// openStore 读的是 DATABASE_URL 与可选 SHORTLINK_CONFIG。指到测试库并隔离宿主机配置，避免写进开发库或受相对路径影响。
+	t.Setenv(config.EnvConfigPath, "")
 	t.Setenv("DATABASE_URL", dsn)
 	return db
 }

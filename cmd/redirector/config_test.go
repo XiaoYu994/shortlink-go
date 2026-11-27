@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -18,33 +21,19 @@ import (
 
 func baseRedirectorTestEnv() map[string]string {
 	return map[string]string{
+		config.EnvConfigPath:          "",
 		"ADDR":                        "",
 		"OPS_ADDR":                    "",
 		"DATABASE_URL":                "postgres://localhost/shortlink",
-		"DB_MAX_OPEN_CONNS":           "",
-		"DB_MAX_IDLE_CONNS":           "",
-		"DB_CONN_MAX_LIFETIME":        "",
-		"DB_CONN_MAX_IDLE_TIME":       "",
-		"REQUEST_TIMEOUT":             "",
-		"SHUTDOWN_TIMEOUT":            "",
-		"DRAIN_DELAY":                 "",
-		"CACHE_MISS_CONCURRENCY":      "",
-		"CACHE_FETCH_TIMEOUT":         "",
 		"REDIS_URL":                   "redis://localhost:6379/0",
 		"VISITOR_SALT":                "test-salt",
-		"TRUST_PROXY_HEADERS":         "",
-		"TRUSTED_PROXY_CIDRS":         "",
+		"TRUSTED_PROXIES":             "",
 		"LOG_LEVEL":                   "",
 		"LOG_FORMAT":                  "",
-		"PPROF_ADDR":                  "",
-		"ACCESS_LOG_SAMPLE_RATE":      "",
-		"ACCESS_LOG_SLOW_THRESHOLD":   "",
-		"OIDC_ISSUER":                 "",
-		"GITHUB_CLIENT_ID":            "",
+		"DRAIN_DELAY":                 "",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
 		"FEATURE_ANALYTICS":           "",
 		"FEATURE_RISK_SCAN":           "",
-		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
-		"OTEL_TRACES_SAMPLE_RATE":     "",
 	}
 }
 
@@ -71,43 +60,76 @@ func defaultRedirectorConfig() RedirectorConfig {
 	}
 }
 
+func TestParseRedirectorArgs(t *testing.T) {
+	var stderr bytes.Buffer
+	path, ok, err := parseRedirectorArgs([]string{"--config", "/etc/shortlink.yaml"}, &stderr)
+	if !ok || err != nil || path != "/etc/shortlink.yaml" {
+		t.Fatalf("parseRedirectorArgs = (%q, %v, %v)", path, ok, err)
+	}
+	if _, ok, err := parseRedirectorArgs([]string{"-h"}, &stderr); ok || err != nil {
+		t.Fatalf("help = (%v, %v), want (false, nil)", ok, err)
+	}
+	if _, ok, err := parseRedirectorArgs([]string{"extra"}, &stderr); ok || !errors.Is(err, errUsage) {
+		t.Fatalf("extra arg = (%v, %v), want errUsage", ok, err)
+	}
+}
+
 func TestLoadRedirectorConfig(t *testing.T) {
 	base := baseRedirectorTestEnv()
 	defaults := defaultRedirectorConfig()
 
 	tests := []struct {
 		name    string
+		yaml    string
 		env     map[string]string
+		flagCfg bool
 		want    RedirectorConfig
 		wantErr string
 	}{
 		{name: "defaults", want: defaults},
 		{
-			name: "explicit values",
+			name: "yaml values with env overrides",
+			yaml: `
+database:
+  max_open_conns: 20
+  max_idle_conns: 4
+  conn_max_lifetime: 1h30m
+  conn_max_idle_time: 5m
+http:
+  request_timeout: 2s
+  shutdown_timeout: 15s
+  drain_delay: 9s
+cache:
+  fetch_timeout: 500ms
+trusted_proxies:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+log:
+  level: warn
+  format: json
+redirector:
+  addr: ":9090"
+  ops_addr: "127.0.0.1:9091"
+  pprof_addr: "127.0.0.1:6060"
+  cache_miss_concurrency: 4
+  access_log_sample_rate: 0.1
+  access_log_slow_threshold: 150ms
+console:
+  auth:
+    oidc:
+      issuer: "not-decoded-by-redirector"
+`,
 			env: map[string]string{
-				"ADDR":                      ":9090",
-				"OPS_ADDR":                  "127.0.0.1:9091",
-				"DATABASE_URL":              "postgres://user:pass@db:5432/shortlink?sslmode=disable",
-				"DB_MAX_OPEN_CONNS":         "20",
-				"DB_MAX_IDLE_CONNS":         "4",
-				"DB_CONN_MAX_LIFETIME":      "1h30m",
-				"DB_CONN_MAX_IDLE_TIME":     "5m",
-				"REQUEST_TIMEOUT":           "2s",
-				"SHUTDOWN_TIMEOUT":          "15s",
-				"DRAIN_DELAY":               "3s",
-				"CACHE_MISS_CONCURRENCY":    "4",
-				"CACHE_FETCH_TIMEOUT":       "500ms",
-				"REDIS_URL":                 "rediss://user:pass@redis:6380/1",
-				"VISITOR_SALT":              "prod-salt",
-				"TRUST_PROXY_HEADERS":       "true",
-				"TRUSTED_PROXY_CIDRS":       "10.0.0.0/8, 172.16.0.0/12",
-				"LOG_FORMAT":                "json",
-				"ACCESS_LOG_SAMPLE_RATE":    "0.1",
-				"ACCESS_LOG_SLOW_THRESHOLD": "150ms",
+				"ADDR":         ":19090",
+				"DATABASE_URL": "postgres://user:pass@db:5432/shortlink?sslmode=disable",
+				"REDIS_URL":    "rediss://user:pass@redis:6380/1",
+				"VISITOR_SALT": "prod-salt",
+				"DRAIN_DELAY":  "3s",
+				"LOG_LEVEL":    "info",
 			},
 			want: RedirectorConfig{
 				BaseConfig: config.BaseConfig{
-					Addr:        ":9090",
+					Addr:        ":19090",
 					OpsAddr:     "127.0.0.1:9091",
 					DatabaseURL: "postgres://user:pass@db:5432/shortlink?sslmode=disable",
 					RedisURL:    "rediss://user:pass@redis:6380/1",
@@ -120,35 +142,37 @@ func TestLoadRedirectorConfig(t *testing.T) {
 					RequestTimeout:    2 * time.Second,
 					ShutdownTimeout:   15 * time.Second,
 					DrainDelay:        3 * time.Second,
+					LogLevel:          slog.LevelInfo,
 					LogFormat:         config.LogFormatJSON,
 					CacheFetchTimeout: 500 * time.Millisecond,
 					Tracing:           config.DefaultTracingConfig(),
 				},
-				Features:               config.FeatureFlags{Analytics: true, RiskScan: true},
-				VisitorSalt:            "prod-salt",
-				TrustProxyHeaders:      true,
-				TrustedProxyCIDRs:      []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12")},
+				Features:    config.FeatureFlags{Analytics: true, RiskScan: true},
+				VisitorSalt: "prod-salt",
+				Proxy: config.ProxyConfig{
+					TrustHeaders: true,
+					TrustedCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12")},
+				},
+				PprofAddr:              "127.0.0.1:6060",
 				CacheMissConcurrency:   4,
 				AccessLogSampleRate:    0.1,
 				AccessLogSlowThreshold: 150 * time.Millisecond,
 			},
 		},
 		{
-			name: "ignores invalid console oauth env",
-			env: map[string]string{
-				"OIDC_ISSUER":      "not-a-url",
-				"GITHUB_CLIENT_ID": "partial-only",
-			},
-			want: defaults,
-		},
-		{
-			name: "pprof on loopback",
-			env:  map[string]string{"PPROF_ADDR": "127.0.0.1:6060"},
-			want: func() RedirectorConfig { c := defaults; c.PprofAddr = "127.0.0.1:6060"; return c }(),
+			name:    "flag config overrides SHORTLINK_CONFIG",
+			yaml:    "redirector:\n  cache_miss_concurrency: 12\n",
+			env:     map[string]string{config.EnvConfigPath: "/does/not/exist.yaml"},
+			flagCfg: true,
+			want: func() RedirectorConfig {
+				c := defaults
+				c.CacheMissConcurrency = 12
+				return c
+			}(),
 		},
 		{
 			name: "pprof on localhost",
-			env:  map[string]string{"PPROF_ADDR": "localhost:6060"},
+			yaml: "redirector:\n  pprof_addr: localhost:6060\n",
 			want: func() RedirectorConfig { c := defaults; c.PprofAddr = "localhost:6060"; return c }(),
 		},
 		{
@@ -166,22 +190,19 @@ func TestLoadRedirectorConfig(t *testing.T) {
 				return c
 			}(),
 		},
-		{name: "ops addr collides with addr", env: map[string]string{"ADDR": ":8080", "OPS_ADDR": ":8080"}, wantErr: "OPS_ADDR must differ from ADDR"},
-		{name: "trusted cidrs without trust header", env: map[string]string{"TRUSTED_PROXY_CIDRS": "10.0.0.0/8"}, wantErr: "TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HEADERS=true"},
-		{name: "invalid trusted cidrs", env: map[string]string{"TRUST_PROXY_HEADERS": "true", "TRUSTED_PROXY_CIDRS": "bad-cidr"}, wantErr: "invalid"},
+		{name: "rejects visitor_salt in yaml", yaml: "redirector:\n  visitor_salt: leaked\n", wantErr: "visitor_salt"},
+		{name: "rejects unknown top-level section", yaml: "unknown:\n  foo: 1\n", wantErr: "unknown"},
+		{name: "ops addr collides with addr", yaml: "redirector:\n  addr: \":8080\"\n  ops_addr: \":8080\"\n", wantErr: "redirector.ops_addr must differ from addr"},
+		{name: "invalid trusted proxies env", env: map[string]string{"TRUSTED_PROXIES": "bad-cidr"}, wantErr: "TRUSTED_PROXIES"},
 		{name: "missing visitor salt", env: map[string]string{"VISITOR_SALT": ""}, wantErr: "VISITOR_SALT is required"},
-		{name: "pprof on all interfaces", env: map[string]string{"PPROF_ADDR": ":6060"}, wantErr: "PPROF_ADDR"},
-		{name: "pprof on public address", env: map[string]string{"PPROF_ADDR": "0.0.0.0:6060"}, wantErr: "PPROF_ADDR"},
-		{name: "pprof without port", env: map[string]string{"PPROF_ADDR": "127.0.0.1"}, wantErr: "PPROF_ADDR"},
-		{name: "invalid cache miss concurrency", env: map[string]string{"CACHE_MISS_CONCURRENCY": "abc"}, wantErr: "CACHE_MISS_CONCURRENCY"},
-		{name: "cache miss concurrency not positive", env: map[string]string{"CACHE_MISS_CONCURRENCY": "0"}, wantErr: "CACHE_MISS_CONCURRENCY must be positive"},
-		{name: "invalid access log sample rate", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "abc"}, wantErr: "ACCESS_LOG_SAMPLE_RATE"},
-		{name: "negative access log sample rate", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "-0.1"}, wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1"},
-		{name: "access log sample rate above 1", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "1.5"}, wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1"},
-		{name: "nan access log sample rate", env: map[string]string{"ACCESS_LOG_SAMPLE_RATE": "NaN"}, wantErr: "ACCESS_LOG_SAMPLE_RATE must be between 0 and 1"},
-		{name: "invalid access log slow threshold", env: map[string]string{"ACCESS_LOG_SLOW_THRESHOLD": "abc"}, wantErr: "ACCESS_LOG_SLOW_THRESHOLD"},
-		{name: "non-positive access log slow threshold", env: map[string]string{"ACCESS_LOG_SLOW_THRESHOLD": "0s"}, wantErr: "ACCESS_LOG_SLOW_THRESHOLD must be positive"},
-		{name: "invalid trust proxy headers", env: map[string]string{"TRUST_PROXY_HEADERS": "sometimes"}, wantErr: "TRUST_PROXY_HEADERS"},
+		{name: "pprof on all interfaces", yaml: "redirector:\n  pprof_addr: \":6060\"\n", wantErr: "redirector.pprof_addr"},
+		{name: "pprof on public address", yaml: "redirector:\n  pprof_addr: 0.0.0.0:6060\n", wantErr: "redirector.pprof_addr"},
+		{name: "pprof without port", yaml: "redirector:\n  pprof_addr: 127.0.0.1\n", wantErr: "redirector.pprof_addr"},
+		{name: "cache miss concurrency not positive", yaml: "redirector:\n  cache_miss_concurrency: 0\n", wantErr: "redirector.cache_miss_concurrency must be positive"},
+		{name: "negative access log sample rate", yaml: "redirector:\n  access_log_sample_rate: -0.1\n", wantErr: "redirector.access_log_sample_rate must be between 0 and 1"},
+		{name: "access log sample rate above 1", yaml: "redirector:\n  access_log_sample_rate: 1.5\n", wantErr: "redirector.access_log_sample_rate must be between 0 and 1"},
+		{name: "nan access log sample rate", yaml: "redirector:\n  access_log_sample_rate: .nan\n", wantErr: "redirector.access_log_sample_rate must be between 0 and 1"},
+		{name: "non-positive access log slow threshold", yaml: "redirector:\n  access_log_slow_threshold: 0s\n", wantErr: "redirector.access_log_slow_threshold must be positive"},
 	}
 
 	for _, tt := range tests {
@@ -192,7 +213,20 @@ func TestLoadRedirectorConfig(t *testing.T) {
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
-			got, err := loadRedirectorConfig()
+			var cfgPath string
+			if tt.yaml != "" {
+				p := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(p, []byte(tt.yaml), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tt.flagCfg {
+					cfgPath = p
+				} else {
+					t.Setenv(config.EnvConfigPath, p)
+				}
+			}
+
+			got, err := loadRedirectorConfig(cfgPath)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("loadRedirectorConfig() error = %v, want substring %q", err, tt.wantErr)
@@ -209,12 +243,26 @@ func TestLoadRedirectorConfig(t *testing.T) {
 	}
 }
 
+func TestLoadRedirectorConfigExampleYAMLMatchesDefaults(t *testing.T) {
+	for k, v := range baseRedirectorTestEnv() {
+		t.Setenv(k, v)
+	}
+	got, err := loadRedirectorConfig(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("loadRedirectorConfig(config.example.yaml) = %v", err)
+	}
+	want := defaultRedirectorConfig()
+	if !redirectorConfigEqual(got, want) {
+		t.Errorf("config.example.yaml drifted from code defaults:\n got:  %+v\n want: %+v", got, want)
+	}
+}
+
 func redirectorConfigEqual(a, b RedirectorConfig) bool {
 	return a.BaseConfig == b.BaseConfig &&
 		a.Features == b.Features &&
 		a.VisitorSalt == b.VisitorSalt &&
-		a.TrustProxyHeaders == b.TrustProxyHeaders &&
-		slices.Equal(a.TrustedProxyCIDRs, b.TrustedProxyCIDRs) &&
+		a.Proxy.TrustHeaders == b.Proxy.TrustHeaders &&
+		slices.Equal(a.Proxy.TrustedCIDRs, b.Proxy.TrustedCIDRs) &&
 		a.PprofAddr == b.PprofAddr &&
 		a.CacheMissConcurrency == b.CacheMissConcurrency &&
 		a.AccessLogSampleRate == b.AccessLogSampleRate &&

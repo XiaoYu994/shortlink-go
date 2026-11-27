@@ -4,16 +4,17 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"shortlink/internal/config"
 )
 
 func TestLoadAdminCLIStoreFeatures(t *testing.T) {
 	// 无关的坏 WEBHOOK_SECRET_KEY 不应阻塞 key/tenant/member 命令。
+	t.Setenv(config.EnvConfigPath, "")
 	t.Setenv("WEBHOOK_SECRET_KEY", "bad-hex")
 	t.Setenv("REDIS_URL", "redis://localhost:6379/0")
-	t.Setenv("SMTP_HOST", "")
-	t.Setenv("SMTP_FROM", "")
 
-	got, err := loadAdminCLIStoreFeatures()
+	got, err := loadAdminCLIStoreFeatures("")
 	if err != nil {
 		t.Fatalf("loadAdminCLIStoreFeatures without smtp: %v", err)
 	}
@@ -21,13 +22,13 @@ func TestLoadAdminCLIStoreFeatures(t *testing.T) {
 		t.Fatalf("StoreFeatures = %+v, want all false", got)
 	}
 
-	t.Setenv("SMTP_HOST", "smtp.example.com")
-	if _, err := loadAdminCLIStoreFeatures(); err == nil || !strings.Contains(err.Error(), "SMTP_FROM") {
-		t.Fatalf("err = %v, want SMTP_FROM required error", err)
+	halfSMTP := writeTempYAML(t, "smtp:\n  host: smtp.example.com\n")
+	if _, err := loadAdminCLIStoreFeatures(halfSMTP); err == nil || !strings.Contains(err.Error(), "smtp.from") {
+		t.Fatalf("err = %v, want smtp.from required error", err)
 	}
 
-	t.Setenv("SMTP_FROM", "noreply@example.com")
-	got, err = loadAdminCLIStoreFeatures()
+	fullSMTP := writeTempYAML(t, "smtp:\n  host: smtp.example.com\n  from: noreply@example.com\n")
+	got, err = loadAdminCLIStoreFeatures(fullSMTP)
 	if err != nil {
 		t.Fatalf("loadAdminCLIStoreFeatures with smtp: %v", err)
 	}
@@ -37,9 +38,7 @@ func TestLoadAdminCLIStoreFeatures(t *testing.T) {
 }
 
 func TestLoadLinkCLIStoreFeatures(t *testing.T) {
-	// 无关的半残 SMTP 配置不应阻塞 link ban/unban 命令。
-	t.Setenv("SMTP_HOST", "smtp.example.com")
-	t.Setenv("SMTP_FROM", "")
+	t.Setenv(config.EnvConfigPath, "")
 	t.Setenv("WEBHOOK_SECRET_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
 
 	got, err := loadLinkCLIStoreFeatures()

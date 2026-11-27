@@ -1,0 +1,144 @@
+# 共享 YAML 配置文件参考模板（ADR 0035）。
+#
+# 使用方式：
+#   1. 复制为 config.yaml（已被 .gitignore / .dockerignore 忽略）按需修改；
+#   2. 通过 SHORTLINK_CONFIG=config.yaml 或启动参数 --config config.yaml 加载；
+#   3. 本文件内的值均与代码内置默认值严格一致（由单测守门防漂移），未配置节可直接删除；
+#   4. 敏感密钥与连接串禁止写入本文件，请通过环境变量（.env / Secret）注入：
+#      DATABASE_URL, REDIS_URL, VISITOR_SALT, OIDC_CLIENT_SECRET, GITHUB_CLIENT_SECRET,
+#      SMS_WEBHOOK_TOKEN, WEBHOOK_SECRET_KEY, SMTP_PASSWORD, RISK_GSB_API_KEY, RISK_LLM_API_KEY。
+
+# 内置可开关业务模块（ADR 0029；默认全开，极简单 PG 模式可设为 false；可用 FEATURE_* 环境变量覆盖）。
+features:
+  analytics: true
+  risk_scan: true
+
+# PostgreSQL 连接池参数（连接串由环境变量 DATABASE_URL 提供）。
+database:
+  max_open_conns: 10
+  max_idle_conns: 5
+  conn_max_lifetime: "1h"
+  conn_max_idle_time: "10m"
+
+# 通用 HTTP 超时与摘流窗口（可用 DRAIN_DELAY 环境变量覆盖）。
+http:
+  request_timeout: "5s"
+  shutdown_timeout: "10s"
+  drain_delay: "5s"
+
+# Redis 读缓存回源超时（连接串由环境变量 REDIS_URL 提供，留空则禁用缓存层）。
+cache:
+  fetch_timeout: "1s"
+
+# 可信反向代理（单一事实来源，redirector 与 console 共用；可用 TRUSTED_PROXIES 环境变量覆盖）：
+#   - []            不信任 X-Forwarded-For，只取直连 RemoteAddr；
+#   - ["*"]         单跳反向代理模式，取 X-Forwarded-For 最右合法 IP；
+#   - ["10.0.0.0/8", ...]  多跳可信代理 CIDR 列表，从右向左剥离。
+trusted_proxies: []
+
+# 出站 HTTP 防 SSRF 统一允许端口（供 risk、webhook、sms 共用；空列表表示默认 80/443）。
+outbound:
+  allowed_ports: []
+
+# 日志配置（可用 LOG_LEVEL / LOG_FORMAT 环境变量覆盖）。
+log:
+  level: "info"
+  format: "text"
+
+# OpenTelemetry OTLP/HTTP 链路追踪（ADR 0032；endpoint 为空时关闭，可用 OTEL_EXPORTER_OTLP_ENDPOINT 覆盖）。
+tracing:
+  endpoint: ""
+  sample_rate: 1.0
+
+# 公开跳转进程（cmd/redirector）专属配置。
+# 访客盐值 VISITOR_SALT 必须通过环境变量注入（analytics=true 时必填）。
+redirector:
+  addr: ":8080"       # 可用 ADDR 环境变量覆盖
+  ops_addr: ""        # 可选独立运维端口，可用 OPS_ADDR 环境变量覆盖
+  pprof_addr: ""      # 仅允许回环地址，如 "127.0.0.1:6060"
+  cache_miss_concurrency: 8
+  access_log_sample_rate: 1.0
+  access_log_slow_threshold: "200ms"
+
+# 管理进程 HTTP 模式（cmd/console serve）专属配置。
+console:
+  addr: ":8081"       # 可用 CONSOLE_ADDR 环境变量覆盖
+  ops_addr: ""        # 可选独立运维端口，可用 CONSOLE_OPS_ADDR 环境变量覆盖
+  # 控制台对外公网基址（如 "http://127.0.0.1:8081" 或 "https://console.example.com"）：
+  # 作为单一事实来源，自动推导 OIDC/GitHub 回调 URL、PhoneOTP Secure Cookie 属性及邀请邮件登录链接。
+  public_url: ""
+  # 公开短链跳转基址（当 console 与 redirector 分端口/分域名部署时填写，如 "http://127.0.0.1:8080"）。
+  public_base_url: ""
+  # 前端静态构建目录（先执行 make web-build 生成 web/dist）。
+  web_dist_dir: ""
+  # 鉴权前按源 IP 限流（速率/秒 与 突发；0 关闭）。
+  ip_rate_limit: 60
+  ip_rate_burst: 120
+
+  auth:
+    # OIDC 登录（需同时通过环境变量提供 OIDC_CLIENT_SECRET，并配置上面的 console.public_url）。
+    oidc:
+      issuer: ""
+      client_id: ""
+    # GitHub OAuth 2.0 登录（需同时通过环境变量提供 GITHUB_CLIENT_SECRET，并配置 console.public_url）。
+    github:
+      client_id: ""
+    # 手机号短信验证码登录（ADR 0030；provider 取 "webhook" 或本地自测 "log"；webhook 令牌通过 SMS_WEBHOOK_TOKEN 注入）。
+    phone_otp:
+      provider: ""
+      webhook_url: ""
+      timeout: "5s"
+      ttl: "5m"
+      cooldown: "60s"
+      max_per_hour: 5
+      max_attempts: 5
+
+# 后台任务进程（cmd/console worker）专属配置。
+worker:
+  addr: ""            # 可选运维端口（如 "127.0.0.1:8082"），可用 WORKER_ADDR 环境变量覆盖
+  concurrency: 8
+  max_per_tenant: 4
+  poll_interval: "200ms"
+  lease_duration: "30s"
+  job_timeout: "20s"
+  reap_interval: "15s"
+  cleanup_interval: "1h"
+  retention:
+    short: "168h"     # sessions、done_jobs、webhook_deliveries 保留期
+    long: "720h"      # dead_jobs、invitations 保留期
+    stats_days: 90
+    audit_days: 180
+  risk:
+    fetch_timeout: "5s"
+    host_rate_limit: 2
+    allowed_hosts: []     # 示例: ["github.com", "docs.go.dev"]
+    blocked_hosts: {}     # 示例: {"evil.example": "phishing", "[2001:db8::1]": "malware"}
+    blocked_keywords: {}  # 示例: {"verify your password": "phishing"}
+    # Google Safe Browsing v4（通过 RISK_GSB_API_KEY 注入密钥后启用）。
+    gsb:
+      base_url: "https://safebrowsing.googleapis.com"
+      timeout: "3s"
+    # OpenAI 兼容 LLM 语义风控（ADR 0034；配置 base_url + model 后启用，密钥通过 RISK_LLM_API_KEY 注入）。
+    llm:
+      base_url: ""
+      model: ""
+      mode: "ban"         # ban 或 shadow
+      min_confidence: 0.85
+      timeout: "8s"
+      max_per_min: 30
+  # Webhook 可靠投递参数（通过 WEBHOOK_SECRET_KEY 注入 64 位 hex 主密钥后启用）。
+  webhook:
+    timeout: "5s"
+    host_rate_limit: 5
+    retry_base_delay: "10s"
+    retry_max_delay: "10m"
+    max_consecutive_failures: 10
+
+# 成员邀请异步发信配置（密码通过 SMTP_PASSWORD 注入；host 为空时关闭发信）。
+smtp:
+  host: ""
+  port: 587
+  username: ""
+  from: ""
+  tls_mode: "starttls"    # starttls、smtps 或 none
+  timeout: "10s"

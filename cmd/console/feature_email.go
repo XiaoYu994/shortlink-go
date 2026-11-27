@@ -11,7 +11,7 @@ import (
 
 /*
 emailWorkerModule 自包含 SMTP 发送器构造与 invitation.email 任务注册（ADR 0030）。
-SMTP_HOST 为空时仅注册 invitation.email 的 disabledSkipHandler。
+smtp.host 为空时仅注册 invitation.email 的 disabledSkipHandler。
 */
 type emailWorkerModule struct {
 	smtp             mailer.SMTPConfig
@@ -25,7 +25,7 @@ func (m emailWorkerModule) Name() string { return "email" }
 func (m emailWorkerModule) RegisterWorker(r WorkerRegistrar) error {
 	if !m.smtp.Enabled() {
 		if m.logger != nil {
-			m.logger.Info("invitation email sender disabled: SMTP_HOST is not set")
+			m.logger.Info("invitation email sender disabled: smtp.host is not set")
 		}
 		r.HandleDisabled(job.KindInvitationEmail, m.Name())
 		return nil

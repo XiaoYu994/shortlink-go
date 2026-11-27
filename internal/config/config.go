@@ -1,7 +1,7 @@
 /*
-Package config 从环境变量加载各进程共用的基础配置，并在启动时校验（ADR 0024）。
+Package config 从可选 YAML 配置文件与环境变量加载各进程共用的基础配置，并在启动时校验（ADR 0024、ADR 0035）。
 
-本包仅依赖标准库、logx 与 pgdb，不引入任何业务域或存储业务实现；
+本包仅依赖标准库、logx、pgdb 与 go.yaml.in/yaml/v3，不引入任何业务域或存储业务实现；
 redirector、console serve、console worker 各自的专属配置与加载器位于对应 cmd 包内。
 */
 package config
@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	// DefaultShutdownTimeout 与 .env.example 里的 SHUTDOWN_TIMEOUT 一致。
+	// DefaultShutdownTimeout 是收到中断信号后等待在途请求结束的默认上限。
 	DefaultShutdownTimeout = 10 * time.Second
 	// DefaultDrainDelay 与 docker-compose.yml 里健康检查的 interval 一致，盖住一个探测周期。
 	DefaultDrainDelay = 5 * time.Second
@@ -50,8 +50,8 @@ TracingConfig 控制进程级 OpenTelemetry 追踪导出（ADR 0032）。
 Endpoint 为空时追踪保持默认 Noop（零网络与协程开销）。
 */
 type TracingConfig struct {
-	Endpoint   string  // OTEL_EXPORTER_OTLP_ENDPOINT，为空时关闭追踪
-	SampleRate float64 // OTEL_TRACES_SAMPLE_RATE，[0, 1]，默认 1.0
+	Endpoint   string  // tracing.endpoint / OTEL_EXPORTER_OTLP_ENDPOINT，为空时关闭追踪
+	SampleRate float64 // tracing.sample_rate，[0, 1]，默认 1.0
 }
 
 // Enabled 报告是否配置了 OTLP 追踪导出端点。
@@ -65,8 +65,19 @@ func DefaultTracingConfig() TracingConfig {
 }
 
 /*
+ProxyConfig 统一承载可信反向代理配置（ADR 0024、ADR 0035）。
+  - TrustHeaders=false：忽略转发头，只用 RemoteAddr；
+  - TrustHeaders=true 且 TrustedCIDRs 为空（来自 "*"）：单跳模式，取 X-Forwarded-For 最右合法 IP；
+  - TrustHeaders=true 且 TrustedCIDRs 非空：多跳可信代理链右向剥离模式。
+*/
+type ProxyConfig struct {
+	TrustHeaders bool
+	TrustedCIDRs []netip.Prefix
+}
+
+/*
 BaseConfigDefaults 指定进程级别的默认监听与缓存参数。
-由各 cmd 包传入，避免多个进程在共享 .env 中争夺同一个环境变量。
+由各 cmd 包传入，避免多个进程在共享配置文件与 .env 中争夺同一个监听地址。
 */
 type BaseConfigDefaults struct {
 	Addr              string
@@ -76,33 +87,67 @@ type BaseConfigDefaults struct {
 
 /*
 BaseConfig 是 redirector、console 与 worker 共用的启动配置。
-Pool 的默认值来自 pgdb.DefaultPoolConfig，环境变量只覆盖显式设置的项。
+Pool 的默认值来自 pgdb.DefaultPoolConfig，YAML 与环境变量按优先级逐层覆盖。
 */
 type BaseConfig struct {
 	Addr            string // 主 HTTP 监听地址（worker 为可选运维端口）
 	OpsAddr         string // 可选独立运维端口（/healthz、/readyz、/metrics），为空时不单独开启
-	DatabaseURL     string // PostgreSQL 连接串
-	RedisURL        string // 可选 Redis 连接串，支持密码、TLS（rediss://）和 DB 编号；为空时跳过缓存层直连数据库（ADR 0029）
+	DatabaseURL     string // PostgreSQL 连接串（仅 Env：DATABASE_URL）
+	RedisURL        string // 可选 Redis 连接串（仅 Env：REDIS_URL），留空时跳过缓存层直连数据库（ADR 0029）
 	Pool            pgdb.PoolConfig
 	RequestTimeout  time.Duration // 单个请求的处理时限，到点后 handler 的 context 被取消
 	ShutdownTimeout time.Duration // 收到中断信号后，等待正在处理的请求结束的上限
 	/*
 		DrainDelay 是关闭监听之前的等待。这段时间 /readyz 返回 503，
 		给主动探测的编排器一个周期把副本摘掉。0 表示不等。
-		容器的停止宽限要盖住它，再加上 SHUTDOWN_TIMEOUT。
+		容器的停止宽限要盖住它，再加上 shutdown_timeout。
 	*/
 	DrainDelay time.Duration
 	LogLevel   slog.Level // 日志级别，默认 info
 	LogFormat  string     // text 或 json，默认 text
 
-	// CacheFetchTimeout 是单次回源或写后复查的超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
+	// CacheFetchTimeout 是单次回源或写后复查的超时，独立于请求时限，不能超过 RequestTimeout。
 	CacheFetchTimeout time.Duration
 	// Tracing 是 OpenTelemetry OTLP/HTTP 追踪导出配置；Endpoint 为空时保持 Noop。
 	Tracing TracingConfig
 }
 
-// LoadBaseConfig 加载并校验各进程共用的基础环境变量。
-func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
+type databaseSection struct {
+	MaxOpenConns    *int      `yaml:"max_open_conns"`
+	MaxIdleConns    *int      `yaml:"max_idle_conns"`
+	ConnMaxLifetime *Duration `yaml:"conn_max_lifetime"`
+	ConnMaxIdleTime *Duration `yaml:"conn_max_idle_time"`
+}
+
+type httpSection struct {
+	RequestTimeout  *Duration `yaml:"request_timeout"`
+	ShutdownTimeout *Duration `yaml:"shutdown_timeout"`
+	DrainDelay      *Duration `yaml:"drain_delay"`
+}
+
+type cacheSection struct {
+	FetchTimeout *Duration `yaml:"fetch_timeout"`
+}
+
+type logSection struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
+}
+
+type tracingSection struct {
+	Endpoint   string   `yaml:"endpoint"`
+	SampleRate *float64 `yaml:"sample_rate"`
+}
+
+type outboundSection struct {
+	AllowedPorts []int `yaml:"allowed_ports"`
+}
+
+/*
+LoadBaseConfig 按优先级加载并校验共用基础配置：
+代码默认值 < YAML 公共节（database / http / cache / log / tracing） < 环境变量。
+*/
+func LoadBaseConfig(file *File, defaults BaseConfigDefaults) (BaseConfig, error) {
 	if defaults.CacheFetchTimeout <= 0 {
 		defaults.CacheFetchTimeout = DefaultCacheFetchTimeout
 	}
@@ -120,55 +165,233 @@ func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
 		Tracing:           DefaultTracingConfig(),
 	}
 
+	if file != nil {
+		if err := applyBaseYAML(&cfg, file); err != nil {
+			return BaseConfig{}, err
+		}
+	}
+
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
 	if cfg.DatabaseURL == "" {
 		return BaseConfig{}, errors.New("DATABASE_URL is required")
 	}
 	cfg.RedisURL = strings.TrimSpace(os.Getenv("REDIS_URL"))
-	if level := os.Getenv("LOG_LEVEL"); level != "" {
+
+	if level := strings.TrimSpace(os.Getenv("LOG_LEVEL")); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
 			return BaseConfig{}, fmt.Errorf("LOG_LEVEL: %w", err)
 		}
 	}
-	format, err := parseLogFormat(os.Getenv("LOG_FORMAT"))
-	if err != nil {
-		return BaseConfig{}, err
+	if rawFmt := strings.TrimSpace(os.Getenv("LOG_FORMAT")); rawFmt != "" {
+		format, err := parseLogFormat("LOG_FORMAT", rawFmt)
+		if err != nil {
+			return BaseConfig{}, err
+		}
+		cfg.LogFormat = format
 	}
-	cfg.LogFormat = format
-
-	if cfg.Pool.MaxOpenConns, err = EnvInt("DB_MAX_OPEN_CONNS", cfg.Pool.MaxOpenConns); err != nil {
-		return BaseConfig{}, err
-	}
-	if cfg.Pool.MaxIdleConns, err = EnvInt("DB_MAX_IDLE_CONNS", cfg.Pool.MaxIdleConns); err != nil {
-		return BaseConfig{}, err
-	}
-	if cfg.Pool.ConnMaxLifetime, err = EnvDuration("DB_CONN_MAX_LIFETIME", cfg.Pool.ConnMaxLifetime); err != nil {
-		return BaseConfig{}, err
-	}
-	if cfg.Pool.ConnMaxIdleTime, err = EnvDuration("DB_CONN_MAX_IDLE_TIME", cfg.Pool.ConnMaxIdleTime); err != nil {
-		return BaseConfig{}, err
-	}
-	if cfg.RequestTimeout, err = EnvDuration("REQUEST_TIMEOUT", cfg.RequestTimeout); err != nil {
-		return BaseConfig{}, err
-	}
-	if cfg.ShutdownTimeout, err = EnvDuration("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
-		return BaseConfig{}, err
-	}
+	var err error
 	if cfg.DrainDelay, err = EnvDuration("DRAIN_DELAY", cfg.DrainDelay); err != nil {
 		return BaseConfig{}, err
 	}
-	if cfg.CacheFetchTimeout, err = EnvDuration("CACHE_FETCH_TIMEOUT", cfg.CacheFetchTimeout); err != nil {
-		return BaseConfig{}, err
-	}
-	cfg.Tracing.Endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-	if cfg.Tracing.SampleRate, err = EnvFloat("OTEL_TRACES_SAMPLE_RATE", cfg.Tracing.SampleRate); err != nil {
-		return BaseConfig{}, err
+	if ep := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); ep != "" {
+		cfg.Tracing.Endpoint = ep
 	}
 
 	if err := validateBase(cfg); err != nil {
 		return BaseConfig{}, err
 	}
 	return cfg, nil
+}
+
+func applyBaseYAML(cfg *BaseConfig, file *File) error {
+	var dbSec databaseSection
+	if err := DecodeSection(file.Database, &dbSec); err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	if dbSec.MaxOpenConns != nil {
+		cfg.Pool.MaxOpenConns = *dbSec.MaxOpenConns
+	}
+	if dbSec.MaxIdleConns != nil {
+		cfg.Pool.MaxIdleConns = *dbSec.MaxIdleConns
+	}
+	if dbSec.ConnMaxLifetime != nil {
+		cfg.Pool.ConnMaxLifetime = dbSec.ConnMaxLifetime.Std()
+	}
+	if dbSec.ConnMaxIdleTime != nil {
+		cfg.Pool.ConnMaxIdleTime = dbSec.ConnMaxIdleTime.Std()
+	}
+
+	var httpSec httpSection
+	if err := DecodeSection(file.HTTP, &httpSec); err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+	if httpSec.RequestTimeout != nil {
+		cfg.RequestTimeout = httpSec.RequestTimeout.Std()
+	}
+	if httpSec.ShutdownTimeout != nil {
+		cfg.ShutdownTimeout = httpSec.ShutdownTimeout.Std()
+	}
+	if httpSec.DrainDelay != nil {
+		cfg.DrainDelay = httpSec.DrainDelay.Std()
+	}
+
+	var cacheSec cacheSection
+	if err := DecodeSection(file.Cache, &cacheSec); err != nil {
+		return fmt.Errorf("cache: %w", err)
+	}
+	if cacheSec.FetchTimeout != nil {
+		cfg.CacheFetchTimeout = cacheSec.FetchTimeout.Std()
+	}
+
+	var logSec logSection
+	if err := DecodeSection(file.Log, &logSec); err != nil {
+		return fmt.Errorf("log: %w", err)
+	}
+	if level := strings.TrimSpace(logSec.Level); level != "" {
+		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
+			return fmt.Errorf("log.level: %w", err)
+		}
+	}
+	if rawFmt := strings.TrimSpace(logSec.Format); rawFmt != "" {
+		format, err := parseLogFormat("log.format", rawFmt)
+		if err != nil {
+			return err
+		}
+		cfg.LogFormat = format
+	}
+
+	var trSec tracingSection
+	if err := DecodeSection(file.Tracing, &trSec); err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	cfg.Tracing.Endpoint = strings.TrimSpace(trSec.Endpoint)
+	if trSec.SampleRate != nil {
+		cfg.Tracing.SampleRate = *trSec.SampleRate
+	}
+	return nil
+}
+
+/*
+LoadProxyConfig 从 YAML trusted_proxies 与环境变量 TRUSTED_PROXIES 加载可信代理配置（ADR 0035）。
+两者均为空时不信任转发头；"*" 启用单跳模式；CIDR 列表启用多跳右向剥离模式。
+*/
+func LoadProxyConfig(file *File) (ProxyConfig, error) {
+	var cfg ProxyConfig
+	if file != nil {
+		var entries []string
+		if err := DecodeSection(file.TrustedProxies, &entries); err != nil {
+			return ProxyConfig{}, fmt.Errorf("trusted_proxies: %w", err)
+		}
+		var err error
+		cfg, err = ParseTrustedProxies(entries)
+		if err != nil {
+			return ProxyConfig{}, fmt.Errorf("trusted_proxies: %w", err)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); raw != "" {
+		var entries []string
+		for part := range strings.SplitSeq(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				entries = append(entries, part)
+			}
+		}
+		if len(entries) == 0 {
+			return ProxyConfig{}, errors.New("TRUSTED_PROXIES must contain * or at least one CIDR")
+		}
+		parsed, err := ParseTrustedProxies(entries)
+		if err != nil {
+			return ProxyConfig{}, fmt.Errorf("TRUSTED_PROXIES: %w", err)
+		}
+		cfg = parsed
+	}
+	return cfg, nil
+}
+
+/*
+ParseTrustedProxies 解析统一的可信代理条目切片（ADR 0035）。
+空切片返回不信任代理；["*"] 返回单跳模式；CIDR 或单 IP 返回多跳右向剥离模式；禁止混写 "*"。
+*/
+func ParseTrustedProxies(entries []string) (ProxyConfig, error) {
+	if len(entries) == 0 {
+		return ProxyConfig{}, nil
+	}
+	cleaned := make([]string, 0, len(entries))
+	hasWildcard := false
+	for _, entry := range entries {
+		s := strings.TrimSpace(entry)
+		if s == "" {
+			return ProxyConfig{}, errors.New("entry must not be empty")
+		}
+		if s == "*" {
+			hasWildcard = true
+		}
+		cleaned = append(cleaned, s)
+	}
+	if hasWildcard {
+		if len(cleaned) > 1 {
+			return ProxyConfig{}, errors.New("cannot mix \"*\" with other entries")
+		}
+		return ProxyConfig{TrustHeaders: true}, nil
+	}
+
+	cidrs := make([]netip.Prefix, 0, len(cleaned))
+	for _, part := range cleaned {
+		var prefix netip.Prefix
+		if strings.Contains(part, "/") {
+			p, err := netip.ParsePrefix(part)
+			if err != nil || !p.IsValid() {
+				return ProxyConfig{}, fmt.Errorf("invalid cidr %q", part)
+			}
+			addr := p.Addr()
+			bits := p.Bits()
+			if addr.Is4In6() {
+				addr = addr.Unmap()
+				bits = max(bits-96, 0)
+			}
+			prefix = netip.PrefixFrom(addr, bits).Masked()
+		} else {
+			addr, err := netip.ParseAddr(part)
+			if err != nil {
+				return ProxyConfig{}, fmt.Errorf("invalid ip or cidr %q", part)
+			}
+			addr = addr.Unmap()
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		cidrs = append(cidrs, prefix)
+	}
+	return ProxyConfig{TrustHeaders: true, TrustedCIDRs: cidrs}, nil
+}
+
+// ValidatePorts 校验出站端口白名单切片（空切片表示交由 safehttp 默认 80/443）。
+func ValidatePorts(ports []int) ([]int, error) {
+	if len(ports) == 0 {
+		return nil, nil
+	}
+	out := make([]int, 0, len(ports))
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return nil, fmt.Errorf("invalid port %d: must be in 1..65535", p)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// LoadOutboundAllowedPorts 从 YAML outbound.allowed_ports 加载并校验出站端口白名单。
+func LoadOutboundAllowedPorts(file *File) ([]int, error) {
+	if file == nil {
+		return nil, nil
+	}
+	var sec outboundSection
+	if err := DecodeSection(file.Outbound, &sec); err != nil {
+		return nil, fmt.Errorf("outbound: %w", err)
+	}
+	ports, err := ValidatePorts(sec.AllowedPorts)
+	if err != nil {
+		return nil, fmt.Errorf("outbound.allowed_ports: %w", err)
+	}
+	return ports, nil
 }
 
 /*
@@ -190,114 +413,54 @@ func (cfg BaseConfig) NewLoggerWithService(w io.Writer, service string) (*slog.L
 	})
 }
 
-func parseLogFormat(raw string) (string, error) {
+func parseLogFormat(field, raw string) (string, error) {
 	switch raw {
 	case "", LogFormatText:
 		return LogFormatText, nil
 	case LogFormatJSON:
 		return LogFormatJSON, nil
 	default:
-		return "", fmt.Errorf("LOG_FORMAT must be text or json, got %q", raw)
+		return "", fmt.Errorf("%s must be text or json, got %q", field, raw)
 	}
 }
 
 func validateBase(cfg BaseConfig) error {
 	if cfg.Pool.MaxOpenConns <= 0 {
-		return errors.New("DB_MAX_OPEN_CONNS must be positive")
+		return errors.New("database.max_open_conns must be positive")
 	}
 	if cfg.Pool.MaxIdleConns < 0 || cfg.Pool.MaxIdleConns > cfg.Pool.MaxOpenConns {
-		return errors.New("DB_MAX_IDLE_CONNS must be between 0 and DB_MAX_OPEN_CONNS")
+		return errors.New("database.max_idle_conns must be between 0 and database.max_open_conns")
 	}
 	if cfg.Pool.ConnMaxLifetime < 0 || cfg.Pool.ConnMaxIdleTime < 0 {
 		return errors.New("connection lifetimes must not be negative")
 	}
 	if cfg.RequestTimeout <= 0 {
-		return errors.New("REQUEST_TIMEOUT must be positive")
+		return errors.New("http.request_timeout must be positive")
 	}
 	if cfg.ShutdownTimeout <= 0 {
-		return errors.New("SHUTDOWN_TIMEOUT must be positive")
+		return errors.New("http.shutdown_timeout must be positive")
 	}
 	if cfg.DrainDelay < 0 {
-		return errors.New("DRAIN_DELAY must not be negative")
+		return errors.New("drain delay must not be negative")
 	}
 	if cfg.CacheFetchTimeout <= 0 {
-		return errors.New("CACHE_FETCH_TIMEOUT must be positive")
+		return errors.New("cache.fetch_timeout must be positive")
 	}
 	if cfg.CacheFetchTimeout > cfg.RequestTimeout {
-		return errors.New("CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT")
+		return errors.New("cache.fetch_timeout must not exceed http.request_timeout")
 	}
 	if cfg.Tracing.Endpoint != "" {
-		if err := ValidateIssuerURL("OTEL_EXPORTER_OTLP_ENDPOINT", cfg.Tracing.Endpoint); err != nil {
+		if err := ValidateIssuerURL("tracing.endpoint", cfg.Tracing.Endpoint); err != nil {
 			return err
 		}
 	}
-	if math.IsNaN(cfg.Tracing.SampleRate) || cfg.Tracing.SampleRate < 0 || cfg.Tracing.SampleRate > 1 {
-		return errors.New("OTEL_TRACES_SAMPLE_RATE must be between 0 and 1")
+	if math.IsNaN(cfg.Tracing.SampleRate) || math.IsInf(cfg.Tracing.SampleRate, 0) || cfg.Tracing.SampleRate < 0 || cfg.Tracing.SampleRate > 1 {
+		return errors.New("tracing.sample_rate must be between 0 and 1")
 	}
 	return nil
 }
 
-// ParsePorts 解析逗号分隔的 TCP 端口号列表（1..65535）。
-func ParsePorts(raw string) ([]int, error) {
-	var ports []int
-	for part := range strings.SplitSeq(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		p, err := strconv.Atoi(part)
-		if err != nil || p < 1 || p > 65535 {
-			return nil, fmt.Errorf("invalid port %q: must be in 1..65535", part)
-		}
-		ports = append(ports, p)
-	}
-	if len(ports) == 0 {
-		return nil, errors.New("must contain at least one port")
-	}
-	return ports, nil
-}
-
-/*
-ParseCIDRs 解析逗号分隔的可信代理网段（CIDR 或单个 IP）。
-单个 IP 自动归一化为 /32 或 /128 前缀，IPv4 映射的 IPv6 自动还原为标准 IPv4 前缀。
-*/
-func ParseCIDRs(raw string) ([]netip.Prefix, error) {
-	var out []netip.Prefix
-	for part := range strings.SplitSeq(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		var prefix netip.Prefix
-		if strings.Contains(part, "/") {
-			p, err := netip.ParsePrefix(part)
-			if err != nil || !p.IsValid() {
-				return nil, fmt.Errorf("invalid cidr %q", part)
-			}
-			addr := p.Addr()
-			bits := p.Bits()
-			if addr.Is4In6() {
-				addr = addr.Unmap()
-				bits = max(bits-96, 0)
-			}
-			prefix = netip.PrefixFrom(addr, bits).Masked()
-		} else {
-			addr, err := netip.ParseAddr(part)
-			if err != nil {
-				return nil, fmt.Errorf("invalid ip or cidr %q", part)
-			}
-			addr = addr.Unmap()
-			prefix = netip.PrefixFrom(addr, addr.BitLen())
-		}
-		out = append(out, prefix)
-	}
-	if len(out) == 0 {
-		return nil, errors.New("must contain at least one CIDR")
-	}
-	return out, nil
-}
-
-// CountNonEmpty 统计非空字符串个数，用于校验整组环境变量同开或同空。
+// CountNonEmpty 统计非空字符串个数，用于校验整组凭证同开或同空。
 func CountNonEmpty(values ...string) int {
 	n := 0
 	for _, v := range values {
@@ -309,18 +472,10 @@ func CountNonEmpty(values ...string) int {
 }
 
 // ValidateIssuerURL 校验不带 query 和 fragment 的 http/https URL。
-func ValidateIssuerURL(envName, raw string) error {
+func ValidateIssuerURL(field, raw string) error {
 	u, err := parseHTTPURL(raw)
 	if err != nil || u.RawQuery != "" {
-		return fmt.Errorf("%s must be a valid http or https URL without query or fragment, got %q", envName, raw)
-	}
-	return nil
-}
-
-// ValidateRedirectURL 校验回调 http/https URL（允许 query，禁止 fragment）。
-func ValidateRedirectURL(envName, raw string) error {
-	if _, err := parseHTTPURL(raw); err != nil {
-		return fmt.Errorf("%s must be a valid http or https URL, got %q", envName, raw)
+		return fmt.Errorf("%s must be a valid http or https URL without query or fragment, got %q", field, raw)
 	}
 	return nil
 }
@@ -358,19 +513,6 @@ func EnvString(name, fallback string) string {
 	return fallback
 }
 
-// EnvInt 读取整数环境变量。变量未设置时返回 def。
-func EnvInt(name string, def int) (int, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", name, err)
-	}
-	return n, nil
-}
-
 // EnvBool 读取布尔环境变量。变量未设置时返回 def。
 func EnvBool(name string, def bool) (bool, error) {
 	v := os.Getenv(name)
@@ -395,17 +537,4 @@ func EnvDuration(name string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return d, nil
-}
-
-// EnvFloat 读取浮点数环境变量。变量未设置时返回 def。
-func EnvFloat(name string, def float64) (float64, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return def, nil
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", name, err)
-	}
-	return f, nil
 }

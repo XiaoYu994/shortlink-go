@@ -51,7 +51,7 @@ func initWebhooksConsoleModule(
 		logger.Info("webhooks api enabled")
 	}
 	return console.NewWebhooksModule(store, cipher, safehttp.URLValidationOptions{
-		AllowedPorts:     cfg.WebhookAllowedPorts,
+		AllowedPorts:     cfg.OutboundAllowedPorts,
 		AllowedHostPorts: allowTestHosts,
 	}), nil
 }

@@ -1,8 +1,8 @@
 /*
 Command redirector 是公开短链跳转进程。
 
-只提供 GET /r/{code}，并按可选 OPS_ADDR 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
-读 Redis 缓存，未命中回源 PostgreSQL，成功的 GET 异步记录点击。设了 PPROF_ADDR 时另起一个回环监听提供 /debug/pprof/。
+只提供 GET /r/{code}，并按可选 OPS_ADDR / redirector.ops_addr 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
+读 Redis 缓存，未命中回源 PostgreSQL，成功的 GET 异步记录点击。设了 redirector.pprof_addr 时另起一个回环监听提供 /debug/pprof/。
 管理 API 和 API Key 鉴权在 cmd/console，本进程完全不引入管理、身份鉴权、风控与任务依赖，见 ADR 0009、ADR 0024。
 */
 package main
@@ -10,12 +10,15 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -32,16 +35,49 @@ import (
 	"shortlink/internal/tracex"
 )
 
+var errUsage = errors.New("usage")
+
 func main() {
+	configPath, ok, err := parseRedirectorArgs(os.Args[1:], os.Stderr)
+	if !ok {
+		if err != nil {
+			if !errors.Is(err, errUsage) {
+				_, _ = fmt.Fprintf(os.Stderr, "redirector: %v\n", err)
+			}
+			os.Exit(2)
+		}
+		return
+	}
 	// 逻辑都放在 run 里并返回 error，这样 run 里的 defer 才会执行。
-	if err := run(); err != nil {
+	if err := run(configPath); err != nil {
 		logx.NewFallback(os.Stderr, "redirector").Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := loadRedirectorConfig()
+func parseRedirectorArgs(args []string, stderr io.Writer) (string, bool, error) {
+	fs := flag.NewFlagSet("redirector", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configFlag := fs.String("config", "", "YAML 配置文件路径（覆盖 SHORTLINK_CONFIG）")
+	fs.Usage = func() {
+		_, _ = fmt.Fprint(stderr, "用法:\n  redirector [--config FILE]\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return "", false, nil
+		}
+		return "", false, errUsage
+	}
+	if fs.NArg() != 0 {
+		fs.Usage()
+		return "", false, errUsage
+	}
+	return strings.TrimSpace(*configFlag), true, nil
+}
+
+func run(configPath string) error {
+	cfg, err := loadRedirectorConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -68,7 +104,7 @@ func run() error {
 	if tracingEnabled {
 		logger.Info("tracing enabled", "endpoint", logx.RedactURL(cfg.Tracing.Endpoint), "sample_rate", cfg.Tracing.SampleRate)
 	} else {
-		logger.Info("tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT is not set")
+		logger.Info("tracing disabled: tracing.endpoint / OTEL_EXPORTER_OTLP_ENDPOINT is not set")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -120,7 +156,7 @@ func run() error {
 		点击写出直接用 pgStore，不经过缓存，也不算进存储耗时。
 		这个 defer 注册在 db.Close 和 rdb.Close 之后，run 返回时会先执行：
 		先把缓冲里的点击写完，再关 Redis 和数据库。
-		FEATURE_ANALYTICS=false 时完全不启动 ClickRecorder，传递未装箱 nil 接口给 redirector（ADR 0029）。
+		analytics 关闭时完全不启动 ClickRecorder，传递未装箱 nil 接口给 redirector（ADR 0029）。
 	*/
 	var (
 		clicks      redirector.ClickRecorder
@@ -138,7 +174,7 @@ func run() error {
 			}
 		}()
 	} else {
-		logger.Info("click analytics disabled: FEATURE_ANALYTICS=false")
+		logger.Info("click analytics disabled: features.analytics=false")
 	}
 
 	var enabledFeatures, disabledFeatures []string
@@ -161,8 +197,8 @@ func run() error {
 	srv := redirector.New(logger, store, cfg.RequestTimeout, registry, redirector.Options{
 		Clicks:                 clicks,
 		VisitorSalt:            visitorSalt,
-		TrustProxyHeaders:      cfg.TrustProxyHeaders,
-		TrustedProxyCIDRs:      cfg.TrustedProxyCIDRs,
+		TrustProxyHeaders:      cfg.Proxy.TrustHeaders,
+		TrustedProxyCIDRs:      cfg.Proxy.TrustedCIDRs,
 		AccessLogSampleRate:    &sampleRate,
 		AccessLogSlowThreshold: cfg.AccessLogSlowThreshold,
 	})

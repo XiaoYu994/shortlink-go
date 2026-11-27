@@ -77,25 +77,22 @@ func DefaultKeywordRules() map[string]link.BanReason {
 }
 
 /*
-ParseKeywordRules 解析环境变量中的关键词规则，格式为 "keyword:reason,keyword2:reason2"。
-空串返回 nil；格式非法或 reason 不在 link.BanReason 白名单内返回错误。
+NormalizeKeywordRules 规范化关键词封禁规则映射（keyword -> BanReason）。
+空映射返回 nil；关键词为空、冲突或 reason 不在 link.BanReason 白名单内返回错误。
 */
-func ParseKeywordRules(raw string) (map[string]link.BanReason, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+func NormalizeKeywordRules(raw map[string]string) (map[string]link.BanReason, error) {
+	if len(raw) == 0 {
 		return nil, nil
 	}
-	rules := make(map[string]link.BanReason)
-	for entry := range strings.SplitSeq(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+	rules := make(map[string]link.BanReason, len(raw))
+	for k, v := range raw {
+		kw := strings.ToLower(strings.TrimSpace(k))
+		reason := link.BanReason(strings.TrimSpace(v))
+		if kw == "" || !reason.Valid() {
+			return nil, fmt.Errorf("invalid risk keyword rule %q: %q", k, v)
 		}
-		kw, reasonStr, ok := strings.Cut(entry, ":")
-		kw = strings.ToLower(strings.TrimSpace(kw))
-		reason := link.BanReason(strings.TrimSpace(reasonStr))
-		if !ok || kw == "" || !reason.Valid() {
-			return nil, fmt.Errorf("invalid risk keyword rule %q: want keyword:reason", entry)
+		if prev, dup := rules[kw]; dup && prev != reason {
+			return nil, fmt.Errorf("conflicting risk keyword rule for %q", kw)
 		}
 		rules[kw] = reason
 	}
@@ -103,51 +100,44 @@ func ParseKeywordRules(raw string) (map[string]link.BanReason, error) {
 }
 
 /*
-ParseHostRules 解析环境变量中的域名黑名单规则，格式为 "host:reason,host2:reason2"。
-按最后一个冒号切分以兼容方括号包裹的 IPv6 字面量（如 "[2001:db8::1]:malware"），并自动剥离 FQDN 尾点。
+NormalizeHostRules 规范化域名黑名单规则映射（host -> BanReason）。
+兼容带或不带方括号的 IPv6 字面量，统一小写、去尾点并校验 reason 合法性。
 */
-func ParseHostRules(raw string) (map[string]link.BanReason, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+func NormalizeHostRules(raw map[string]string) (map[string]link.BanReason, error) {
+	if len(raw) == 0 {
 		return nil, nil
 	}
-	rules := make(map[string]link.BanReason)
-	for entry := range strings.SplitSeq(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		idx := strings.LastIndex(entry, ":")
-		if idx <= 0 {
-			return nil, fmt.Errorf("invalid risk host rule %q: want host:reason", entry)
-		}
-		hostPart := strings.TrimSpace(entry[:idx])
+	rules := make(map[string]link.BanReason, len(raw))
+	for k, v := range raw {
+		hostPart := strings.TrimSpace(k)
 		if strings.HasPrefix(hostPart, "[") && strings.HasSuffix(hostPart, "]") {
 			hostPart = hostPart[1 : len(hostPart)-1]
 		}
 		host := normalizeHost(hostPart)
-		reason := link.BanReason(strings.TrimSpace(entry[idx+1:]))
+		reason := link.BanReason(strings.TrimSpace(v))
 		if host == "" || !reason.Valid() {
-			return nil, fmt.Errorf("invalid risk host rule %q: want host:reason", entry)
+			return nil, fmt.Errorf("invalid risk host rule %q: %q", k, v)
 		}
 		if strings.Contains(host, ":") {
 			if _, err := netip.ParseAddr(host); err != nil {
-				return nil, fmt.Errorf("invalid risk host rule %q: want host:reason", entry)
+				return nil, fmt.Errorf("invalid risk host rule %q: %w", k, err)
 			}
+		}
+		if prev, dup := rules[host]; dup && prev != reason {
+			return nil, fmt.Errorf("conflicting risk host rule for %q", host)
 		}
 		rules[host] = reason
 	}
 	return rules, nil
 }
 
-// ParseHostList 解析逗号分隔域名列表，统一小写、去尾点并去重排序（供白名单与指纹计算使用）。
-func ParseHostList(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+// NormalizeHostList 规范化域名白名单切片，统一小写、去尾点、忽略空项并去重排序（供指纹计算使用）。
+func NormalizeHostList(hosts []string) []string {
+	if len(hosts) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{})
-	for entry := range strings.SplitSeq(raw, ",") {
+	seen := make(map[string]struct{}, len(hosts))
+	for _, entry := range hosts {
 		if host := normalizeHost(entry); host != "" {
 			seen[host] = struct{}{}
 		}

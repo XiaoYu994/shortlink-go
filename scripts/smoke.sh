@@ -188,6 +188,12 @@ wait_ready() { # base pid name
 CONSOLE_BIN=${CONSOLE_BIN:-./bin/console}
 [ -x "$CONSOLE_BIN" ] || fail "$CONSOLE_BIN 不存在"
 
+# 隔离宿主机 .env / config.yaml 中的覆盖项，仅保留数据库连接与测试 Redis。
+unset SHORTLINK_CONFIG ADDR OPS_ADDR CONSOLE_ADDR CONSOLE_OPS_ADDR WORKER_ADDR \
+	LOG_LEVEL LOG_FORMAT DRAIN_DELAY TRUSTED_PROXIES OTEL_EXPORTER_OTLP_ENDPOINT \
+	FEATURE_ANALYTICS FEATURE_RISK_SCAN OIDC_CLIENT_SECRET GITHUB_CLIENT_SECRET \
+	SMS_WEBHOOK_TOKEN WEBHOOK_SECRET_KEY SMTP_PASSWORD RISK_GSB_API_KEY RISK_LLM_API_KEY
+
 # 只允许打在测试库和测试 Redis 上，避免把冒烟数据写进开发库。
 [ -n "${TEST_DATABASE_URL:-}" ] || fail 'TEST_DATABASE_URL 未设置，冒烟只允许使用测试库'
 [ -n "${TEST_REDIS_URL:-}" ] || fail 'TEST_REDIS_URL 未设置'
@@ -218,16 +224,14 @@ SMOKE_TRACE_ID=4bf92f3577b34da6a3ce929d0e0e4736
 SMOKE_TRACEPARENT="00-${SMOKE_TRACE_ID}-00f067aa0ba902b7-01"
 SMOKE_SMS_TOKEN=smoke-sms-token
 SMOKE_WEBHOOK_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
-export LOG_LEVEL=error
 # redirector 没有盐会拒绝启动。CI 从 .env.example 生成 .env，本机可能还没配。
 VISITOR_SALT=${VISITOR_SALT:-smoke-visitor-salt}
 export VISITOR_SALT
 
-# 冒烟只让 console 连接本地 Dex 测试提供方；不依赖宿主机 .env 里的 OIDC_*（那里的回调端口可能是 8081）。
+# 冒烟只让 console 连接本地 Dex 测试提供方（回调由 console.public_url 自动推导）。
 SMOKE_OIDC_ISSUER=${SMOKE_OIDC_ISSUER:-http://127.0.0.1:5556/dex}
 SMOKE_OIDC_CLIENT_ID=${SMOKE_OIDC_CLIENT_ID:-shortlink-console}
 SMOKE_OIDC_CLIENT_SECRET=${SMOKE_OIDC_CLIENT_SECRET:-shortlink-console-secret}
-SMOKE_OIDC_REDIRECT_URL=${SMOKE_OIDC_REDIRECT_URL:-$CONSOLE_BASE/api/v1/auth/oidc/callback}
 SMOKE_OIDC_USER_EMAIL=${SMOKE_OIDC_USER_EMAIL:-alice@example.com}
 SMOKE_OIDC_USER_PASSWORD=${SMOKE_OIDC_USER_PASSWORD:-password}
 
@@ -371,34 +375,70 @@ while ! curl -fsS --max-time 1 "http://127.0.0.1:$otlp_stub_port/health" >/dev/n
 	sleep 0.1
 done
 
-# 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
-LOG_LEVEL=info \
-LOG_FORMAT=json \
-OTEL_EXPORTER_OTLP_ENDPOINT=$SMOKE_OTLP_ENDPOINT \
-OTEL_TRACES_SAMPLE_RATE=1 \
+cat >"$TMP/smoke.yaml" <<EOF
+features:
+  analytics: true
+  risk_scan: true
+log:
+  level: info
+  format: json
+tracing:
+  endpoint: $SMOKE_OTLP_ENDPOINT
+  sample_rate: 1.0
+console:
+  public_url: $CONSOLE_BASE
+  web_dist_dir: $TMP/webdist
+  auth:
+    oidc:
+      issuer: $SMOKE_OIDC_ISSUER
+      client_id: $SMOKE_OIDC_CLIENT_ID
+    phone_otp:
+      provider: webhook
+      webhook_url: http://$SMS_STUB_HOST/send
+      cooldown: 60s
+worker:
+  poll_interval: 50ms
+  risk:
+    host_rate_limit: 100
+    blocked_keywords:
+      smoke-phish-marker: phishing
+  webhook:
+    host_rate_limit: 100
+    retry_base_delay: 200ms
+    retry_max_delay: 500ms
+smtp:
+  host: 127.0.0.1
+  port: $smtp_stub_port
+  from: noreply@shortlink.local
+  tls_mode: none
+EOF
+
+echo 'smoke: config dump'
+OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
+SMS_WEBHOOK_TOKEN=$SMOKE_SMS_TOKEN \
+WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
+	"$CONSOLE_BIN" config dump --config "$TMP/smoke.yaml" >"$TMP/config_dump.json" \
+	|| fail 'console config dump 失败'
+for secret in "$SMOKE_OIDC_CLIENT_SECRET" "$SMOKE_SMS_TOKEN" "$SMOKE_WEBHOOK_KEY"; do
+	if grep -Fq "$secret" "$TMP/config_dump.json"; then
+		fail "console config dump 泄露了敏感密钥"
+	fi
+done
+grep -Fq '[REDACTED]' "$TMP/config_dump.json" || fail "console config dump 缺少脱敏标记: $(cat "$TMP/config_dump.json")"
+
+export SHORTLINK_CONFIG="$TMP/smoke.yaml"
+
+# 前缀赋值只影响这一条命令，覆盖监听地址与各服务密钥。
 ADDR=$redirector_addr \
 OPS_ADDR=$redirector_ops_addr \
-	./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
+	./bin/redirector --config "$TMP/smoke.yaml" >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
-LOG_LEVEL=info \
-LOG_FORMAT=json \
-OTEL_EXPORTER_OTLP_ENDPOINT=$SMOKE_OTLP_ENDPOINT \
-OTEL_TRACES_SAMPLE_RATE=1 \
 CONSOLE_ADDR=$console_addr \
 CONSOLE_OPS_ADDR=$console_ops_addr \
-OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
-OIDC_CLIENT_ID=$SMOKE_OIDC_CLIENT_ID \
 OIDC_CLIENT_SECRET=$SMOKE_OIDC_CLIENT_SECRET \
-OIDC_REDIRECT_URL=$SMOKE_OIDC_REDIRECT_URL \
-SMS_PROVIDER=webhook \
-SMS_WEBHOOK_URL="http://$SMS_STUB_HOST/send" \
 SMS_WEBHOOK_TOKEN=$SMOKE_SMS_TOKEN \
-SMS_OTP_COOLDOWN=60s \
 WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
-SMTP_HOST=127.0.0.1 \
-SMTP_FROM=noreply@shortlink.local \
-WEB_DIST_DIR=$TMP/webdist \
-	"$CONSOLE_BIN" serve --allow-test-host "$WEBHOOK_STUB_HOST" --allow-test-host "$SMS_STUB_HOST" >"$CONSOLE_LOG" 2>&1 &
+	"$CONSOLE_BIN" serve --config "$TMP/smoke.yaml" --allow-test-host "$WEBHOOK_STUB_HOST" --allow-test-host "$SMS_STUB_HOST" >"$CONSOLE_LOG" 2>&1 &
 CONSOLE_PID=$!
 
 wait_ready "$REDIRECTOR_OPS_BASE" "$REDIRECTOR_PID" redirector
@@ -1182,24 +1222,9 @@ while ! python3 -c "import socket; socket.create_connection(('127.0.0.1', int('$
 	sleep 0.1
 done
 
-LOG_LEVEL=info \
-LOG_FORMAT=json \
-OTEL_EXPORTER_OTLP_ENDPOINT=$SMOKE_OTLP_ENDPOINT \
-OTEL_TRACES_SAMPLE_RATE=1 \
 WORKER_ADDR=$worker_addr \
-WORKER_POLL_INTERVAL=50ms \
-RISK_HOST_RATE_LIMIT=100 \
-RISK_BLOCKED_KEYWORDS=smoke-phish-marker:phishing \
 WEBHOOK_SECRET_KEY=$SMOKE_WEBHOOK_KEY \
-WEBHOOK_HOST_RATE_LIMIT=100 \
-WEBHOOK_RETRY_BASE_DELAY=200ms \
-WEBHOOK_RETRY_MAX_DELAY=500ms \
-CONSOLE_PUBLIC_URL=$CONSOLE_BASE \
-SMTP_HOST=127.0.0.1 \
-SMTP_PORT=$smtp_stub_port \
-SMTP_FROM=noreply@shortlink.local \
-SMTP_TLS_MODE=none \
-	"$CONSOLE_BIN" worker --allow-test-host "$RISK_STUB_HOST" --allow-test-host "$WEBHOOK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
+	"$CONSOLE_BIN" worker --config "$TMP/smoke.yaml" --allow-test-host "$RISK_STUB_HOST" --allow-test-host "$WEBHOOK_STUB_HOST" >"$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
 wait_ready "$WORKER_BASE" "$WORKER_PID" worker
 
@@ -1465,6 +1490,7 @@ echo 'smoke: minimal single-pg mode (no redis, no analytics, no risk scan)'
 psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DELETE FROM jobs" \
 	|| fail '清理极简模式前置 jobs 失败'
 
+SHORTLINK_CONFIG= \
 OTEL_EXPORTER_OTLP_ENDPOINT= \
 REDIS_URL= \
 VISITOR_SALT= \
@@ -1475,23 +1501,18 @@ OPS_ADDR=$redirector_ops_addr \
 	./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
 
+SHORTLINK_CONFIG= \
 OTEL_EXPORTER_OTLP_ENDPOINT= \
 REDIS_URL= \
 FEATURE_ANALYTICS=false \
 FEATURE_RISK_SCAN=false \
-OIDC_ISSUER= \
-OIDC_CLIENT_ID= \
 OIDC_CLIENT_SECRET= \
-OIDC_REDIRECT_URL= \
-GITHUB_CLIENT_ID= \
 GITHUB_CLIENT_SECRET= \
-GITHUB_REDIRECT_URL= \
-SMS_PROVIDER= \
-SMS_WEBHOOK_URL= \
 SMS_WEBHOOK_TOKEN= \
 WEBHOOK_SECRET_KEY= \
-SMTP_HOST= \
-WEB_DIST_DIR= \
+SMTP_PASSWORD= \
+RISK_GSB_API_KEY= \
+RISK_LLM_API_KEY= \
 CONSOLE_ADDR=$console_addr \
 CONSOLE_OPS_ADDR=$console_ops_addr \
 	./bin/console serve >"$CONSOLE_LOG" 2>&1 &

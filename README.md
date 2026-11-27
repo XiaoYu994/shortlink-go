@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-# 先按 docs/runbook.md 准备 .env（DATABASE_URL 必填；REDIS_URL 与 VISITOR_SALT 可按需启用，极简单 PG 模式可留空并设 FEATURE_ANALYTICS=false），并启动数据库
+# 先按 docs/runbook.md 准备 .env（DATABASE_URL 必填，可选复制 config.example.yaml 为 config.yaml 并设置 SHORTLINK_CONFIG=config.yaml；极简单 PG 模式可留空 REDIS_URL 并设 FEATURE_ANALYTICS=false），并启动数据库
 make migrate
 make install-air      # 首次运行需安装 air（GOPATH/bin），之后 run-* 默认热更新
 make run-redirector   # 终端 1：公开跳转，默认 :8080，用 ADDR 改（传 HOT_RELOAD=0 可关闭热更新）

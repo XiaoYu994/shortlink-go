@@ -340,19 +340,25 @@ func TestRuleScannerRedirectRules(t *testing.T) {
 	})
 }
 
-func TestParseKeywordRules(t *testing.T) {
-	rules, err := ParseKeywordRules("smoke-phish:phishing, bad-ware:malware")
+func TestNormalizeKeywordRules(t *testing.T) {
+	rules, err := NormalizeKeywordRules(map[string]string{
+		" Smoke-Phish ": "phishing",
+		"bad-ware":      "malware",
+	})
 	if err != nil {
-		t.Fatalf("ParseKeywordRules: %v", err)
+		t.Fatalf("NormalizeKeywordRules: %v", err)
 	}
 	if rules["smoke-phish"] != link.BanReasonPhishing || rules["bad-ware"] != link.BanReasonMalware {
 		t.Errorf("rules = %+v", rules)
 	}
-	if _, err := ParseKeywordRules("broken"); err == nil {
-		t.Error("expected error for missing colon")
+	if _, err := NormalizeKeywordRules(map[string]string{"": "phishing"}); err == nil {
+		t.Error("expected error for empty keyword")
 	}
-	if _, err := ParseKeywordRules("foo:unknown_reason"); err == nil {
+	if _, err := NormalizeKeywordRules(map[string]string{"foo": "unknown_reason"}); err == nil {
 		t.Error("expected error for invalid reason")
+	}
+	if _, err := NormalizeKeywordRules(map[string]string{"Foo": "phishing", "foo": "malware"}); err == nil {
+		t.Error("expected error for conflicting normalized keywords")
 	}
 }
 

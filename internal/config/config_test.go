@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -18,21 +20,31 @@ import (
 
 func baseTestEnv() map[string]string {
 	return map[string]string{
+		EnvConfigPath:                 "",
 		"DATABASE_URL":                "postgres://localhost/shortlink",
 		"REDIS_URL":                   "redis://localhost:6379/0",
-		"DB_MAX_OPEN_CONNS":           "",
-		"DB_MAX_IDLE_CONNS":           "",
-		"DB_CONN_MAX_LIFETIME":        "",
-		"DB_CONN_MAX_IDLE_TIME":       "",
-		"REQUEST_TIMEOUT":             "",
-		"SHUTDOWN_TIMEOUT":            "",
-		"DRAIN_DELAY":                 "",
-		"CACHE_FETCH_TIMEOUT":         "",
 		"LOG_LEVEL":                   "",
 		"LOG_FORMAT":                  "",
+		"DRAIN_DELAY":                 "",
+		"TRUSTED_PROXIES":             "",
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
-		"OTEL_TRACES_SAMPLE_RATE":     "",
 	}
+}
+
+func loadFileFromYAML(t *testing.T, content string) *File {
+	t.Helper()
+	if strings.TrimSpace(content) == "" {
+		return &File{}
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	return f
 }
 
 func TestLoadBaseConfig(t *testing.T) {
@@ -53,28 +65,40 @@ func TestLoadBaseConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
+		yaml    string
 		env     map[string]string
 		want    BaseConfig
 		wantErr string
 	}{
-		{name: "defaults", want: defaults},
+		{name: "defaults without yaml", want: defaults},
 		{
-			name: "explicit values",
+			name: "yaml values with env overrides",
+			yaml: `
+database:
+  max_open_conns: 20
+  max_idle_conns: 0
+  conn_max_lifetime: 1h30m
+  conn_max_idle_time: 5m
+http:
+  request_timeout: 2s
+  shutdown_timeout: 15s
+  drain_delay: 9s
+cache:
+  fetch_timeout: 500ms
+log:
+  level: warn
+  format: text
+tracing:
+  endpoint: http://yaml-otel:4318
+  sample_rate: 0
+`,
 			env: map[string]string{
 				"DATABASE_URL":                "postgres://user:pass@db:5432/shortlink?sslmode=disable",
-				"DB_MAX_OPEN_CONNS":           "20",
-				"DB_MAX_IDLE_CONNS":           "4",
-				"DB_CONN_MAX_LIFETIME":        "1h30m",
-				"DB_CONN_MAX_IDLE_TIME":       "5m",
-				"REQUEST_TIMEOUT":             "2s",
-				"SHUTDOWN_TIMEOUT":            "15s",
-				"DRAIN_DELAY":                 "3s",
-				"CACHE_FETCH_TIMEOUT":         "500ms",
 				"REDIS_URL":                   "rediss://user:pass@redis:6380/1",
 				"LOG_FORMAT":                  "json",
 				"LOG_LEVEL":                   "debug",
+				"DRAIN_DELAY":                 "3s",
 				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
-				"OTEL_TRACES_SAMPLE_RATE":     "0.25",
 			},
 			want: BaseConfig{
 				Addr:        ":8080",
@@ -82,7 +106,7 @@ func TestLoadBaseConfig(t *testing.T) {
 				RedisURL:    "rediss://user:pass@redis:6380/1",
 				Pool: pgdb.PoolConfig{
 					MaxOpenConns:    20,
-					MaxIdleConns:    4,
+					MaxIdleConns:    0,
 					ConnMaxLifetime: 90 * time.Minute,
 					ConnMaxIdleTime: 5 * time.Minute,
 				},
@@ -94,7 +118,7 @@ func TestLoadBaseConfig(t *testing.T) {
 				CacheFetchTimeout: 500 * time.Millisecond,
 				Tracing: TracingConfig{
 					Endpoint:   "http://127.0.0.1:4318",
-					SampleRate: 0.25,
+					SampleRate: 0,
 				},
 			},
 		},
@@ -104,22 +128,23 @@ func TestLoadBaseConfig(t *testing.T) {
 			env:  map[string]string{"REDIS_URL": ""},
 			want: func() BaseConfig { c := defaults; c.RedisURL = ""; return c }(),
 		},
+		{name: "rejects database url in yaml", yaml: "database:\n  url: postgres://bad/db\n", wantErr: "database"},
+		{name: "rejects redis url in yaml", yaml: "cache:\n  redis_url: redis://bad\n", wantErr: "cache"},
 		{name: "invalid log format", env: map[string]string{"LOG_FORMAT": "yaml"}, wantErr: "LOG_FORMAT"},
+		{name: "invalid yaml log format", yaml: "log:\n  format: xml\n", wantErr: "log.format"},
 		{name: "invalid log level", env: map[string]string{"LOG_LEVEL": "verbose"}, wantErr: "LOG_LEVEL"},
-		{name: "invalid open conns", env: map[string]string{"DB_MAX_OPEN_CONNS": "abc"}, wantErr: "DB_MAX_OPEN_CONNS"},
-		{name: "open conns not positive", env: map[string]string{"DB_MAX_OPEN_CONNS": "0"}, wantErr: "DB_MAX_OPEN_CONNS must be positive"},
-		{name: "idle conns above open conns", env: map[string]string{"DB_MAX_OPEN_CONNS": "10", "DB_MAX_IDLE_CONNS": "11"}, wantErr: "DB_MAX_IDLE_CONNS must be between 0 and DB_MAX_OPEN_CONNS"},
-		{name: "negative conn lifetime", env: map[string]string{"DB_CONN_MAX_LIFETIME": "-1s"}, wantErr: "connection lifetimes must not be negative"},
-		{name: "negative drain delay", env: map[string]string{"DRAIN_DELAY": "-1s"}, wantErr: "DRAIN_DELAY must not be negative"},
-		{name: "zero request timeout", env: map[string]string{"REQUEST_TIMEOUT": "0s"}, wantErr: "REQUEST_TIMEOUT must be positive"},
-		{name: "zero shutdown timeout", env: map[string]string{"SHUTDOWN_TIMEOUT": "0s"}, wantErr: "SHUTDOWN_TIMEOUT must be positive"},
-		{name: "cache fetch timeout exceeds request timeout", env: map[string]string{"REQUEST_TIMEOUT": "1s", "CACHE_FETCH_TIMEOUT": "2s"}, wantErr: "CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT"},
-		{name: "invalid otel endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "grpc://127.0.0.1:4317"}, wantErr: "OTEL_EXPORTER_OTLP_ENDPOINT"},
-		{name: "otel endpoint with query", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318?foo=1"}, wantErr: "OTEL_EXPORTER_OTLP_ENDPOINT"},
-		{name: "invalid otel sample rate", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "abc"}, wantErr: "OTEL_TRACES_SAMPLE_RATE"},
-		{name: "negative otel sample rate", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "-0.1"}, wantErr: "OTEL_TRACES_SAMPLE_RATE must be between 0 and 1"},
-		{name: "otel sample rate above 1", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "1.5"}, wantErr: "OTEL_TRACES_SAMPLE_RATE must be between 0 and 1"},
-		{name: "nan otel sample rate", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "NaN"}, wantErr: "OTEL_TRACES_SAMPLE_RATE must be between 0 and 1"},
+		{name: "open conns not positive", yaml: "database:\n  max_open_conns: 0\n", wantErr: "database.max_open_conns must be positive"},
+		{name: "idle conns above open conns", yaml: "database:\n  max_open_conns: 10\n  max_idle_conns: 11\n", wantErr: "database.max_idle_conns must be between 0 and database.max_open_conns"},
+		{name: "negative conn lifetime", yaml: "database:\n  conn_max_lifetime: -1s\n", wantErr: "connection lifetimes must not be negative"},
+		{name: "negative drain delay env", env: map[string]string{"DRAIN_DELAY": "-1s"}, wantErr: "drain delay must not be negative"},
+		{name: "zero request timeout", yaml: "http:\n  request_timeout: 0s\n", wantErr: "http.request_timeout must be positive"},
+		{name: "zero shutdown timeout", yaml: "http:\n  shutdown_timeout: 0s\n", wantErr: "http.shutdown_timeout must be positive"},
+		{name: "cache fetch timeout exceeds request timeout", yaml: "http:\n  request_timeout: 1s\ncache:\n  fetch_timeout: 2s\n", wantErr: "cache.fetch_timeout must not exceed http.request_timeout"},
+		{name: "invalid otel endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "grpc://127.0.0.1:4317"}, wantErr: "tracing.endpoint"},
+		{name: "otel endpoint with query", yaml: "tracing:\n  endpoint: http://127.0.0.1:4318?foo=1\n", wantErr: "tracing.endpoint"},
+		{name: "negative otel sample rate", yaml: "tracing:\n  sample_rate: -0.1\n", wantErr: "tracing.sample_rate must be between 0 and 1"},
+		{name: "otel sample rate above 1", yaml: "tracing:\n  sample_rate: 1.5\n", wantErr: "tracing.sample_rate must be between 0 and 1"},
+		{name: "nan otel sample rate", yaml: "tracing:\n  sample_rate: .nan\n", wantErr: "tracing.sample_rate must be between 0 and 1"},
 	}
 
 	for _, tt := range tests {
@@ -130,7 +155,8 @@ func TestLoadBaseConfig(t *testing.T) {
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
-			got, err := LoadBaseConfig(BaseConfigDefaults{Addr: ":8080"})
+			f := loadFileFromYAML(t, tt.yaml)
+			got, err := LoadBaseConfig(f, BaseConfigDefaults{Addr: ":8080"})
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("LoadBaseConfig() error = %v, want substring %q", err, tt.wantErr)
@@ -147,24 +173,74 @@ func TestLoadBaseConfig(t *testing.T) {
 	}
 }
 
-func TestParseCIDRs(t *testing.T) {
-	got, err := ParseCIDRs("10.0.0.0/8, 192.168.1.5, ::ffff:172.16.0.0/108, 2001:db8::/32")
-	if err != nil {
-		t.Fatalf("ParseCIDRs: %v", err)
-	}
-	want := []netip.Prefix{
-		netip.MustParsePrefix("10.0.0.0/8"),
-		netip.MustParsePrefix("192.168.1.5/32"),
-		netip.MustParsePrefix("172.16.0.0/12"),
-		netip.MustParsePrefix("2001:db8::/32"),
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("ParseCIDRs = %v, want %v", got, want)
-	}
-	for _, bad := range []string{"", " , ", "not-a-cidr", "10.0.0.0/99"} {
-		if _, err := ParseCIDRs(bad); err == nil {
-			t.Errorf("ParseCIDRs(%q) = nil, want error", bad)
+func TestLoadProxyConfig(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXIES", "")
+		got, err := LoadProxyConfig(&File{})
+		if err != nil || got.TrustHeaders || len(got.TrustedCIDRs) != 0 {
+			t.Fatalf("got = %+v, err = %v", got, err)
 		}
+	})
+
+	t.Run("wildcard from yaml", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXIES", "")
+		f := loadFileFromYAML(t, "trusted_proxies:\n  - \"*\"\n")
+		got, err := LoadProxyConfig(f)
+		if err != nil || !got.TrustHeaders || len(got.TrustedCIDRs) != 0 {
+			t.Fatalf("got = %+v, err = %v", got, err)
+		}
+	})
+
+	t.Run("cidrs from yaml overridden by env", func(t *testing.T) {
+		f := loadFileFromYAML(t, "trusted_proxies:\n  - 10.0.0.0/8\n")
+		t.Setenv("TRUSTED_PROXIES", "192.168.1.5, ::ffff:172.16.0.0/108, 2001:db8::/32")
+		got, err := LoadProxyConfig(f)
+		if err != nil {
+			t.Fatalf("LoadProxyConfig: %v", err)
+		}
+		want := []netip.Prefix{
+			netip.MustParsePrefix("192.168.1.5/32"),
+			netip.MustParsePrefix("172.16.0.0/12"),
+			netip.MustParsePrefix("2001:db8::/32"),
+		}
+		if !got.TrustHeaders || !slices.Equal(got.TrustedCIDRs, want) {
+			t.Fatalf("got = %+v, want cidrs %v", got, want)
+		}
+	})
+
+	t.Run("errors", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			yaml string
+			env  string
+		}{
+			{name: "mix wildcard and cidr in yaml", yaml: "trusted_proxies:\n  - \"*\"\n  - 10.0.0.0/8\n"},
+			{name: "blank entry in yaml", yaml: "trusted_proxies:\n  - \"\"\n"},
+			{name: "bad cidr in yaml", yaml: "trusted_proxies:\n  - 10.0.0.0/99\n"},
+			{name: "mix wildcard in env", env: "*,10.0.0.0/8"},
+			{name: "only comma in env", env: " , "},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv("TRUSTED_PROXIES", tc.env)
+				f := loadFileFromYAML(t, tc.yaml)
+				if _, err := LoadProxyConfig(f); err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+func TestLoadOutboundAllowedPorts(t *testing.T) {
+	f := loadFileFromYAML(t, "outbound:\n  allowed_ports: [80, 443, 8443]\n")
+	got, err := LoadOutboundAllowedPorts(f)
+	if err != nil || !slices.Equal(got, []int{80, 443, 8443}) {
+		t.Fatalf("got = %v, err = %v", got, err)
+	}
+
+	fBad := loadFileFromYAML(t, "outbound:\n  allowed_ports: [80, 70000]\n")
+	if _, err := LoadOutboundAllowedPorts(fBad); err == nil || !strings.Contains(err.Error(), "outbound.allowed_ports") {
+		t.Fatalf("err = %v, want outbound.allowed_ports", err)
 	}
 }
 

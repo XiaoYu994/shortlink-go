@@ -3,10 +3,11 @@ package config
 import "testing"
 
 func TestLoadFeatureFlagsDefaults(t *testing.T) {
+	t.Setenv(EnvConfigPath, "")
 	t.Setenv("FEATURE_ANALYTICS", "")
 	t.Setenv("FEATURE_RISK_SCAN", "")
 
-	got, err := LoadFeatureFlags()
+	got, err := LoadFeatureFlags(nil)
 	if err != nil {
 		t.Fatalf("LoadFeatureFlags: %v", err)
 	}
@@ -15,16 +16,18 @@ func TestLoadFeatureFlagsDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadFeatureFlagsExplicit(t *testing.T) {
-	t.Setenv("FEATURE_ANALYTICS", "false")
-	t.Setenv("FEATURE_RISK_SCAN", "false")
+func TestLoadFeatureFlagsYAMLAndEnvOverride(t *testing.T) {
+	t.Setenv(EnvConfigPath, "")
+	t.Setenv("FEATURE_ANALYTICS", "true")
+	t.Setenv("FEATURE_RISK_SCAN", "")
 
-	got, err := LoadFeatureFlags()
+	f := loadFileFromYAML(t, "features:\n  analytics: false\n  risk_scan: false\n")
+	got, err := LoadFeatureFlags(f)
 	if err != nil {
 		t.Fatalf("LoadFeatureFlags: %v", err)
 	}
-	if got.Analytics || got.RiskScan {
-		t.Fatalf("flags = %+v, want both false", got)
+	if !got.Analytics || got.RiskScan {
+		t.Fatalf("flags = %+v, want Analytics=true (env override) and RiskScan=false (yaml)", got)
 	}
 }
 
@@ -39,10 +42,11 @@ func TestLoadFeatureFlagsInvalid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvConfigPath, "")
 			t.Setenv("FEATURE_ANALYTICS", "")
 			t.Setenv("FEATURE_RISK_SCAN", "")
 			t.Setenv(tc.env, tc.val)
-			if _, err := LoadFeatureFlags(); err == nil {
+			if _, err := LoadFeatureFlags(nil); err == nil {
 				t.Fatalf("LoadFeatureFlags(%s=%q) succeeded, want error", tc.env, tc.val)
 			}
 		})

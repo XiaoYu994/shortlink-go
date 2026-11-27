@@ -1,6 +1,6 @@
 /*
 serve 是 console 的 HTTP 模式：提供可选的 OIDC / GitHub OAuth 2.0 / 手机号 OTP 登录、短链增删改查、统计，
-并按 CONSOLE_OPS_ADDR 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
+并按 CONSOLE_OPS_ADDR / console.ops_addr 决定 /healthz、/readyz 和 /metrics 是独立监听还是同端口挂载。
 创建、修改、删除后维护 Redis 缓存，公开跳转在 redirector 进程里读同一份缓存。
 密钥、租户和成员命令仍然走 admin.go 的路径，不加载 Redis。
 */
@@ -27,7 +27,7 @@ import (
 )
 
 func runServe(cliOpts serveCLIOptions) error {
-	cfg, err := loadConsoleConfig()
+	cfg, err := loadConsoleConfig(cliOpts.configPath)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func runServe(cliOpts serveCLIOptions) error {
 	if tracingEnabled {
 		logger.Info("tracing enabled", "endpoint", logx.RedactURL(cfg.Tracing.Endpoint), "sample_rate", cfg.Tracing.SampleRate)
 	} else {
-		logger.Info("tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT is not set")
+		logger.Info("tracing disabled: tracing.endpoint / OTEL_EXPORTER_OTLP_ENDPOINT is not set")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -130,7 +130,7 @@ func runServe(cliOpts serveCLIOptions) error {
 	if cfg.WebDistDir != "" {
 		info, err := os.Stat(cfg.WebDistDir)
 		if err != nil || !info.IsDir() {
-			return fmt.Errorf("WEB_DIST_DIR %q must be an existing directory", cfg.WebDistDir)
+			return fmt.Errorf("console.web_dist_dir %q must be an existing directory", cfg.WebDistDir)
 		}
 		logger.Info("serving web console static files", "dir", cfg.WebDistDir)
 	}
@@ -157,8 +157,8 @@ func runServe(cliOpts serveCLIOptions) error {
 		EmailEnabled:      cfg.EmailEnabled,
 		WebDistDir:        cfg.WebDistDir,
 		PublicBaseURL:     cfg.PublicBaseURL,
-		TrustProxyHeaders: cfg.TrustProxyHeaders,
-		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
+		TrustProxyHeaders: cfg.Proxy.TrustHeaders,
+		TrustedProxyCIDRs: cfg.Proxy.TrustedCIDRs,
 		IPRateLimit:       cfg.IPRateLimit,
 		IPRateBurst:       cfg.IPRateBurst,
 	})

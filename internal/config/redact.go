@@ -32,3 +32,16 @@ func (cfg BaseConfig) LogValue() slog.Value {
 func (cfg BaseConfig) String() string {
 	return cfg.LogValue().String()
 }
+
+// LogValue 输出可信代理开关与解析后的 CIDR 数量。
+func (p ProxyConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Bool("trust_headers", p.TrustHeaders),
+		slog.Int("trusted_cidrs_count", len(p.TrustedCIDRs)),
+	)
+}
+
+// String 实现 fmt.Stringer。
+func (p ProxyConfig) String() string {
+	return p.LogValue().String()
+}

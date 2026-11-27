@@ -18,7 +18,7 @@ import (
 /*
 riskWorkerModule 自包含异步 URL 风控所需的分层责任链（L0 本地规则、可选 L1 Safe Browsing、
 L2 防 SSRF 安全抓取与 HTML 净文本提取、可选 L3 LLM 语义研判）、带规则指纹的结果缓存与任务注册（ADR 0030、ADR 0034）。
-FEATURE_RISK_SCAN=false 时仅注册 link.risk_scan 的 disabledSkipHandler。
+features.risk_scan=false 时仅注册 link.risk_scan 的 disabledSkipHandler。
 */
 type riskWorkerModule struct {
 	enabled         bool
@@ -42,7 +42,7 @@ func (m riskWorkerModule) Name() string { return "risk_scan" }
 func (m riskWorkerModule) RegisterWorker(r WorkerRegistrar) error {
 	if !m.enabled {
 		if m.logger != nil {
-			m.logger.Info("risk scan worker disabled: FEATURE_RISK_SCAN=false")
+			m.logger.Info("risk scan worker disabled: features.risk_scan=false")
 		}
 		r.HandleDisabled(job.KindLinkRiskScan, m.Name())
 		return nil

@@ -56,7 +56,7 @@ shortlink/
 │   ├── storemetrics/    # 存储指标装饰器（透传完整读写 Store 与只读 Reader）
 │   ├── cache/           # Redis 客户端、读写 Store 与只读 Reader（5 分钟短 TTL 写穿 + 压测验证读路径保护，ADR 0031）
 │   ├── click/           # 点击元数据分类和异步批量记录（ClickRecorder、含 recorder_stopped 故障指标）
-│   └── config/          # 共用基础配置与内置功能开关（FeatureFlags）加载（零业务包依赖；各进程专属配置在 cmd/*/config.go）
+│   └── config/          # 共用 YAML/Env 分层配置、ProxyConfig 与内置功能开关加载（零业务包依赖；各进程专属配置在 cmd/*/config*.go）
 ├── migrations/          # golang-migrate 的 up/down SQL
 ├── web/                 # 独立前端控制台（React 19 + TypeScript + Tailwind v4 + Radix UI + React Router + TanStack Query），产物由 console 通过 WEB_DIST_DIR 可选托管（ADR 0021）
 ├── deploy/              # 本地 Prometheus、Dex OIDC 配置和反向代理
@@ -72,7 +72,7 @@ shortlink/
 cmd/redirector -> redirector, httpx, logx, tracex, pgdb, pgredirect, storemetrics(Reader), cache(Reader), click, config（严格零 identity/risk/job/audit/safehttp/webhook/mailer/sms 依赖，make arch-check 校验）
 cmd/console    -> console, httpx, logx, tracex, audit, identity(/oauth), job, link, postgres, risk, safehttp, webhook, mailer, sms, storemetrics, cache, config；key/tenant/member 命令只用 postgres，serve/worker 按 feature_*.go 垂直装配各特性
 cmd/migrate    -> golang-migrate
-config         -> logx, pgdb, 标准库（零业务包与 OTel 直接引入）
+config         -> logx, pgdb, go.yaml.in/yaml/v3, 标准库（零业务包与 OTel 直接引入）
 tracex         -> go.opentelemetry.io/otel/sdk, otlptracehttp（全仓唯一持有 OTel SDK，零 internal/* 依赖）
 redirector     -> httpx, link, click, idgen, Prometheus
 console        -> httpx, logx, audit, link, click, idgen, identity, tenant, ratelimit, safehttp, webhook, sms, Prometheus
@@ -184,40 +184,35 @@ GET /api/v1/links/{code}/stats
 
 ## 配置
 
-`config.LoadBaseConfig` 与各进程入口的 `cmd/redirector/config.go`（`loadRedirectorConfig`）、`cmd/console/config.go`（`loadConsoleConfig` / `loadWorkerConfig`）分别在启动时加载共用基础配置与各自进程的专属配置并校验：
+配置采用**「代码默认值 < 可选共享 YAML（`--config` 优先于 `SHORTLINK_CONFIG`） < 环境变量」**分层模型（[ADR 0035](adr/0035-layered-config-and-secret-separation.md)）：`config.example.yaml` 承载结构化调优与策略参数，`.env` / 环境变量仅保留 10 个连接串与密钥及 13 个高频运行期覆盖（未指定 YAML 时可零配置按默认值启动）。`config.LoadBaseConfig` 与各进程入口的 `cmd/redirector/config.go`（`loadRedirectorConfig`）、`cmd/console/config.go`（`loadConsoleConfig`）及 `cmd/console/config_worker.go`（`loadWorkerConfig`）分别按 `yaml.Node` 延迟解码公共节与自身专属节，保持 `redirector` 零控制面依赖（可通过 `console config dump` 校验并脱敏输出生效配置）：
 
-- `ADDR` / `OPS_ADDR`：跳转进程的业务监听地址（默认 `:8080`）与可选独立运维端口
-- `CONSOLE_ADDR` / `CONSOLE_OPS_ADDR`：管理进程的业务监听地址（默认 `:8081`）与可选独立运维端口（不读 `ADDR`，[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
-- `CONSOLE_IP_RATE_LIMIT` / `CONSOLE_IP_RATE_BURST`：管理面鉴权前按客户端 IP 令牌桶限流（默认 `60`/s、突发 `120`，`0` 关闭）
-- `DATABASE_URL`：必填
-- `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS`
-- `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME`
-- `REQUEST_TIMEOUT`：默认 `5s`，单个请求的处理时限，超时返回 504
-- `SHUTDOWN_TIMEOUT`：默认 `10s`，优雅退出时等待正在处理的请求的上限
-- `DRAIN_DELAY`：默认 `5s`，关闭监听前 `/readyz` 返回 503 的等待，盖住编排器的一个探测周期；`0s` 表示不等
-- `CACHE_MISS_CONCURRENCY`：默认 `8`，仅 redirector 使用，普通缓存未命中时进程内同时回源数据库的最大请求数，超出返回 503
-- `CACHE_FETCH_TIMEOUT`：默认 `1s`，单次回源超时；必须为正且不超过 `REQUEST_TIMEOUT`
-- `REDIS_URL`：可选，`redis://` 或 `rediss://`（TLS），可带用户名、密码和 DB 编号；配置时启动 Ping，连不上则退出；留空时跳过缓存层直连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）
-- `FEATURE_ANALYTICS` / `FEATURE_RISK_SCAN`：内置功能布尔开关（均默认 `true`，[ADR 0029](adr/0029-modular-feature-plugins.md)）。关闭 `FEATURE_ANALYTICS` 时 `redirector` 不启动 `ClickRecorder` 也不要求 `VISITOR_SALT`，`console` 不挂 `/stats`、响应省略 `clicks`/`clicks_today` 并对点击排序返回 400，`postgres` 跳过 `link_clicks_daily` 关联查询，`worker` 跳过统计表分区维护与清理；关闭 `FEATURE_RISK_SCAN` 时写库不入队 `link.risk_scan`，`worker` 跳过历史残留风控任务。跨进程部署时 `redirector`、`console serve`、`console worker` 与运维 CLI 应保持开关与外围配置一致
-- `VISITOR_SALT`：访客哈希的 HMAC 密钥。`FEATURE_ANALYTICS=true` 时 redirector 启动必填，关闭统计时可留空；console 不用。生产从密钥管理注入，不能提交真实值
-- `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_CIDRS`：默认 `false`；设为 `true` 时结合可信代理 CIDR 从右往左剥离可信代理跳数读取真实客户端 IP，既防客户端伪造，也防多层代理导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
-- `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
-- `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
-- `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_TRACES_SAMPLE_RATE`：可选，默认留空关闭 OpenTelemetry 追踪导出（零开销 Noop）；配置 http/https 端点后三进程分别上报 OTLP/HTTP Traces（默认采样率 `1`，经 `ParentBased` 传播，[ADR 0032](adr/0032-opentelemetry-tracing-and-log-correlation.md)）
-- `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
-- `ACCESS_LOG_SAMPLE_RATE` / `ACCESS_LOG_SLOW_THRESHOLD`：可选，仅 redirector 使用。控制正常 `INFO` 跳转访问日志的采样率（`[0, 1]`，默认 `1`）与慢请求门槛（默认 `200ms`，超门槛及 `5xx` 全量保留）
-- `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
-- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URL`：可选，仅 console 使用。三个要么全配、要么全空（只配一部分时启动失败）；可与 OIDC、Phone OTP 独立启用或同时启用，全部登录方式都为空时不挂载登录、登出、/me、自助建组织、成员、邀请、API Key、审计日志与 Webhook 管理路由（均为仅限会话用户 `ActorUser` 的路由），只支持 API Key（[ADR 0018](adr/0018-users-orgs-and-rbac.md)、[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)、[ADR 0023](adr/0023-audit-logs.md)）
-- `SMS_PROVIDER` / `SMS_WEBHOOK_URL` / `SMS_WEBHOOK_TOKEN` / `SMS_ALLOWED_PORTS` / `SMS_TIMEOUT` / `SMS_OTP_TTL` / `SMS_OTP_COOLDOWN` / `SMS_OTP_MAX_PER_HOUR` / `SMS_OTP_MAX_ATTEMPTS` / `SMS_SECURE_COOKIES`：可选，仅 `console serve` 使用。`SMS_PROVIDER` 留空关闭手机号 OTP 登录；支持 `webhook`（经 `safehttp` 防 SSRF 投递）与本地开发 `log` 模式（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）；过期挑战清理由 `console worker` 按 `WORKER_OTP_RETENTION`（默认 `24h`）定期执行
-- `WEB_DIST_DIR`：可选，仅 console 使用。指向 `make web-build` 生成的静态目录后在 `/` 提供最小前端控制台 SPA，同时严格隔离 `/api/*`、`/r/*`、`/healthz`、`/readyz`、`/metrics`（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）
-- `PUBLIC_BASE_URL`：可选，仅 console 使用。公开短链跳转基地址（如 `https://s.example.com` 或本地 `http://127.0.0.1:8080`），随 `GET /api/v1/capabilities` 下发给前端拼装可点击短链与二维码；单入口反代时可留空
-- `WORKER_ADDR` / `WORKER_CONCURRENCY` / `WORKER_MAX_PER_TENANT` / `WORKER_POLL_INTERVAL` / `WORKER_LEASE_DURATION` / `WORKER_JOB_TIMEOUT` / `WORKER_REAP_INTERVAL` / `WORKER_CLEANUP_INTERVAL` / `WORKER_SESSION_RETENTION` / `WORKER_DONE_JOB_RETENTION` / `WORKER_DEAD_JOB_RETENTION` / `WORKER_INVITATION_RETENTION` / `WORKER_WEBHOOK_DELIVERY_RETENTION`（默认 `168h`）/ `WORKER_STATS_RETENTION_DAYS`（默认 `90`）/ `WORKER_AUDIT_RETENTION_DAYS`（默认 `180`）/ `RISK_FETCH_TIMEOUT` / `RISK_HOST_RATE_LIMIT` / `RISK_ALLOWED_HOSTS` / `RISK_BLOCKED_HOSTS` / `RISK_BLOCKED_KEYWORDS` / `RISK_ALLOWED_PORTS` / `RISK_GSB_*` / `RISK_LLM_*`：仅 `console worker` 使用（[ADR 0020](adr/0020-background-jobs-and-async-risk-scan.md)、[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)、[ADR 0034](adr/0034-layered-risk-scan-and-ai-judge.md)）
-- `WEBHOOK_SECRET_KEY` / `WEBHOOK_ALLOWED_PORTS`：`console serve`、`console worker` 与运维 CLI 共用；配置 64 位小写 hex 的 `WEBHOOK_SECRET_KEY` 后启用 Webhook 订阅、事务内扇出与投递（[ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)、[ADR 0029](adr/0029-modular-feature-plugins.md)）
-- `SMTP_HOST`：`console serve`（决定是否入队邀请邮件并在 `/api/v1/capabilities` 声明 `email`）、运维 CLI（`member invite`）与 `console worker`（实际发信）共用；`SMTP_PORT`（默认 `587`）/ `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_TLS_MODE`（`starttls`/`smtps`/`none`）/ `SMTP_TIMEOUT`（默认 `10s`）/ `CONSOLE_PUBLIC_URL` 及 `WEBHOOK_TIMEOUT` / `WEBHOOK_HOST_RATE_LIMIT` / `WEBHOOK_RETRY_BASE_DELAY` / `WEBHOOK_RETRY_MAX_DELAY` / `WEBHOOK_MAX_CONSECUTIVE_FAILURES` 仅 `console worker` 使用（[ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)）
+- **Env-only 连接串与密钥（10 个，禁止写入 YAML）**：
+  - `DATABASE_URL`：必填，PostgreSQL 连接串
+  - `REDIS_URL`：可选，`redis://` 或 `rediss://`（TLS），留空时跳过缓存层直连 PostgreSQL（[ADR 0029](adr/0029-modular-feature-plugins.md)、[ADR 0031](adr/0031-cache-and-worker-assembly-simplification.md)）
+  - `VISITOR_SALT`：访客哈希 HMAC 密钥；`analytics=true` 时 redirector 启动必填，关闭统计时可留空
+  - `OIDC_CLIENT_SECRET` / `GITHUB_CLIENT_SECRET` / `SMS_WEBHOOK_TOKEN`：登录认证插件外部密钥
+  - `WEBHOOK_SECRET_KEY`：64 位小写 hex 主密钥；配置后启用 Webhook 订阅管理（若同时启用用户登录）、事务内扇出与后台投递（[ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)）
+  - `SMTP_PASSWORD`：SMTP 认证密码（与 YAML `smtp.username` 同开或同空）
+  - `RISK_GSB_API_KEY` / `RISK_LLM_API_KEY`：Google Safe Browsing v4 与 OpenAI 兼容 LLM 风控 API 密钥
+- **配置入口与高频运行期覆盖（13 个，非空时覆盖 YAML/默认值）**：
+  - `SHORTLINK_CONFIG`：可选共享 YAML 文件路径（CLI `--config` 优先级更高）
+  - `ADDR` / `OPS_ADDR`：跳转进程业务监听地址（默认 `:8080`）与可选独立运维端口（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
+  - `CONSOLE_ADDR` / `CONSOLE_OPS_ADDR`：管理进程业务监听地址（默认 `:8081`）与可选独立运维端口（不读 `ADDR`）
+  - `WORKER_ADDR`：后台任务进程可选运维端口（默认空不开启）
+  - `LOG_LEVEL`（`debug`/`info`/`warn`/`error`，默认 `info`）/ `LOG_FORMAT`（`text`/`json`，默认 `text`）
+  - `DRAIN_DELAY`（对应 `http.drain_delay`，默认 `5s`，关闭监听前 `/readyz` 返回 503 的等待；`0s` 表示不等）
+  - `TRUSTED_PROXIES`（对应 `trusted_proxies`，默认空不信任转发头；`*` 表示单跳反代；逗号分隔 CIDR 列表表示多跳右向剥离，[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
+  - `OTEL_EXPORTER_OTLP_ENDPOINT`（对应 `tracing.endpoint`，默认空关闭 OTLP/HTTP Traces；采样率由 `tracing.sample_rate` 控制，默认 `1`，[ADR 0032](adr/0032-opentelemetry-tracing-and-log-correlation.md)）
+  - `FEATURE_ANALYTICS` / `FEATURE_RISK_SCAN`（对应 `features.analytics` / `features.risk_scan`，默认全开 `true`，[ADR 0029](adr/0029-modular-feature-plugins.md)）
+- **YAML 结构化与低频调优节（见 [config.example.yaml](../config.example.yaml)）**：
+  - `database.*`（连接池）、`http.*`（`request_timeout` 默认 `5s`、`shutdown_timeout` 默认 `10s`、`drain_delay`）、`cache.fetch_timeout`（默认 `1s`）、`outbound.allowed_ports`（统一供 `risk`/`webhook`/`sms` 共用的出站白名单端口，默认空即 `80,443`）
+  - `redirector.*`：`pprof_addr`（[ADR 0013](adr/0013-pprof-on-loopback-listener.md)）、`cache_miss_concurrency`（默认 `8`）、`access_log_sample_rate`（默认 `1`）、`access_log_slow_threshold`（默认 `200ms`）
+  - `console.*`：`public_url`（**单一事实来源**，自动推导 OIDC/GitHub `/api/v1/auth/{id}/callback` 回调、Phone OTP `Secure` Cookie 与邀请邮件登录链接）、`public_base_url`（前端短链/二维码基址）、`web_dist_dir`（[ADR 0021](adr/0021-tenant-self-service-and-web-console.md)）、`ip_rate_limit` / `ip_rate_burst`（鉴权前按 IP 限流，默认 `60`/`120`）、`auth.oidc`、`auth.github`、`auth.phone_otp`（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）
+  - `worker.*`：调度参数（`concurrency`、`max_per_tenant`、`poll_interval`、`lease_duration`、`job_timeout`、`reap_interval`、`cleanup_interval`）、4 档清理保留期 `retention.{short, long, stats_days, audit_days}`（`short` 默认 `168h` 覆盖 sessions/done_jobs/webhook_deliveries、`long` 默认 `720h` 覆盖 dead_jobs/invitations；OTP 固定 24h，[ADR 0026](adr/0026-timeseries-partitioning-and-retention.md)）、原生 YAML 规则映射 `risk.{allowed_hosts, blocked_hosts, blocked_keywords}` 与 `gsb` / `llm`（[ADR 0034](adr/0034-layered-risk-scan-and-ai-judge.md)）、`webhook.*` 与顶层 `smtp.*`
 
 ## 退出
 
-两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后 `/readyz` 先返回 503，等 `DRAIN_DELAY`，再 `Shutdown`；这段时间监听还开着，`/healthz` 仍返回 200，避免编排器把正在退出的进程重启。`Shutdown` 不取消请求的 context，处理时限仍是 `REQUEST_TIMEOUT`。再次收到信号会打断摘流等待和 `Shutdown`。
+两个进程都监听 `SIGINT` 和 `SIGTERM`。收到信号后 `/readyz` 先返回 503，等 `http.drain_delay` / `DRAIN_DELAY`，再 `Shutdown`；这段时间监听还开着，`/healthz` 仍返回 200，避免编排器把正在退出的进程重启。`Shutdown` 不取消请求的 context，处理时限仍是 `http.request_timeout`。再次收到信号会打断摘流等待和 `Shutdown`。
 
 redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007](adr/0007-async-click-recording.md)。compose 里两个进程的 `stop_grace_period` 是 30s。这一步只对主动探测 `/readyz` 的编排器生效；`deploy/nginx.conf` 和 `deploy/nginx.stack.conf` 不探这个路径，开源 nginx 也没有主动健康检查，关停时仍会把请求打到已经关掉的监听上。
 

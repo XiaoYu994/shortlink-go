@@ -92,24 +92,30 @@ func TestExtractPageContent(t *testing.T) {
 	})
 }
 
-func TestParseHostRulesAndHostList(t *testing.T) {
-	hosts, err := ParseHostRules("Evil.Test.:phishing, [2001:db8::1]:malware")
+func TestNormalizeHostRulesAndHostList(t *testing.T) {
+	hosts, err := NormalizeHostRules(map[string]string{
+		"Evil.Test.":    "phishing",
+		"[2001:db8::1]": "malware",
+	})
 	if err != nil {
-		t.Fatalf("ParseHostRules error = %v", err)
+		t.Fatalf("NormalizeHostRules error = %v", err)
 	}
 	if hosts["evil.test"] != link.BanReasonPhishing || hosts["2001:db8::1"] != link.BanReasonMalware {
 		t.Fatalf("hosts = %+v", hosts)
 	}
-	if _, err := ParseHostRules("badrule"); err == nil || !strings.Contains(err.Error(), "want host:reason") {
-		t.Errorf("invalid host rule err = %v", err)
+	if _, err := NormalizeHostRules(map[string]string{"evil.test": "unknown"}); err == nil {
+		t.Error("expected error for invalid ban reason")
 	}
-	if _, err := ParseHostRules("2001:db8::zz:malware"); err == nil {
+	if _, err := NormalizeHostRules(map[string]string{"2001:db8::zz": "malware"}); err == nil {
 		t.Error("expected error for malformed ipv6 literal host rule")
 	}
+	if _, err := NormalizeHostRules(map[string]string{"Evil.Test": "phishing", "evil.test.": "spam"}); err == nil {
+		t.Error("expected error for conflicting normalized host rules")
+	}
 
-	gotList := ParseHostList(" GitHub.com. , docs.go.dev, github.com ")
+	gotList := NormalizeHostList([]string{" GitHub.com. ", "docs.go.dev", "github.com", " "})
 	if want := []string{"docs.go.dev", "github.com"}; !slices.Equal(gotList, want) {
-		t.Errorf("ParseHostList = %v, want %v", gotList, want)
+		t.Errorf("NormalizeHostList = %v, want %v", gotList, want)
 	}
 }
 

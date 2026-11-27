@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"shortlink/internal/httpx"
+	"shortlink/internal/identity"
 	"shortlink/internal/job"
 	"shortlink/internal/logx"
 	"shortlink/internal/postgres"
@@ -57,7 +58,7 @@ func drainCleanupBatches(ctx context.Context, batchLimit, maxBatches int, fn fun
 }
 
 func runWorker(cliOpts workerCLIOptions) error {
-	cfg, err := loadWorkerConfig()
+	cfg, err := loadWorkerConfig(cliOpts.configPath)
 	if err != nil {
 		return err
 	}
@@ -84,7 +85,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 	if tracingEnabled {
 		logger.Info("tracing enabled", "endpoint", logx.RedactURL(cfg.Tracing.Endpoint), "sample_rate", cfg.Tracing.SampleRate)
 	} else {
-		logger.Info("tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT is not set")
+		logger.Info("tracing disabled: tracing.endpoint / OTEL_EXPORTER_OTLP_ENDPOINT is not set")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -124,16 +125,16 @@ func runWorker(cliOpts workerCLIOptions) error {
 		coreWorkerModule{
 			store:               pgStore,
 			cleanupInterval:     cfg.CleanupInterval,
-			sessionRetention:    cfg.SessionRetention,
-			doneJobRetention:    cfg.DoneJobRetention,
-			deadJobRetention:    cfg.DeadJobRetention,
-			invitationRetention: cfg.InvitationRetention,
+			sessionRetention:    cfg.RetentionShort,
+			doneJobRetention:    cfg.RetentionShort,
+			deadJobRetention:    cfg.RetentionLong,
+			invitationRetention: cfg.RetentionLong,
 			auditRetentionDays:  cfg.AuditRetentionDays,
 		},
 		phoneOTPWorkerModule{
 			cleaner:         pgStore,
 			cleanupInterval: cfg.CleanupInterval,
-			retention:       cfg.OTPRetention,
+			retention:       identity.DefaultOTPRetention,
 		},
 		riskWorkerModule{
 			enabled:         cfg.Features.RiskScan,
@@ -141,7 +142,7 @@ func runWorker(cliOpts workerCLIOptions) error {
 			redisClient:     rdb,
 			registry:        registry,
 			fetchTimeout:    cfg.RiskFetchTimeout,
-			allowedPorts:    cfg.RiskAllowedPorts,
+			allowedPorts:    cfg.OutboundAllowedPorts,
 			allowTestHosts:  cliOpts.allowTestHosts,
 			allowedHosts:    cfg.RiskAllowedHosts,
 			blockedHosts:    cfg.RiskBlockedHosts,
@@ -155,14 +156,14 @@ func runWorker(cliOpts workerCLIOptions) error {
 			secretKey:              cfg.WebhookSecretKey,
 			store:                  pgStore,
 			timeout:                cfg.WebhookTimeout,
-			allowedPorts:           cfg.WebhookAllowedPorts,
+			allowedPorts:           cfg.OutboundAllowedPorts,
 			allowTestHosts:         cliOpts.allowTestHosts,
 			hostRateLimit:          cfg.WebhookHostRateLimit,
 			retryBaseDelay:         cfg.WebhookRetryBaseDelay,
 			retryMaxDelay:          cfg.WebhookRetryMaxDelay,
 			maxConsecutiveFailures: cfg.WebhookMaxConsecutiveFailures,
 			cleanupInterval:        cfg.CleanupInterval,
-			retention:              cfg.WebhookDeliveryRetention,
+			retention:              cfg.RetentionShort,
 			registry:               registry,
 			logger:                 logger,
 		},

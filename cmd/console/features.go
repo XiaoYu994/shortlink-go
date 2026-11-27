@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"shortlink/internal/config"
 	"shortlink/internal/postgres"
 	"shortlink/internal/webhook"
 )
@@ -16,10 +17,10 @@ StoreFeatures 汇总 console serve、console worker 与运维 CLI 共用的存�
 还是 CLI（link ban/unban、member invite）写库，挂载的事务钩子完全一致。
 */
 type StoreFeatures struct {
-	Analytics bool // FEATURE_ANALYTICS
-	RiskScan  bool // FEATURE_RISK_SCAN
+	Analytics bool // features.analytics / FEATURE_ANALYTICS
+	RiskScan  bool // features.risk_scan / FEATURE_RISK_SCAN
 	Webhooks  bool // WEBHOOK_SECRET_KEY 非空
-	Email     bool // SMTP_HOST 非空
+	Email     bool // smtp.host 非空
 }
 
 type featureStatus struct {
@@ -60,23 +61,31 @@ func (f StoreFeatures) consoleEnabledDisabled(cacheEnabled, webEnabled bool) (en
 }
 
 /*
-loadEmailEnabledFromEnv 与 worker 保持一致的 SMTP 启用口径：
-SMTP_HOST 为空表示关闭异步发信；非空时要求 SMTP_FROM 同时非空，避免 serve 入队而 worker 启动失败。
+loadEmailEnabled 与 worker 保持一致的 SMTP 启用口径：
+smtp.host 为空表示关闭异步发信；非空时要求 smtp.from 同时非空，避免 serve 入队而 worker 启动失败。
 */
-func loadEmailEnabledFromEnv() (bool, error) {
-	if strings.TrimSpace(os.Getenv("SMTP_HOST")) == "" {
+func loadEmailEnabled(file *config.File) (bool, error) {
+	smtpCfg, err := loadSMTPFromFile(file)
+	if err != nil {
+		return false, err
+	}
+	if smtpCfg.Host == "" {
 		return false, nil
 	}
-	if strings.TrimSpace(os.Getenv("SMTP_FROM")) == "" {
-		return false, errors.New("SMTP_FROM is required when SMTP_HOST is set")
+	if smtpCfg.From == "" {
+		return false, errors.New("smtp.from is required when smtp.host is set")
 	}
 	return true, nil
 }
 
 // loadAdminCLIStoreFeatures 只加载 key/tenant/member 运维命令实际可能触发的钩子（仅 member invite 涉及 Email），
 // 避免无关的 WEBHOOK_SECRET_KEY 或 REDIS_URL 影响 key/tenant 命令执行。
-func loadAdminCLIStoreFeatures() (StoreFeatures, error) {
-	emailEnabled, err := loadEmailEnabledFromEnv()
+func loadAdminCLIStoreFeatures(configPath string) (StoreFeatures, error) {
+	file, err := config.LoadFile(config.ResolvePath(configPath))
+	if err != nil {
+		return StoreFeatures{}, err
+	}
+	emailEnabled, err := loadEmailEnabled(file)
 	if err != nil {
 		return StoreFeatures{}, err
 	}

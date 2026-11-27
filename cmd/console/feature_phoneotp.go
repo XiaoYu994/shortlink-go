@@ -16,8 +16,8 @@ type phoneOTPCleaner interface {
 }
 
 /*
-initPhoneOTPAuthMethod 按 SMS_PROVIDER 构造短信发送通道与 PhoneOTPAuthMethod（ADR 0030）。
-SMS_PROVIDER 为空时返回 nil，表示关闭手机号验证码登录。
+initPhoneOTPAuthMethod 按 console.auth.phone_otp.provider 构造短信发送通道与 PhoneOTPAuthMethod（ADR 0030）。
+provider 为空时返回 nil，表示关闭手机号验证码登录。
 */
 func initPhoneOTPAuthMethod(
 	cfg PhoneOTPConfig,
@@ -50,7 +50,7 @@ func initPhoneOTPAuthMethod(
 		}
 		sender = sms.NewLogSender(logger)
 	default:
-		return nil, fmt.Errorf("unsupported SMS_PROVIDER %q", cfg.Provider)
+		return nil, fmt.Errorf("unsupported phone_otp provider %q", cfg.Provider)
 	}
 
 	method, err := console.NewPhoneOTPAuthMethod("phone", console.PhoneOTPOptions{
@@ -73,7 +73,7 @@ func initPhoneOTPAuthMethod(
 
 /*
 phoneOTPWorkerModule 负责定期分批清理过期的手机号验证码挑战记录（ADR 0030）。
-与 sessions 清理一致，不要求 worker 重复配置 SMS_* 环境变量，也能清理“先开后关”后的存量挑战行。
+与 sessions 清理一致，不要求 worker 重复配置短信参数，也能清理“先开后关”后的存量挑战行。
 */
 type phoneOTPWorkerModule struct {
 	cleaner         phoneOTPCleaner

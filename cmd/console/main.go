@@ -2,6 +2,8 @@
 Command console 是管理进程，也是租户、API Key、成员邀请和链接下架的运维入口。
 
 console serve 提供短链增删改查、点击统计、/healthz、/readyz 和 /metrics；
+console worker 启动异步任务与定时维护引擎；
+console config dump 校验并脱敏输出当前生效配置；
 console key issue/list/revoke 签发密钥、列出状态和吊销，明文只写到标准输出，不进日志；
 console tenant show/set 查看和调整租户的链接配额与管理 API 限流；
 console member invite 预先登记组织成员邀请，用户携带已验证的同一邮箱通过 OIDC 登录时自动兑现；
@@ -23,14 +25,21 @@ import (
 
 	"shortlink/internal/audit"
 	"shortlink/internal/cache"
+	"shortlink/internal/config"
 	"shortlink/internal/logx"
 	"shortlink/internal/postgres"
 )
 
 func main() {
-	args := os.Args[1:]
+	globalConfigPath, args, err := stripLeadingConfigFlag(os.Args[1:])
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+		writeUsage(os.Stderr)
+		os.Exit(2)
+	}
+
 	/*
-		serve 在加载配置前分派：key 和 tenant 命令只需要 DATABASE_URL，
+		serve / worker / config 在打开数据库连接前分派：key 和 tenant 命令只需要 DATABASE_URL，
 		不能因为 HTTP 模式或 link 命令要连 Redis，就让它们也依赖 Redis。
 	*/
 	if len(args) > 0 && args[0] == "serve" {
@@ -43,6 +52,9 @@ func main() {
 				os.Exit(2)
 			}
 			return
+		}
+		if serveOpts.configPath == "" {
+			serveOpts.configPath = globalConfigPath
 		}
 		if err := runServe(serveOpts); err != nil {
 			logx.NewFallback(os.Stderr, "console").Error("fatal", "err", err)
@@ -61,14 +73,43 @@ func main() {
 			}
 			return
 		}
+		if opts.configPath == "" {
+			opts.configPath = globalConfigPath
+		}
 		if err := runWorker(opts); err != nil {
 			logx.NewFallback(os.Stderr, "console-worker").Error("fatal", "err", err)
 			os.Exit(1)
 		}
 		return
 	}
+	if len(args) > 0 && args[0] == "config" {
+		opts, ok, err := parseConfigCommand(args[1:], os.Stderr)
+		if !ok {
+			if err != nil {
+				if !errors.Is(err, errUsage) {
+					_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+				}
+				os.Exit(2)
+			}
+			return
+		}
+		if opts.configPath == "" {
+			opts.configPath = globalConfigPath
+		}
+		if err := runConfigDump(opts, os.Stdout); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
-	if err := run(args, os.Stdout, os.Stderr, openStore, openLinkStore); err != nil {
+	open := func(ctx context.Context) (adminStore, io.Closer, error) {
+		return openStore(ctx, globalConfigPath)
+	}
+	openLink := func(ctx context.Context) (linkStore, io.Closer, error) {
+		return openLinkStore(ctx, globalConfigPath)
+	}
+	if err := run(args, os.Stdout, os.Stderr, open, openLink); err != nil {
 		if !errors.Is(err, errUsage) {
 			_, _ = fmt.Fprintf(os.Stderr, "console: %v\n", err)
 		}
@@ -77,6 +118,31 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func stripLeadingConfigFlag(args []string) (string, []string, error) {
+	var configPath string
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--config" || args[0] == "-config":
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+				return "", nil, fmt.Errorf("%w: --config requires a file path", errUsage)
+			}
+			configPath = strings.TrimSpace(args[1])
+			args = args[2:]
+		case strings.HasPrefix(args[0], "--config=") || strings.HasPrefix(args[0], "-config="):
+			_, val, _ := strings.Cut(args[0], "=")
+			val = strings.TrimSpace(val)
+			if val == "" {
+				return "", nil, fmt.Errorf("%w: --config requires a file path", errUsage)
+			}
+			configPath = val
+			args = args[1:]
+		default:
+			return configPath, args, nil
+		}
+	}
+	return configPath, args, nil
 }
 
 /*
@@ -125,12 +191,12 @@ func runLink(args []string, stdout, stderr io.Writer, open func(context.Context)
 	return cmd(ctx, links, stdout)
 }
 
-func openStore(ctx context.Context) (adminStore, io.Closer, error) {
+func openStore(ctx context.Context, configPath string) (adminStore, io.Closer, error) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return nil, nil, errors.New("DATABASE_URL is required")
 	}
-	features, err := loadAdminCLIStoreFeatures()
+	features, err := loadAdminCLIStoreFeatures(configPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -147,10 +213,13 @@ openLinkStore 给 link 命令打开 PostgreSQL 与可选 Redis（ADR 0029）。
 客户端不 Ping，Redis 不可用时封禁照样先落库，连接失败留到第一次写缓存时由 cache.Store 报告 cache.ErrNotUpdated。
 REDIS_URL 留空时跳过缓存层，直接写库返回。
 */
-func openLinkStore(ctx context.Context) (linkStore, io.Closer, error) {
+func openLinkStore(ctx context.Context, configPath string) (linkStore, io.Closer, error) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return nil, nil, errors.New("DATABASE_URL is required")
+	}
+	if _, err := config.LoadFile(config.ResolvePath(configPath)); err != nil {
+		return nil, nil, err
 	}
 	features, err := loadLinkCLIStoreFeatures()
 	if err != nil {

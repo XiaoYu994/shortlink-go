@@ -278,7 +278,7 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 }
 ```
 
-未配置 `PUBLIC_BASE_URL` 时省略 `public_base_url`；未配置登录插件时 `auth_methods` 为 `[]`。前端控制台据该端点动态渲染登录按钮、侧边栏菜单与统计控件。
+未配置 `console.public_base_url` 时省略 `public_base_url`；未配置登录插件时 `auth_methods` 为 `[]`。前端控制台据该端点动态渲染登录按钮、侧边栏菜单与统计控件。
 
 所有跳转型登录插件（`/api/v1/auth/{id}/login`，例如 `/api/v1/auth/oidc/login` 与 `/api/v1/auth/github/login`）支持可选查询参数 `?return_to=/...`：
 
@@ -287,7 +287,7 @@ curl -s 'localhost:8081/api/v1/links/AbC123xy/stats?from=2026-11-08T00:00:00Z&to
 
 ## OIDC 登录
 
-只有在 `OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`、`OIDC_REDIRECT_URL` 四个环境变量全部配置时，console 才注册 OIDC 登录和回调路由；全部为空时这两个路径返回 404，不影响纯 API Key 部署；只配一部分时启动失败。两个端点都不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store`，并且只接受 `GET`（`HEAD` 返回 405，避免探针消费授权码）。
+只有在 `console.auth.oidc.issuer`、`console.auth.oidc.client_id`、`OIDC_CLIENT_SECRET` 与 `console.public_url` 全部配置时，console 才注册 OIDC 登录和回调路由（回调自动推导为 `{console.public_url}/api/v1/auth/oidc/callback`）；全空时不挂载路由，只配一部分时启动失败。两个端点都不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store`，并且只接受 `GET`（`HEAD` 返回 405，避免探针消费授权码）。
 
 发起登录：
 
@@ -298,7 +298,7 @@ curl -i -c cookies.txt localhost:8081/api/v1/auth/oidc/login
 返回 `302 Found`，`Location` 指向身份提供方的授权端点（带 `response_type=code`、`scope=openid email profile`、随机 `state`、PKCE `S256` 的 `code_challenge` 和随机 `nonce`），同时写入短期流程 Cookie `sl_oidc_flow`：
 
 - `HttpOnly`、`SameSite=Lax`、`Path=/api/v1/auth/oidc/callback`、`Max-Age=600`（10 分钟）。
-- `OIDC_REDIRECT_URL` 为 `https://` 时带 `Secure`；本地 HTTP 开发和冒烟（`http://127.0.0.1:...`）不带 `Secure`。
+- `console.public_url` 为 `https://` 时带 `Secure`；本地 HTTP 开发和冒烟（`http://127.0.0.1:...`）不带 `Secure`。
 - 值是 HMAC 签过的，客户端不能改 `state`、PKCE verifier、nonce 或过期时间。
 
 回调建会话：
@@ -315,7 +315,7 @@ Cookie: sl_oidc_flow=...
 3. `state` 相符后立即删除一次性流程 Cookie。上游返回 `error` 参数（如 `access_denied`）返回 401 `{"error":"authentication failed"}`；缺少 `code` 返回 400 `{"error":"missing authorization code"}`。
 4. 用 `code` 和 PKCE `code_verifier` 向令牌端点换令牌，用 `go-oidc` 校验 ID Token 的签名（JWKS）、`iss`、`aud`、`exp`，再与流程 Cookie 中的 `nonce` 做常量时间比对。ID Token 只在回调里消费一次，不持久化。
 5. 按 `(issuer, subject)` 在 PostgreSQL 里查找或创建用户（不按邮箱自动关联不同提供方）。再次登录只在新声明非空时覆盖邮箱和昵称；邮箱缺失时保留原来的 `email_verified`，同一邮箱已经验证过的不会被后来的 `false` 降回去。如果本次已校验的 ID Token 同时满足 `email_verified` 为 `true` 且邮箱非空，会在同一事务里把该邮箱名下尚未过期、未撤销的待兑现组织邀请全部兑现成 `memberships`（已经是组织成员时保留原有角色）。每次登录都用 `crypto/rand` 签发全新的服务端会话令牌（`sls_` 加 64 位小写十六进制，库里只存 SHA-256，默认有效期 7 天）。
-6. 写入会话 Cookie `sl_session`（`HttpOnly`、`SameSite=Lax`、`Path=/api/`、`Max-Age` 取数据库时钟下 `expires_at - now()`，`OIDC_REDIRECT_URL` 为 `https://` 时带 `Secure`），返回 `200 OK` 和用户摘要：
+6. 写入会话 Cookie `sl_session`（`HttpOnly`、`SameSite=Lax`、`Path=/api/`、`Max-Age` 取数据库时钟下 `expires_at - now()`，`console.public_url` 为 `https://` 时带 `Secure`），返回 `200 OK` 和用户摘要：
 
 ```json
 {
@@ -332,15 +332,15 @@ Cookie: sl_oidc_flow=...
 
 ## GitHub OAuth 2.0 登录
 
-只有在 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GITHUB_REDIRECT_URL` 三个环境变量全部配置时，console 才注册 GitHub 登录和回调路由（全部为空时返回 404，只配一部分时启动失败），可与 `OIDC_*` 独立启用或同时启用。两个端点同样不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store` 且只接受 `GET`。
+只有在 `console.auth.github.client_id`、`GITHUB_CLIENT_SECRET` 与 `console.public_url` 全部配置时，console 才注册 GitHub 登录和回调路由（回调自动推导为 `{console.public_url}/api/v1/auth/github/callback`；全空返回 404，只配一部分时启动失败），可与 OIDC 独立启用或同时启用。两个端点同样不走 API Key 鉴权和按租户限流，响应一律带 `Cache-Control: no-store` 且只接受 `GET`。
 
-- `GET /api/v1/auth/github/login`：返回 `302 Found` 跳转到 `https://github.com/login/oauth/authorize`（`scope=read:user user:email`，带随机 `state` 与 PKCE `S256` `code_challenge`，**不传 `nonce`**），并写入短期 `sl_github_flow` Cookie（`Path=/api/v1/auth/github/callback`、`HttpOnly`、`SameSite=Lax`、`Max-Age=600`、`GITHUB_REDIRECT_URL` 为 `https://` 时带 `Secure`）。
+- `GET /api/v1/auth/github/login`：返回 `302 Found` 跳转到 `https://github.com/login/oauth/authorize`（`scope=read:user user:email`，带随机 `state` 与 PKCE `S256` `code_challenge`，**不传 `nonce`**），并写入短期 `sl_github_flow` Cookie（`Path=/api/v1/auth/github/callback`、`HttpOnly`、`SameSite=Lax`、`Max-Age=600`、`console.public_url` 为 `https://` 时带 `Secure`）。
 - `GET /api/v1/auth/github/callback`：校验 `sl_github_flow` Cookie 与 `state` 后立即清除该 Cookie；用 `code` + PKCE `code_verifier` 换取 GitHub access token，再在线调用 `GET /user`（取不可变的数字用户 `id` 作为 `subject`、`name` 为空时回退到 `login`）与 `GET /user/emails`（只信任 `primary` 且 `verified` 的主邮箱），以 `(issuer="https://github.com", subject="<numeric id>")` 查找或创建用户、按已验证主邮箱兑现待兑现邀请，并签发同一个 `sl_session` 服务端会话（access token 只在本请求使用，不落库、不打日志）。
 - 与标准 OIDC 的协议差异对照：
 
 | 对比维度 | 标准 OIDC（Dex） | GitHub 纯 OAuth 2.0 |
 | --- | --- | --- |
-| 发现与密钥 | `OIDC_ISSUER/.well-known/openid-configuration` + JWKS 自动拉取 | 无发现文档，硬编码官方授权/令牌/REST 地址 |
+| 发现与密钥 | `console.auth.oidc.issuer` + `/.well-known/openid-configuration` 与 JWKS | 无发现文档，硬编码官方授权/令牌/REST 地址 |
 | 身份承载与重放防护 | 签名 JWT（ID Token）+ `nonce` 常量时间比对 | 无 ID Token 与 `nonce`；换回 `access_token` 后在线查 API |
 | 令牌端点错误语义 | HTTP 400（`invalid_grant` 等） | 授权码/凭据错误常返回 **HTTP 200** + 表单 `error=...` |
 | 主体与邮箱验证 | 声明自带 `sub`、`email`、`email_verified` | `/user` 缺可信验证状态，须调 `/user/emails` 取 `primary && verified` |
@@ -349,7 +349,7 @@ Cookie: sl_oidc_flow=...
 
 ## 手机号短信验证码登录（Phone OTP）
 
-配置 `SMS_PROVIDER`（`webhook` 或本地开发用 `log`）后，console 注册以下两个 `POST` 端点（未配置时返回 404），与 OIDC / GitHub 共享同一套会话底座（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）。两个端点均受鉴权前 IP 限流与 `CrossOriginProtection` 保护，响应一律带 `Cache-Control: no-store`。
+配置 `console.auth.phone_otp.provider`（`webhook` 或本地开发用 `log`）后，console 注册以下两个 `POST` 端点（未配置时返回 404），与 OIDC / GitHub 共享同一套会话底座（[ADR 0030](adr/0030-phone-otp-and-vertical-console-assembly.md)）。Cookie 的 `Secure` 属性同样按 `console.public_url` 是否 `https://` 自动推导；两个端点均受鉴权前 IP 限流与 `CrossOriginProtection` 保护，响应一律带 `Cache-Control: no-store`。
 
 ### 发送验证码
 
@@ -378,7 +378,7 @@ curl -i -c cookies.txt -X POST localhost:8081/api/v1/auth/phone/verify \
 
 ## 当前用户与登出
 
-启用任意用户登录方式（`OIDC_*`、`GITHUB_*` 或 `SMS_PROVIDER`）后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（全部未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
+启用任意用户登录方式（OIDC、GitHub 或 Phone OTP）后，console 同时注册 `GET /api/v1/me` 和 `POST /api/v1/auth/logout`（全部未配置时返回 404）。两个端点只认唯一的 `sl_session` Cookie，不走 `X-Org-ID` 校验和按租户限流，响应一律带 `Cache-Control: no-store`。同名 Cookie 多于一份时返回 401，不查询、不吊销。
 
 ### 查询当前用户
 
@@ -496,7 +496,7 @@ curl -i -X POST -b cookies.txt \
 三个接口均走管理 API 鉴权链（要求 `sl_session` + `X-Org-ID`，受限流和跨站写保护），权限沿用 `members:read` / `members:write`：
 
 - `GET /api/v1/invitations`（需要 `members:read`）：按 `id` 降序返回当前组织的全部邀请，含派生状态 `status`（`pending`/`accepted`/`revoked`/`expired`）、`invited_by`、`created_at`、`expires_at`、`accepted_at`、`revoked_at`。
-- `POST /api/v1/invitations`（需要 `members:write`）：请求体 `{"email":"bob@example.com","role":"member","expires_at":"..."}`（`expires_at` 可选，须为将来时间）。自动写入 `invited_by = 当前用户 ID`；遵循角色等级（`admin` 不可邀请 `owner`，返回 403）；同组织同邮箱已存在待兑现邀请返回 409。同一事务原子入队 `invitation.email` 任务；当 `console worker` 配置了 `SMTP_*` 时异步发送包含组织名与登录链接（`CONSOLE_PUBLIC_URL`）的邀请邮件（未配置 SMTP 时直接跳过，不影响人工复制登录入口）。受邀用户随后以该已验证邮箱登录时自动兑现为组织成员。
+- `POST /api/v1/invitations`（需要 `members:write`）：请求体 `{"email":"bob@example.com","role":"member","expires_at":"..."}`（`expires_at` 可选，须为将来时间）。自动写入 `invited_by = 当前用户 ID`；遵循角色等级（`admin` 不可邀请 `owner`，返回 403）；同组织同邮箱已存在待兑现邀请返回 409。同一事务原子入队 `invitation.email` 任务；当配置了 `smtp.host` 时异步发送包含组织名与登录链接（`console.public_url`）的邀请邮件（未配置 SMTP 时直接跳过，不影响人工复制登录入口）。受邀用户随后以该已验证邮箱登录时自动兑现为组织成员。
 - `DELETE /api/v1/invitations/{id}`（需要 `members:write`）：撤销当前组织的待兑现邀请，成功返回 `204 No Content`。跨组织或不存在返回 404；非 `pending` 状态返回 409；`admin` 不可撤销 `owner` 邀请（403）。
 
 ### 组织 API Key 自助管理
@@ -524,14 +524,14 @@ curl -i -b cookies.txt -H 'X-Org-ID: 1' \
 
 ## Webhooks
 
-仅当 `console` 同时配置了 64 位小写 hex 主密钥 `WEBHOOK_SECRET_KEY` 且启用了至少一种会话登录方式（`OIDC_*` 或 `GITHUB_*`）时，才会挂载 `/api/v1/webhooks*`（任一缺失时路由返回 404，且 `GET /api/v1/capabilities` 返回 `"webhooks":false`）。详见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)。
+仅当 `console` 同时配置了 64 位小写 hex 主密钥 `WEBHOOK_SECRET_KEY` 且启用了至少一种会话登录方式时，才会挂载 `/api/v1/webhooks*`（任一缺失时路由返回 404，且 `GET /api/v1/capabilities` 返回 `"webhooks":false`）。详见 [ADR 0027](adr/0027-webhooks-and-async-invitation-email.md)。
 
 全部 Webhook 接口走管理 API 鉴权链（`sl_session` + `X-Org-ID` + 按租户限流 + `CrossOriginProtection`），**仅授予 `owner` 与 `admin` 会话**（`webhooks:read` / `webhooks:write`；API Key 永远返回 403），响应一律带 `Cache-Control: no-store`。每个组织最多配置 `5` 个 Webhook（并发加行锁校验，超限返回 409 `{"error":"webhook limit exceeded"}`）。
 
 ### 订阅管理接口
 
 - `GET /api/v1/webhooks`（`webhooks:read`）：按 `id` 降序返回当前组织全部订阅元数据（`id`、`url`、可选 `description`、`events`、`secret_prefix`、`enabled`、`consecutive_failures`、可选 `disabled_reason`/`disabled_at`、可选 `created_by`、`created_at`、`updated_at`）。
-- `POST /api/v1/webhooks`（`webhooks:write`）：请求体 `{"url":"https://hooks.example.com/shortlink","description":"prod","events":["link.created","link.banned"]}`。URL 经过严格 SSRF 校验（禁止内网/回环/元数据网段，只允许 80/443 或 `WEBHOOK_ALLOWED_PORTS` 白名单端口，最长 2048 字节）；`events` 为非空子集（可选：`link.created`、`link.updated`、`link.deleted`、`link.banned`、`link.unbanned`）。成功返回 `201 Created` 与仅出现一次的明文 `"secret":"whsec_<64位hex>"`（AES-256-GCM 密文绑定 `tenant_id` AAD 存库）。
+- `POST /api/v1/webhooks`（`webhooks:write`）：请求体 `{"url":"https://hooks.example.com/shortlink","description":"prod","events":["link.created","link.banned"]}`。URL 经过严格 SSRF 校验（禁止内网/回环/元数据网段，只允许 80/443 或 `outbound.allowed_ports` 白名单端口，最长 2048 字节）；`events` 为非空子集（可选：`link.created`、`link.updated`、`link.deleted`、`link.banned`、`link.unbanned`）。成功返回 `201 Created` 与仅出现一次的明文 `"secret":"whsec_<64位hex>"`（AES-256-GCM 密文绑定 `tenant_id` AAD 存库）。
 - `PATCH /api/v1/webhooks/{id}`（`webhooks:write`）：部分更新 `url`、`description`、`events`、`enabled`（至少传一个字段）。将 `enabled` 设为 `true` 时会清零 `consecutive_failures` 并清空 `disabled_reason`/`disabled_at`。
 - `DELETE /api/v1/webhooks/{id}`（`webhooks:write`）：在单事务内删除 `webhooks` 订阅行并写入 `webhook.delete` 审计日志，返回 `204 No Content`。尚未投递的排队任务回表查不到订阅时自动 `Skip`；关联的历史 `webhook_deliveries` 行不再对管理接口可见，由 worker 周期保留期清理任务分批删除。
 - `POST /api/v1/webhooks/{id}/rotate-secret`（`webhooks:write`）：立即生成新密钥覆盖密文并返回 `200 OK` + 新 `"secret":"whsec_..."`。
@@ -553,7 +553,7 @@ curl -i -b cookies.txt -H 'X-Org-ID: 1' \
 curl -i localhost:8080/r/AbC123xy
 ```
 
-成功返回 302，`Location` 是原始 URL。只有 GET 记一次点击。`GET /r/{code}` 也匹配 HEAD（探针、预览、扫描器），HEAD 同样返回 302，但不记点击。查出链接时客户端已经断开的，不记点击。短码不存在、已过期、已停用或已封禁返回 404，响应不区分这几种状态；存储错误返回 500，处理超时返回 504；回源并发已满返回 503（临时过载，可重试），包括普通缓存未命中超过 `CACHE_MISS_CONCURRENCY` 和 Redis 不可用时的回源。错误体都是 JSON。
+成功返回 302，`Location` 是原始 URL。只有 GET 记一次点击。`GET /r/{code}` 也匹配 HEAD（探针、预览、扫描器），HEAD 同样返回 302，但不记点击。查出链接时客户端已经断开的，不记点击。短码不存在、已过期、已停用或已封禁返回 404，响应不区分这几种状态；存储错误返回 500，处理超时返回 504；回源并发已满返回 503（临时过载，可重试），包括普通缓存未命中超过 `redirector.cache_miss_concurrency` 和 Redis 不可用时的回源。错误体都是 JSON。
 
 点击记录带这些元数据：
 

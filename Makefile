@@ -2,19 +2,17 @@
 -include .env
 export
 
-# 跳转进程读 ADDR，管理进程读 CONSOLE_ADDR。两边不能共用一个地址。
-ADDR ?= :8080
-CONSOLE_ADDR ?= :8081
-WORKER_ADDR ?= :8082
-redirector_port := $(lastword $(subst :, ,$(ADDR)))
-console_port := $(lastword $(subst :, ,$(CONSOLE_ADDR)))
-worker_port := $(lastword $(subst :, ,$(WORKER_ADDR)))
+# 跳转进程读 ADDR（默认 :8080），管理进程读 CONSOLE_ADDR（默认 :8081），worker 读 WORKER_ADDR（默认关闭）。
+# 不对 ADDR/CONSOLE_ADDR/WORKER_ADDR 做 ?= 赋值，避免 export 覆盖 config.yaml 中的 *.addr。
+redirector_port := $(lastword $(subst :, ,$(or $(ADDR),:8080)))
+console_port := $(lastword $(subst :, ,$(or $(CONSOLE_ADDR),:8081)))
+worker_port := $(lastword $(subst :, ,$(or $(WORKER_ADDR),:8082)))
 redirector_ops_port := $(if $(OPS_ADDR),$(lastword $(subst :, ,$(OPS_ADDR))),$(redirector_port))
 console_ops_port := $(if $(CONSOLE_OPS_ADDR),$(lastword $(subst :, ,$(CONSOLE_OPS_ADDR))),$(console_port))
 
 # 本地开发默认通过 air 热更新（改 .go 自动重编译重启）；传 HOT_RELOAD=0 可回退普通 go run。
 HOT_RELOAD ?= 1
-# 热更新模式默认跳过 .env 里的 5s 摘流等待，避免每次保存卡 5 秒或端口冲突；需演练摘流时传 DEV_DRAIN_DELAY=5s 或 HOT_RELOAD=0。
+# 热更新模式默认跳过默认 5s 摘流等待，避免每次保存卡 5 秒或端口冲突；需演练摘流时传 DEV_DRAIN_DELAY=5s 或 HOT_RELOAD=0。
 DEV_DRAIN_DELAY ?= 0s
 AIR_VERSION ?= v1.67.4
 
@@ -39,14 +37,15 @@ check-air:
 
 ifeq ($(HOT_RELOAD),1)
 run-redirector: check-air ## 启动跳转进程（ADDR，默认 :8080；默认热更新，HOT_RELOAD=0 关闭）
-	ADDR=$(ADDR) DRAIN_DELAY=$(DEV_DRAIN_DELAY) air \
+	DRAIN_DELAY=$(DEV_DRAIN_DELAY) air \
 		--tmp_dir tmp/air/redirector \
 		--build.include_dir cmd/redirector --build.include_dir internal \
 		--build.cmd "go build -o ./tmp/air/redirector/app ./cmd/redirector" \
-		--build.entrypoint ./tmp/air/redirector/app
+		--build.entrypoint ./tmp/air/redirector/app \
+		$(if $(strip $(ARGS)),-- $(strip $(ARGS)))
 
 run-console: check-air ## 启动管理进程（CONSOLE_ADDR，默认 :8081；默认热更新，HOT_RELOAD=0 关闭）
-	CONSOLE_ADDR=$(CONSOLE_ADDR) DRAIN_DELAY=$(DEV_DRAIN_DELAY) air \
+	DRAIN_DELAY=$(DEV_DRAIN_DELAY) air \
 		--tmp_dir tmp/air/console \
 		--build.include_dir cmd/console --build.include_dir internal \
 		--build.cmd "go build -o ./tmp/air/console/app ./cmd/console" \
@@ -62,10 +61,10 @@ run-worker: check-air ## 启动后台任务进程（异步风控/Webhook/清理�
 		-- $(strip worker $(ARGS))
 else
 run-redirector:
-	ADDR=$(ADDR) go run ./cmd/redirector
+	go run ./cmd/redirector $(ARGS)
 
 run-console:
-	CONSOLE_ADDR=$(CONSOLE_ADDR) go run ./cmd/console $(strip serve $(ARGS))
+	go run ./cmd/console $(strip serve $(ARGS))
 
 run-worker:
 	go run ./cmd/console $(strip worker $(ARGS))

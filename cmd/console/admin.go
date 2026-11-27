@@ -19,8 +19,10 @@ import (
 var errUsage = errors.New("usage")
 
 const usageText = `用法:
-  console serve
-  console worker
+  console [--config FILE] <子命令> ...
+  console serve [--config FILE] [--allow-test-host HOST:PORT]...
+  console worker [--config FILE] [--allow-test-host HOST:PORT]...
+  console config dump [--config FILE] [--format json|text]
   console key issue --name NAME [--external-id ID] [--key-name KEY_NAME] [--expires RFC3339] [--scope SCOPE]...
   console key issue --tenant ID [--key-name KEY_NAME] [--expires RFC3339] [--scope SCOPE]...
   console key list --tenant ID
@@ -31,8 +33,10 @@ const usageText = `用法:
   console link ban --code CODE --reason REASON
   console link unban --code CODE
 
+--config FILE 指定共享 YAML 配置文件路径（优先级高于 SHORTLINK_CONFIG）。
 serve 启动管理 HTTP（短链增删改查和统计），需要 DATABASE_URL，REDIS_URL 可选（留空时直连数据库）。
 worker 启动后台任务引擎（异步 URL 风控、租约回收与过期会话/已完成任务清理），需要 DATABASE_URL，REDIS_URL 可选。
+config dump 加载并校验配置后，将脱敏的生效配置打印到标准输出。
 issue 成功时把明文打印到标准输出，只此一次。--expires 省略表示不过期；--key-name 为密钥可选备注名；
 --scope 省略表示拥有全部密钥权限（links:read、links:write、stats:read），
 可重复传入或用逗号分隔。
