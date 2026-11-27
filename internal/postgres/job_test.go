@@ -37,6 +37,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	}
 
 	claimed, err := store.Claim(ctx, job.ClaimParams{
+		Kinds:    []string{job.KindLinkRiskScan},
 		Limit:    10,
 		Lease:    time.Minute,
 		LockedBy: "test-worker",
@@ -69,7 +70,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if _, err := store.Update(ctx, tenantID, l.Code, link.Update{Disabled: &disabled}); err != nil {
 		t.Fatalf("Update disabled: %v", err)
 	}
-	claimed, err = store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "test-worker"})
+	claimed, err = store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 10, Lease: time.Minute, LockedBy: "test-worker"})
 	if err != nil {
 		t.Fatalf("Claim after Update disabled: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if _, err := store.Update(ctx, tenantID, l.Code, link.Update{URL: &newURL}); err != nil {
 		t.Fatalf("Update url: %v", err)
 	}
-	claimed, err = store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "test-worker"})
+	claimed, err = store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 10, Lease: time.Minute, LockedBy: "test-worker"})
 	if err != nil {
 		t.Fatalf("Claim after Update url: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestLinkCreateAndUpdateEnqueueRiskScanAtomically(t *testing.T) {
 	if err := store.Create(ctx, overQuota); !errors.Is(err, link.ErrQuotaExceeded) {
 		t.Fatalf("Create over quota = %v, want ErrQuotaExceeded", err)
 	}
-	claimed, err = store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "test-worker"})
+	claimed, err = store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 10, Lease: time.Minute, LockedBy: "test-worker"})
 	if err != nil {
 		t.Fatalf("Claim after quota failure: %v", err)
 	}
@@ -141,6 +142,7 @@ func TestJobClaimSkipLockedConcurrentAndFairness(t *testing.T) {
 
 	// 每租户软并发上限 2，一次抢 4 条：应拿到 A 2 条 + B 2 条，不能全被 A 占满。
 	fairBatch, err := store.Claim(ctx, job.ClaimParams{
+		Kinds:        []string{job.KindLinkRiskScan},
 		Limit:        4,
 		MaxPerTenant: 2,
 		Lease:        time.Minute,
@@ -174,6 +176,7 @@ func TestJobClaimSkipLockedConcurrentAndFairness(t *testing.T) {
 			workerID := "w-" + string(rune('a'+i))
 			for {
 				batch, err := store.Claim(ctx, job.ClaimParams{
+					Kinds:    []string{job.KindLinkRiskScan},
 					Limit:    1,
 					Lease:    time.Minute,
 					LockedBy: workerID,
@@ -261,7 +264,7 @@ func TestJobReapAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob dead: %v", err)
 	}
-	if _, err := store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Millisecond, LockedBy: "dead-worker"}); err != nil {
+	if _, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 10, Lease: time.Millisecond, LockedBy: "dead-worker"}); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET locked_until = now() - interval '1 minute' WHERE id IN ($1, $2)`, idRetry, idDead); err != nil {
@@ -302,7 +305,7 @@ func TestJobReapAndCleanup(t *testing.T) {
 	}
 
 	// 3. CleanupDoneJobs 只删超保留期的 done 任务，保留 dead 和近期 done。
-	claimedRetry, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "w"})
+	claimedRetry, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 1, Lease: time.Minute, LockedBy: "w"})
 	if err != nil || len(claimedRetry) != 1 {
 		t.Fatalf("Claim idRetry: got %d err=%v", len(claimedRetry), err)
 	}
@@ -403,7 +406,7 @@ func TestJobLeaseFencingPreventsSameWorkerABAAndReapBatchLimit(t *testing.T) {
 	}
 
 	// 1. 同一 worker 首次抢占，拿到 lock_version = 1。
-	first, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "same-worker"})
+	first, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 1, Lease: time.Minute, LockedBy: "same-worker"})
 	if err != nil || len(first) != 1 || first[0].LockVersion != 1 {
 		t.Fatalf("first Claim = %+v err=%v, want 1 job lockVersion=1", first, err)
 	}
@@ -416,7 +419,7 @@ func TestJobLeaseFencingPreventsSameWorkerABAAndReapBatchLimit(t *testing.T) {
 	if err != nil || len(reaped) != 1 {
 		t.Fatalf("ReapExpired = %+v err=%v, want 1", reaped, err)
 	}
-	second, err := store.Claim(ctx, job.ClaimParams{Limit: 1, Lease: time.Minute, LockedBy: "same-worker"})
+	second, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 1, Lease: time.Minute, LockedBy: "same-worker"})
 	if err != nil || len(second) != 1 || second[0].LockVersion != 2 {
 		t.Fatalf("second Claim = %+v err=%v, want 1 job lockVersion=2", second, err)
 	}
@@ -452,7 +455,7 @@ func TestJobLeaseFencingPreventsSameWorkerABAAndReapBatchLimit(t *testing.T) {
 			t.Fatalf("EnqueueJob batch: %v", err)
 		}
 	}
-	if _, err := store.Claim(ctx, job.ClaimParams{Limit: 5, Lease: time.Minute, LockedBy: "batch-w"}); err != nil {
+	if _, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 5, Lease: time.Minute, LockedBy: "batch-w"}); err != nil {
 		t.Fatalf("Claim batch: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET locked_until = now() - interval '1 second' WHERE status = 'running'`); err != nil {
@@ -499,7 +502,7 @@ func TestJobClaimFairnessIncludesPlatformJobsAndSkipsFuture(t *testing.T) {
 		}
 	}
 
-	batch, err := store.Claim(ctx, job.ClaimParams{Limit: 10, MaxPerTenant: 2, Lease: time.Minute, LockedBy: "w-fair"})
+	batch, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan, "platform.sync"}, Limit: 10, MaxPerTenant: 2, Lease: time.Minute, LockedBy: "w-fair"})
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -536,7 +539,7 @@ func TestCleanupDeadJobsAndInvitations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob recentDead: %v", err)
 	}
-	claimed, err := store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "cleanup-w"})
+	claimed, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 10, Lease: time.Minute, LockedBy: "cleanup-w"})
 	if err != nil || len(claimed) != 2 {
 		t.Fatalf("Claim = %d err=%v, want 2", len(claimed), err)
 	}
@@ -637,7 +640,7 @@ func TestJobTraceparentPropagationAndConstraint(t *testing.T) {
 	if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID}); err != nil {
 		t.Fatalf("EnqueueJob without span: %v", err)
 	}
-	claimedNoSpan, err := store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "tp-worker"})
+	claimedNoSpan, err := store.Claim(ctx, job.ClaimParams{Kinds: []string{job.KindLinkRiskScan}, Limit: 10, Lease: time.Minute, LockedBy: "tp-worker"})
 	if err != nil || len(claimedNoSpan) != 1 {
 		t.Fatalf("Claim without span = (%d, %v)", len(claimedNoSpan), err)
 	}
@@ -680,7 +683,12 @@ func TestJobTraceparentPropagationAndConstraint(t *testing.T) {
 	}
 	span.End()
 
-	claimed, err := store.Claim(ctx, job.ClaimParams{Limit: 20, Lease: time.Minute, LockedBy: "tp-worker"})
+	claimed, err := store.Claim(ctx, job.ClaimParams{
+		Kinds:    []string{job.KindLinkRiskScan, job.KindLinkPurgeStats, job.KindWebhookDeliver, job.KindInvitationEmail},
+		Limit:    20,
+		Lease:    time.Minute,
+		LockedBy: "tp-worker",
+	})
 	if err != nil {
 		t.Fatalf("Claim traced jobs: %v", err)
 	}
@@ -697,5 +705,157 @@ func TestJobTraceparentPropagationAndConstraint(t *testing.T) {
 	_, err = store.db.ExecContext(ctx, `INSERT INTO jobs (kind, traceparent) VALUES ('link.risk_scan', repeat('a', 129))`)
 	if !isConstraintViolation(err, "23514", "ck_jobs_traceparent_length") {
 		t.Errorf("oversized traceparent err = %v, want ck_jobs_traceparent_length", err)
+	}
+}
+
+func TestJobClaimFiltersByKindsAndIsolatesUnknownBacklog(t *testing.T) {
+	for _, maxPerTenant := range []int{0, 2} {
+		name := "no_fairness"
+		if maxPerTenant > 0 {
+			name = "fairness"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, tenantA := newTestStore(t)
+			ctx := testAuditCtx(context.Background())
+
+			issuedB, err := store.IssueAPIKey(ctx, IssueAPIKeyParams{Name: "tenant-kind-b", Scopes: identity.AllAPIKeyScopes()})
+			if err != nil {
+				t.Fatalf("IssueAPIKey tenantB: %v", err)
+			}
+			tenantB := issuedB.Tenant.ID
+
+			// 先塞入更早到期的未知任务 export.csv（含多租户与平台任务），即使更老也不得被老 worker 抢占。
+			var unknownIDs []int64
+			for _, tid := range []*int64{&tenantA, &tenantB, nil} {
+				id, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: "export.csv", TenantID: tid})
+				if err != nil {
+					t.Fatalf("enqueue export.csv: %v", err)
+				}
+				unknownIDs = append(unknownIDs, id)
+			}
+			if _, err := store.db.ExecContext(ctx,
+				`UPDATE jobs SET run_at = now() - interval '2 hours' WHERE kind = 'export.csv'`,
+			); err != nil {
+				t.Fatalf("backdate export.csv: %v", err)
+			}
+
+			// 再写入老 worker 认识的已知任务。
+			for range 3 {
+				if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantA}); err != nil {
+					t.Fatalf("enqueue A risk: %v", err)
+				}
+			}
+			if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantB}); err != nil {
+				t.Fatalf("enqueue B risk: %v", err)
+			}
+			if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindInvitationEmail, TenantID: nil}); err != nil {
+				t.Fatalf("enqueue platform email: %v", err)
+			}
+
+			// 1. Kinds 为空或全空串时，不返回也不修改任何任务。
+			for _, empty := range [][]string{nil, {"", ""}} {
+				got, err := store.Claim(ctx, job.ClaimParams{
+					Kinds:        empty,
+					Limit:        10,
+					MaxPerTenant: maxPerTenant,
+					Lease:        time.Minute,
+					LockedBy:     "empty-worker",
+				})
+				if err != nil || len(got) != 0 {
+					t.Fatalf("Claim(empty=%v) = (%d, %v), want (0, nil)", empty, len(got), err)
+				}
+			}
+
+			// 2. 老 worker 带重复与空串 Kinds 抢占，只拿到已知 kind（fairness 下受 MaxPerTenant=2 约束）。
+			claimedOld, err := store.Claim(ctx, job.ClaimParams{
+				Kinds:        []string{"", job.KindLinkRiskScan, job.KindLinkRiskScan, job.KindInvitationEmail},
+				Limit:        10,
+				MaxPerTenant: maxPerTenant,
+				Lease:        time.Minute,
+				LockedBy:     "old-worker",
+			})
+			if err != nil {
+				t.Fatalf("Claim old worker: %v", err)
+			}
+			wantOldCount := 5
+			if maxPerTenant > 0 {
+				wantOldCount = 4 // tenantA 2 + tenantB 1 + platform 1
+			}
+			if len(claimedOld) != wantOldCount {
+				t.Fatalf("claimedOld = %d, want %d", len(claimedOld), wantOldCount)
+			}
+			for _, j := range claimedOld {
+				if j.Kind != job.KindLinkRiskScan && j.Kind != job.KindInvitationEmail {
+					t.Fatalf("old worker claimed unexpected kind %q", j.Kind)
+				}
+			}
+
+			// 确认未知任务 export.csv 完好留在 pending，attempts=0、lock_version=0、locked_by=NULL。
+			for _, id := range unknownIDs {
+				var (
+					status   string
+					attempts int
+					lockVer  int64
+					lockedBy *string
+				)
+				if err := store.db.QueryRowContext(ctx,
+					`SELECT status, attempts, lock_version, locked_by FROM jobs WHERE id = $1`, id,
+				).Scan(&status, &attempts, &lockVer, &lockedBy); err != nil {
+					t.Fatalf("inspect export.csv %d: %v", id, err)
+				}
+				if status != job.StatusPending || attempts != 0 || lockVer != 0 || lockedBy != nil {
+					t.Fatalf("export.csv %d mutated: status=%q attempts=%d lockVer=%d lockedBy=%v",
+						id, status, attempts, lockVer, lockedBy)
+				}
+			}
+
+			// 3. 新版 worker 带着 export.csv 声明接盘：
+			//    fairness 模式下 old-worker 仍在占用 tenantA 全部 2 个运行并发额度，因此先拿 B+平台（2 条）；
+			//    释放 old-worker 在途任务后再抢一次，即可拿齐剩余的 tenantA export.csv。
+			claimedNew, err := store.Claim(ctx, job.ClaimParams{
+				Kinds:        []string{"export.csv"},
+				Limit:        10,
+				MaxPerTenant: maxPerTenant,
+				Lease:        time.Minute,
+				LockedBy:     "new-worker",
+			})
+			if err != nil {
+				t.Fatalf("Claim new worker: %v", err)
+			}
+			wantFirstNew := 3
+			if maxPerTenant > 0 {
+				wantFirstNew = 2
+			}
+			if len(claimedNew) != wantFirstNew {
+				t.Fatalf("claimedNew = %d, want %d export.csv jobs", len(claimedNew), wantFirstNew)
+			}
+			for _, j := range claimedNew {
+				if j.Kind != "export.csv" {
+					t.Errorf("new worker got kind %q, want export.csv", j.Kind)
+				}
+			}
+
+			for _, j := range claimedOld {
+				if err := store.Complete(ctx, j.ID, "old-worker", j.LockVersion); err != nil {
+					t.Fatalf("Complete old job %d: %v", j.ID, err)
+				}
+			}
+			if maxPerTenant > 0 {
+				claimedNewRest, err := store.Claim(ctx, job.ClaimParams{
+					Kinds:        []string{"export.csv"},
+					Limit:        10,
+					MaxPerTenant: maxPerTenant,
+					Lease:        time.Minute,
+					LockedBy:     "new-worker",
+				})
+				if err != nil {
+					t.Fatalf("Claim new worker after old complete: %v", err)
+				}
+				if len(claimedNewRest) != 1 || claimedNewRest[0].Kind != "export.csv" ||
+					claimedNewRest[0].TenantID == nil || *claimedNewRest[0].TenantID != tenantA {
+					t.Fatalf("claimedNewRest = %+v, want remaining export.csv for tenantA", claimedNewRest)
+				}
+			}
+		})
 	}
 }

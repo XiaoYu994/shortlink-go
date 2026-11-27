@@ -49,6 +49,7 @@ ADR 用来记录“为什么这样设计”，避免以后只看到代码不知�
 | [0030](0030-phone-otp-and-vertical-console-assembly.md) | 手机号短信验证码登录（Phone OTP）与 `cmd/console` 垂直特性装配演进 | Accepted |
 | [0031](0031-cache-and-worker-assembly-simplification.md) | 缓存写路径与 Worker 模块装配做减法 | Accepted |
 | [0032](0032-opentelemetry-tracing-and-log-correlation.md) | OpenTelemetry 分布式追踪与日志关联（Phase C） | Accepted |
+| [0033](0033-job-claim-kind-filtering.md) | 按任务类型（Kind）隔离抢占，防止滚动发布旧版 Worker 误杀新任务 | Accepted |
 
 ## 模板
 

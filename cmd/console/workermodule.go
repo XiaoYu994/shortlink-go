@@ -23,8 +23,9 @@ type WorkerRegistrar interface {
 
 /*
 WorkerModule 把一个后台特性的任务处理器、周期维护任务与启动期初始化打包成独立模块。
-关闭某特性时，模块仍通过 HandleDisabled 为该特性的历史残留任务类型注册兜底处理器，
-让抢占后的任务记日志并按 job.Skip 干净收尾，既不修改 claim SQL 索引路径，也不污染死信队列。
+与抢占期的 ClaimParams.Kinds 白名单隔离分工互补：
+  - 滚动发布新增未注册任务类型（如新版本新加 kind）时，旧版 worker 靠 ClaimParams.Kinds 根本不抢，避免误杀进 dead；
+  - 明确关闭已知特性的开关时，模块仍通过 HandleDisabled 注册兜底处理器，把历史残留任务记日志并按 job.Skip 排空收尾，避免永久拉高积压告警指标。
 */
 type WorkerModule interface {
 	Name() string

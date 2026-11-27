@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"go.opentelemetry.io/otel/propagation"
@@ -33,100 +34,29 @@ RETURNING id`
 VALUES ($1, NULLIF($2::bigint, 0), $3::jsonb, $4)`
 
 	/*
-		关闭单租户限并发（MaxPerTenant <= 0）时走极简快路径：直接按 idx_jobs_claimable (run_at, id)
-		有序扫描并加锁，复杂度 O(limit)。
+		关闭单租户限并发（MaxPerTenant <= 0）时按注册 kind 走极简快路径：
+		经 unnest($1::text[]) + LATERAL 分别沿 idx_jobs_pending_kind_run (kind, run_at, id) 取最老到期行并加锁，
+		再全局排序截断到 $2，复杂度与无关 kind 的历史积压解耦（ADR 0033）。
 	*/
-	claimJobsNoFairnessSQL = `WITH candidate AS (
-    SELECT id
-    FROM jobs
-    WHERE status = 'pending'
-      AND run_at <= now()
-    ORDER BY run_at, id
-    LIMIT $1
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE jobs j
-SET status = 'running',
-    attempts = j.attempts + 1,
-    lock_version = j.lock_version + 1,
-    locked_at = now(),
-    locked_until = now() + ($2::bigint * interval '1 microsecond'),
-    locked_by = $3,
-    updated_at = now()
-FROM candidate c
-WHERE j.id = c.id
-RETURNING ` + jobColumns
-
-	/*
-		开启单租户公平软上限（MaxPerTenant > 0）时的松散索引扫描 + LATERAL 抢占（ADR 0022）：
-		1. active_tenants 沿 idx_jobs_pending_tenant_run (tenant_id, run_at, id) 做递归跳扫，
-		   即使单个租户积压数十万条 pending 任务，也只花 1 次 B-Tree 查找跳到下一个租户；
-		2. per_tenant_candidates 对每个未满软上限的租户用 LATERAL 只取至多 (max_per_tenant - running_cnt) 条最早到期任务，
-		   同时合并 tenant_id IS NULL 的平台任务，彻底消除旧版全表窗口函数 O(N log N) 排序雪崩；
-		3. candidate 按全局 (run_at, id) 取前 $1 条并执行 FOR UPDATE OF j SKIP LOCKED 复核可见性，
-		   原子递增 lock_version 作为单调递增 Fencing Token。
-	*/
-	claimJobsFairSQL = `WITH RECURSIVE running_per_tenant AS (
-    SELECT tenant_id, count(*) AS cnt
-    FROM jobs
-    WHERE status = 'running' AND tenant_id IS NOT NULL
-    GROUP BY tenant_id
-),
-active_tenants(tenant_id) AS (
-    (
-        SELECT tenant_id
-        FROM jobs
-        WHERE status = 'pending' AND tenant_id IS NOT NULL
-        ORDER BY tenant_id
-        LIMIT 1
-    )
-    UNION ALL
-    SELECT next_t.tenant_id
-    FROM active_tenants a
-    CROSS JOIN LATERAL (
-        SELECT j.tenant_id
-        FROM jobs j
-        WHERE j.status = 'pending'
-          AND j.tenant_id > a.tenant_id
-        ORDER BY j.tenant_id
-        LIMIT 1
-    ) AS next_t
-),
-per_tenant_candidates AS (
+	claimJobsNoFairnessSQL = `WITH per_kind_candidates AS (
     SELECT picked.id, picked.run_at
-    FROM active_tenants t
-    LEFT JOIN running_per_tenant r ON r.tenant_id = t.tenant_id
+    FROM unnest($1::text[]) AS k(kind)
     CROSS JOIN LATERAL (
         SELECT j.id, j.run_at
         FROM jobs j
         WHERE j.status = 'pending'
-          AND j.tenant_id = t.tenant_id
+          AND j.kind = k.kind
           AND j.run_at <= now()
         ORDER BY j.run_at, j.id
-        LIMIT GREATEST($2::bigint - COALESCE(r.cnt, 0), 0)
+        LIMIT $2
+        FOR UPDATE OF j SKIP LOCKED
     ) AS picked
-    WHERE COALESCE(r.cnt, 0) < $2::bigint
-    UNION ALL
-    SELECT p.id, p.run_at
-    FROM (
-        SELECT id, run_at
-        FROM jobs
-        WHERE status = 'pending'
-          AND tenant_id IS NULL
-          AND run_at <= now()
-        ORDER BY run_at, id
-        LIMIT $1
-    ) AS p
 ),
 candidate AS (
-    SELECT j.id
-    FROM per_tenant_candidates p
-    JOIN jobs j ON j.id = p.id
-    WHERE j.status = 'pending'
-      AND j.run_at <= now()
+    SELECT p.id
+    FROM per_kind_candidates p
     ORDER BY p.run_at, p.id
-    LIMIT $1
-    FOR UPDATE OF j SKIP LOCKED
+    LIMIT $2
 )
 UPDATE jobs j
 SET status = 'running',
@@ -135,6 +65,118 @@ SET status = 'running',
     locked_at = now(),
     locked_until = now() + ($3::bigint * interval '1 microsecond'),
     locked_by = $4,
+    updated_at = now()
+FROM candidate c
+WHERE j.id = c.id
+RETURNING ` + jobColumns
+
+	/*
+		开启单租户公平软上限（MaxPerTenant > 0）时的按 kind 递归松散索引扫描 + LATERAL 抢占（ADR 0022、ADR 0033）：
+		1. active_kind_tenants 对 unnest($1::text[]) 沿 idx_jobs_pending_kind_tenant_run (kind, tenant_id, run_at, id)
+		   做按 kind 隔离的递归跳扫（严格带 tenant_id IS NOT NULL 命中部分索引），绝不扫无关/新版本未知 kind；
+		2. per_tenant_candidates 对每个未满软上限的活跃租户按 kind 分别用 LATERAL 取至多 (max_per_tenant - running_cnt) 条，
+		   合并裁剪后再通过 idx_jobs_pending_kind_platform_run 合并 tenant_id IS NULL 平台任务；
+		3. ordered_candidates AS MATERIALIZED 先在内存中固定候选有序集，避免 PG 在高估行数时退化为全表 Hash Join，
+		   最后经 candidate 用 LATERAL 主键点查 + FOR UPDATE OF j SKIP LOCKED 复核可见性并递增 lock_version。
+	*/
+	claimJobsFairSQL = `WITH RECURSIVE running_per_tenant AS (
+    SELECT tenant_id, count(*) AS cnt
+    FROM jobs
+    WHERE status = 'running' AND tenant_id IS NOT NULL
+    GROUP BY tenant_id
+),
+active_kind_tenants(kind, tenant_id) AS (
+    SELECT k.kind, first_t.tenant_id
+    FROM unnest($1::text[]) AS k(kind)
+    CROSS JOIN LATERAL (
+        SELECT j.tenant_id
+        FROM jobs j
+        WHERE j.status = 'pending'
+          AND j.kind = k.kind
+          AND j.tenant_id IS NOT NULL
+        ORDER BY j.tenant_id
+        LIMIT 1
+    ) AS first_t
+    UNION ALL
+    SELECT a.kind, next_t.tenant_id
+    FROM active_kind_tenants a
+    CROSS JOIN LATERAL (
+        SELECT j.tenant_id
+        FROM jobs j
+        WHERE j.status = 'pending'
+          AND j.kind = a.kind
+          AND j.tenant_id IS NOT NULL
+          AND j.tenant_id > a.tenant_id
+        ORDER BY j.tenant_id
+        LIMIT 1
+    ) AS next_t
+),
+active_tenants AS (
+    SELECT DISTINCT tenant_id FROM active_kind_tenants
+),
+per_tenant_candidates AS (
+    SELECT picked.id, picked.run_at
+    FROM active_tenants t
+    LEFT JOIN running_per_tenant r ON r.tenant_id = t.tenant_id
+    CROSS JOIN LATERAL (
+        SELECT merged.id, merged.run_at
+        FROM (
+            SELECT kp.id, kp.run_at
+            FROM unnest($1::text[]) AS k(kind)
+            CROSS JOIN LATERAL (
+                SELECT j.id, j.run_at
+                FROM jobs j
+                WHERE j.status = 'pending'
+                  AND j.kind = k.kind
+                  AND j.tenant_id = t.tenant_id
+                  AND j.run_at <= now()
+                ORDER BY j.run_at, j.id
+                LIMIT GREATEST($2::bigint - COALESCE(r.cnt, 0), 0)
+            ) AS kp
+        ) AS merged
+        ORDER BY merged.run_at, merged.id
+        LIMIT GREATEST($2::bigint - COALESCE(r.cnt, 0), 0)
+    ) AS picked
+    WHERE COALESCE(r.cnt, 0) < $2::bigint
+    UNION ALL
+    SELECT p.id, p.run_at
+    FROM unnest($1::text[]) AS k(kind)
+    CROSS JOIN LATERAL (
+        SELECT j.id, j.run_at
+        FROM jobs j
+        WHERE j.status = 'pending'
+          AND j.kind = k.kind
+          AND j.tenant_id IS NULL
+          AND j.run_at <= now()
+        ORDER BY j.run_at, j.id
+        LIMIT $3
+    ) AS p
+),
+ordered_candidates AS MATERIALIZED (
+    SELECT id, run_at
+    FROM per_tenant_candidates
+    ORDER BY run_at, id
+),
+candidate AS (
+    SELECT locked.id
+    FROM ordered_candidates o
+    CROSS JOIN LATERAL (
+        SELECT j.id
+        FROM jobs j
+        WHERE j.id = o.id
+          AND j.status = 'pending'
+          AND j.run_at <= now()
+        FOR UPDATE OF j SKIP LOCKED
+    ) AS locked
+    LIMIT $3
+)
+UPDATE jobs j
+SET status = 'running',
+    attempts = j.attempts + 1,
+    lock_version = j.lock_version + 1,
+    locked_at = now(),
+    locked_until = now() + ($4::bigint * interval '1 microsecond'),
+    locked_by = $5,
     updated_at = now()
 FROM candidate c
 WHERE j.id = c.id
@@ -303,9 +345,14 @@ func (s *Store) EnqueueJob(ctx context.Context, p EnqueueJobParams) (int64, erro
 	return id, nil
 }
 
-// Claim 批量抢占可执行任务，返回已标记为 running 且递增 attempts、lock_version 的任务列表。
+// Claim 按 Kinds 白名单批量抢占可执行任务，返回已标记为 running 且递增 attempts、lock_version 的任务列表。
+// Kinds 过滤掉空串后若为空，直接返回 (nil, nil)，绝不抢占未声明的任务类型。
 func (s *Store) Claim(ctx context.Context, p job.ClaimParams) ([]job.Job, error) {
 	if p.Limit <= 0 {
+		return nil, nil
+	}
+	kinds := normalizeClaimKinds(p.Kinds)
+	if len(kinds) == 0 {
 		return nil, nil
 	}
 	if p.Lease <= 0 {
@@ -320,9 +367,9 @@ func (s *Store) Claim(ctx context.Context, p job.ClaimParams) ([]job.Job, error)
 		err  error
 	)
 	if p.MaxPerTenant <= 0 {
-		rows, err = s.db.QueryContext(ctx, claimJobsNoFairnessSQL, p.Limit, p.Lease.Microseconds(), p.LockedBy)
+		rows, err = s.db.QueryContext(ctx, claimJobsNoFairnessSQL, kinds, p.Limit, p.Lease.Microseconds(), p.LockedBy)
 	} else {
-		rows, err = s.db.QueryContext(ctx, claimJobsFairSQL, p.Limit, p.MaxPerTenant, p.Lease.Microseconds(), p.LockedBy)
+		rows, err = s.db.QueryContext(ctx, claimJobsFairSQL, kinds, p.MaxPerTenant, p.Limit, p.Lease.Microseconds(), p.LockedBy)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("claim jobs: %w", err)
@@ -341,6 +388,20 @@ func (s *Store) Claim(ctx context.Context, p job.ClaimParams) ([]job.Job, error)
 		return nil, fmt.Errorf("claim jobs: %w", err)
 	}
 	return out, nil
+}
+
+func normalizeClaimKinds(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	for _, k := range raw {
+		if k != "" {
+			out = append(out, k)
+		}
+	}
+	if len(out) <= 1 {
+		return out
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Complete 将当前 worker 持有的任务标记为 done。租约已易主或代次过期时返回 job.ErrLeaseLost。

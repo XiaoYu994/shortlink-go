@@ -61,8 +61,10 @@ type Job struct {
 // Handler 处理单条已抢占的任务。返回值通过 Permanent、Skip、Defer 区分终态和重试语义。
 type Handler func(ctx context.Context, j Job) error
 
-// ClaimParams 控制一次批量抢占的条数、单租户并发软上限与租约参数。
+// ClaimParams 控制一次批量抢占的可执行任务类型白名单、条数、单租户并发软上限与租约参数。
+// Kinds 为空时，队列不得抢占任何任务。
 type ClaimParams struct {
+	Kinds        []string
 	Limit        int
 	MaxPerTenant int
 	Lease        time.Duration

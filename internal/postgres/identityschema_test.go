@@ -307,8 +307,9 @@ func TestMigration010IndexesAndConstraints(t *testing.T) {
 
 	for _, idx := range []string{
 		"idx_sessions_revoked_at",
-		"idx_jobs_pending_tenant_run",
 		"idx_jobs_pending_kind_run",
+		"idx_jobs_pending_kind_tenant_run",
+		"idx_jobs_pending_kind_platform_run",
 		"idx_memberships_tenant_owners",
 	} {
 		var exists bool
@@ -318,7 +319,21 @@ func TestMigration010IndexesAndConstraints(t *testing.T) {
 			t.Fatalf("check index %s: %v", idx, err)
 		}
 		if !exists {
-			t.Errorf("missing expected migration 010 index %s", idx)
+			t.Errorf("missing expected jobs/identity index %s", idx)
+		}
+	}
+	for _, obsolete := range []string{
+		"idx_jobs_claimable",
+		"idx_jobs_pending_tenant_run",
+	} {
+		var exists bool
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, obsolete,
+		).Scan(&exists); err != nil {
+			t.Fatalf("check obsolete index %s: %v", obsolete, err)
+		}
+		if exists {
+			t.Errorf("obsolete index %s should have been dropped by migration 019", obsolete)
 		}
 	}
 

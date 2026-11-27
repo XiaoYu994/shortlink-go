@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -142,6 +143,7 @@ Runner 协调后台任务的抢占、并发执行、租约回收、周期维护�
 type Runner struct {
 	queue    Queue
 	handlers map[string]Handler
+	kinds    []string
 	logger   *slog.Logger
 	opts     Options
 
@@ -164,15 +166,22 @@ func New(queue Queue, handlers map[string]Handler, logger *slog.Logger, registry
 		logger = slog.New(logx.WrapContext(logger.Handler()))
 	}
 	copiedHandlers := make(map[string]Handler, len(handlers))
+	kinds := make([]string, 0, len(handlers))
 	seen := make(map[string]struct{}, len(handlers))
 	for kind, h := range handlers {
+		if kind == "" || h == nil {
+			continue
+		}
 		copiedHandlers[kind] = h
+		kinds = append(kinds, kind)
 		seen[kind] = struct{}{}
 	}
+	slices.Sort(kinds)
 
 	r := &Runner{
 		queue:     queue,
 		handlers:  copiedHandlers,
+		kinds:     kinds,
 		logger:    logger,
 		opts:      opts,
 		seenKinds: seen,
@@ -223,6 +232,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		"worker_id", r.opts.WorkerID,
 		"concurrency", r.opts.Concurrency,
 		"max_per_tenant", r.opts.MaxPerTenant,
+		"kinds", r.kinds,
 	)
 
 	inFlightCtx, cancelInFlight := context.WithCancel(context.Background())
@@ -273,6 +283,11 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 func (r *Runner) pollLoop(ctx, inFlightCtx context.Context, sem chan struct{}, wg *sync.WaitGroup) {
+	if len(r.kinds) == 0 {
+		<-ctx.Done()
+		return
+	}
+
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 
@@ -291,6 +306,7 @@ func (r *Runner) pollLoop(ctx, inFlightCtx context.Context, sem chan struct{}, w
 
 		claimCtx, claimCancel := context.WithTimeout(ctx, reapQueryLimit)
 		jobs, err := r.queue.Claim(claimCtx, ClaimParams{
+			Kinds:        r.kinds,
 			Limit:        slots,
 			MaxPerTenant: r.opts.MaxPerTenant,
 			Lease:        r.opts.LeaseDuration,
@@ -503,7 +519,9 @@ handler panic 不会拖垮整个 worker 进程，而是转换成普通错误按�
 func (r *Runner) invokeHandler(execCtx context.Context, j Job) (err error) {
 	handler, ok := r.handlers[j.Kind]
 	if !ok {
-		return Permanent(fmt.Errorf("unknown job kind %q", j.Kind))
+		// 纵深防御：正常情况 Claim 已按 r.kinds 过滤；若自定义队列越界返回未知 kind，
+		// 走可重试错误按退避与 MaxAttempts 兜底，绝不绕过重试直接秒杀进 dead。
+		return fmt.Errorf("unknown job kind %q", j.Kind)
 	}
 
 	jobCtx, cancel := context.WithTimeout(execCtx, r.opts.JobTimeout)

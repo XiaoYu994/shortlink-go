@@ -425,13 +425,18 @@ type stubJobQueue struct {
 func (q *stubJobQueue) Claim(_ context.Context, p job.ClaimParams) ([]job.Job, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.pending) == 0 {
+	if len(q.pending) == 0 || len(p.Kinds) == 0 {
 		return nil, nil
 	}
-	n := min(p.Limit, len(q.pending))
-	out := make([]job.Job, n)
-	copy(out, q.pending[:n])
-	q.pending = q.pending[n:]
+	var out, rest []job.Job
+	for _, j := range q.pending {
+		if len(out) < p.Limit && slices.Contains(p.Kinds, j.Kind) {
+			out = append(out, j)
+			continue
+		}
+		rest = append(rest, j)
+	}
+	q.pending = rest
 	return out, nil
 }
 
@@ -493,6 +498,7 @@ func TestDisabledWorkerModulesThroughRunnerMarkDoneAndRecordSkippedMetric(t *tes
 		pending: []job.Job{
 			{ID: 101, Kind: job.KindWebhookDeliver, TenantID: &tenantID, Payload: []byte(`{"webhook_id":1}`), Attempts: 1, MaxAttempts: 5, LockVersion: 1},
 			{ID: 102, Kind: job.KindLinkRiskScan, TenantID: &tenantID, Payload: []byte(`{"link_id":2}`), Attempts: 1, MaxAttempts: 5, LockVersion: 1},
+			{ID: 103, Kind: "export.csv", TenantID: &tenantID, Payload: []byte(`{"format":"csv"}`), Attempts: 0, MaxAttempts: 5, LockVersion: 0},
 		},
 		doneCh:   make(chan struct{}),
 		wantDone: 2,
@@ -524,6 +530,7 @@ func TestDisabledWorkerModulesThroughRunnerMarkDoneAndRecordSkippedMetric(t *tes
 	}
 
 	q.mu.Lock()
+	pending := slices.Clone(q.pending)
 	completed := slices.Clone(q.completed)
 	retried := slices.Clone(q.retried)
 	dead := slices.Clone(q.dead)
@@ -532,6 +539,9 @@ func TestDisabledWorkerModulesThroughRunnerMarkDoneAndRecordSkippedMetric(t *tes
 	slices.Sort(completed)
 	if !slices.Equal(completed, []int64{101, 102}) {
 		t.Fatalf("completed job IDs = %v, want [101 102]", completed)
+	}
+	if len(pending) != 1 || pending[0].ID != 103 || pending[0].Kind != "export.csv" || pending[0].Attempts != 0 || pending[0].LockVersion != 0 {
+		t.Fatalf("remaining pending = %+v, want untouched export.csv (id=103)", pending)
 	}
 	if len(retried) != 0 || len(dead) != 0 {
 		t.Fatalf("disabled jobs must not retry or dead: retried=%v dead=%v", retried, dead)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,14 +27,16 @@ import (
 )
 
 type fakeQueue struct {
-	mu      sync.Mutex
-	jobs    []Job
-	nextID  int64
-	reaped  []ReapedRecord
-	reapErr error
-	ages    map[string]time.Duration
+	mu             sync.Mutex
+	jobs           []Job
+	nextID         int64
+	reaped         []ReapedRecord
+	reapErr        error
+	ages           map[string]time.Duration
+	lastClaimKinds []string
 
 	claimedCount atomic.Int32
+	claimCalls   atomic.Int32
 }
 
 func newFakeQueue() *fakeQueue {
@@ -72,8 +75,20 @@ func (q *fakeQueue) get(id int64) (Job, bool) {
 }
 
 func (q *fakeQueue) Claim(_ context.Context, p ClaimParams) ([]Job, error) {
+	q.claimCalls.Add(1)
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	q.lastClaimKinds = slices.Clone(p.Kinds)
+	if len(p.Kinds) == 0 {
+		return nil, nil
+	}
+	allowed := make(map[string]struct{}, len(p.Kinds))
+	for _, k := range p.Kinds {
+		if k != "" {
+			allowed[k] = struct{}{}
+		}
+	}
 
 	now := time.Now()
 	var out []Job
@@ -83,6 +98,9 @@ func (q *fakeQueue) Claim(_ context.Context, p ClaimParams) ([]Job, error) {
 		}
 		j := &q.jobs[i]
 		if j.Status != StatusPending || j.RunAt.After(now) {
+			continue
+		}
+		if _, ok := allowed[j.Kind]; !ok {
 			continue
 		}
 		j.Status = StatusRunning
@@ -278,7 +296,15 @@ func TestRunnerLifecycleOutcomes(t *testing.T) {
 		assertStatus(idSkip, StatusDone)
 		assertStatus(idPerm, StatusDead)
 		assertStatus(idPanic, StatusDead)
-		assertStatus(idUnknown, StatusDead)
+
+		// 未注册的任务类型不得被 Claim 抢走或打进 dead，应原样留在 pending。
+		jUnknown, ok := q.get(idUnknown)
+		if !ok || jUnknown.Status != StatusPending || jUnknown.Attempts != 0 {
+			t.Fatalf("unknown job = %+v (ok=%v), want pending with 0 attempts", jUnknown, ok)
+		}
+		if got := testutil.ToFloat64(runner.processed.WithLabelValues("unknown", resultDead)); got != 0 {
+			t.Errorf("processed{unknown,dead} = %v, want 0", got)
+		}
 
 		if got := testutil.ToFloat64(runner.processed.WithLabelValues("ok", resultDone)); got != 1 {
 			t.Errorf("processed{ok,done} = %v, want 1", got)
@@ -979,6 +1005,197 @@ func TestRunnerTracingConsumerSpanLinkAndLogCorrelation(t *testing.T) {
 	if !sawJobLog || !sawRetryLog {
 		t.Fatalf("sawJobLog=%v sawRetryLog=%v", sawJobLog, sawRetryLog)
 	}
+}
+
+type misbehavingKindQueue struct {
+	mu      sync.Mutex
+	claimed bool
+	retried int
+	dead    int
+}
+
+func (q *misbehavingKindQueue) Claim(_ context.Context, _ ClaimParams) ([]Job, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.claimed {
+		return nil, nil
+	}
+	q.claimed = true
+	return []Job{{
+		ID:          999,
+		Kind:        "unexpected.new_kind",
+		Status:      StatusRunning,
+		Attempts:    1,
+		MaxAttempts: 5,
+		LockVersion: 1,
+	}}, nil
+}
+
+func (q *misbehavingKindQueue) Complete(context.Context, int64, string, int64) error { return nil }
+
+func (q *misbehavingKindQueue) Retry(_ context.Context, _ RetryParams) error {
+	q.mu.Lock()
+	q.retried++
+	q.mu.Unlock()
+	return nil
+}
+
+func (q *misbehavingKindQueue) Dead(_ context.Context, _ int64, _ string, _ int64, _ string) error {
+	q.mu.Lock()
+	q.dead++
+	q.mu.Unlock()
+	return nil
+}
+
+func (q *misbehavingKindQueue) ReapExpired(context.Context, time.Duration, int) ([]ReapedRecord, error) {
+	return nil, nil
+}
+
+func (q *misbehavingKindQueue) OldestPendingAges(context.Context) (map[string]time.Duration, error) {
+	return nil, nil
+}
+
+func TestRunnerKindFilteringRollingUpgradeAndDefenseInDepth(t *testing.T) {
+	t.Run("rolling upgrade isolates unknown kind until new worker starts", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			q := newFakeQueue()
+			idOld := q.add(Job{Kind: "old.kind"})
+			// 即便新任务 run_at 更早，旧 worker 也绝不能抢占。
+			idNew := q.add(Job{Kind: "export.csv", RunAt: time.Now().Add(-time.Hour)})
+
+			oldRunner := New(q, map[string]Handler{
+				"old.kind": func(context.Context, Job) error { return nil },
+			}, nil, prometheus.NewRegistry(), Options{
+				Concurrency:     2,
+				PollInterval:    20 * time.Millisecond,
+				ReapInterval:    time.Hour,
+				MetricsInterval: time.Hour,
+			})
+
+			ctx1, cancel1 := context.WithCancel(context.Background())
+			done1 := make(chan error, 1)
+			go func() { done1 <- oldRunner.Run(ctx1) }()
+
+			synctest.Wait()
+			time.Sleep(80 * time.Millisecond)
+			synctest.Wait()
+			cancel1()
+			if err := <-done1; err != nil {
+				t.Fatalf("oldRunner.Run: %v", err)
+			}
+
+			jOld, _ := q.get(idOld)
+			if jOld.Status != StatusDone {
+				t.Fatalf("old job status = %q, want done", jOld.Status)
+			}
+			jNewBefore, _ := q.get(idNew)
+			if jNewBefore.Status != StatusPending || jNewBefore.Attempts != 0 || jNewBefore.LockVersion != 0 {
+				t.Fatalf("new job after old worker = %+v, want untouched pending", jNewBefore)
+			}
+
+			// 启动新版 worker（注册了 export.csv），新任务被正常消费完成。
+			newRunner := New(q, map[string]Handler{
+				"old.kind":   func(context.Context, Job) error { return nil },
+				"export.csv": func(context.Context, Job) error { return nil },
+			}, nil, prometheus.NewRegistry(), Options{
+				Concurrency:     2,
+				PollInterval:    20 * time.Millisecond,
+				ReapInterval:    time.Hour,
+				MetricsInterval: time.Hour,
+			})
+
+			ctx2, cancel2 := context.WithCancel(context.Background())
+			done2 := make(chan error, 1)
+			go func() { done2 <- newRunner.Run(ctx2) }()
+
+			synctest.Wait()
+			time.Sleep(80 * time.Millisecond)
+			synctest.Wait()
+			cancel2()
+			if err := <-done2; err != nil {
+				t.Fatalf("newRunner.Run: %v", err)
+			}
+
+			jNewAfter, _ := q.get(idNew)
+			if jNewAfter.Status != StatusDone {
+				t.Fatalf("new job after new worker = %+v, want done", jNewAfter)
+			}
+		})
+	})
+
+	t.Run("empty handler map makes zero claim calls", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			q := newFakeQueue()
+			id := q.add(Job{Kind: "export.csv"})
+
+			emptyRunner := New(q, map[string]Handler{}, nil, prometheus.NewRegistry(), Options{
+				Concurrency:     2,
+				PollInterval:    10 * time.Millisecond,
+				ReapInterval:    time.Hour,
+				MetricsInterval: time.Hour,
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- emptyRunner.Run(ctx) }()
+
+			time.Sleep(60 * time.Millisecond)
+			synctest.Wait()
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("emptyRunner.Run: %v", err)
+			}
+
+			if calls := q.claimCalls.Load(); calls != 0 {
+				t.Fatalf("claimCalls = %d, want 0 when no handlers registered", calls)
+			}
+			j, _ := q.get(id)
+			if j.Status != StatusPending {
+				t.Fatalf("pending job status = %q, want pending", j.Status)
+			}
+		})
+	})
+
+	t.Run("unfiltered queue unknown kind schedules retry instead of immediate dead", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			q := &misbehavingKindQueue{}
+			reg := prometheus.NewRegistry()
+			runner := New(q, map[string]Handler{
+				"known.kind": func(context.Context, Job) error { return nil },
+			}, nil, reg, Options{
+				Concurrency:     1,
+				PollInterval:    20 * time.Millisecond,
+				BaseBackoff:     time.Second,
+				ReapInterval:    time.Hour,
+				MetricsInterval: time.Hour,
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- runner.Run(ctx) }()
+
+			synctest.Wait()
+			time.Sleep(50 * time.Millisecond)
+			synctest.Wait()
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("runner.Run: %v", err)
+			}
+
+			q.mu.Lock()
+			retried, dead := q.retried, q.dead
+			q.mu.Unlock()
+			if retried != 1 || dead != 0 {
+				t.Fatalf("retried=%d dead=%d, want retried=1 dead=0", retried, dead)
+			}
+			if got := testutil.ToFloat64(runner.processed.WithLabelValues("unexpected.new_kind", resultRetry)); got != 1 {
+				t.Errorf("processed{retry} = %v, want 1", got)
+			}
+			if got := testutil.ToFloat64(runner.processed.WithLabelValues("unexpected.new_kind", resultDead)); got != 0 {
+				t.Errorf("processed{dead} = %v, want 0", got)
+			}
+		})
+	})
 }
 
 func jobAttrMap(attrs []attribute.KeyValue) map[string]any {

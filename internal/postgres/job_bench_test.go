@@ -105,6 +105,7 @@ FROM generate_series(1, $2)`, tenantID, b.N); err != nil {
 					workerID := fmt.Sprintf("bench-w-%d", w)
 					for {
 						batch, err := store.Claim(ctx, job.ClaimParams{
+							Kinds:        []string{job.KindLinkRiskScan},
 							Limit:        1,
 							MaxPerTenant: 0, // 压队列本身上限时关闭单租户限并发
 							Lease:        time.Minute,
@@ -207,6 +208,7 @@ FROM generate_series(1, $3)`, tenantID, string(payload), b.N); err != nil {
 					workerID := fmt.Sprintf("risk-bench-%d", w)
 					for {
 						batch, err := store.Claim(ctx, job.ClaimParams{
+							Kinds:    []string{job.KindLinkRiskScan},
 							Limit:    1,
 							Lease:    time.Minute,
 							LockedBy: workerID,

@@ -62,7 +62,12 @@ func claimAllPendingJobs(t *testing.T, store *Store) []job.Job {
 	ctx := context.Background()
 	var out []job.Job
 	for {
-		batch, err := store.Claim(ctx, job.ClaimParams{Limit: 100, Lease: time.Minute, LockedBy: "wh-test"})
+		batch, err := store.Claim(ctx, job.ClaimParams{
+			Kinds:    []string{job.KindWebhookDeliver, job.KindLinkRiskScan, job.KindLinkPurgeStats, job.KindInvitationEmail},
+			Limit:    100,
+			Lease:    time.Minute,
+			LockedBy: "wh-test",
+		})
 		if err != nil {
 			t.Fatalf("Claim: %v", err)
 		}
