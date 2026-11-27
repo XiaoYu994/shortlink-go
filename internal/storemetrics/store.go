@@ -1,4 +1,4 @@
-// Package storemetrics 是 LinkStore 的指标装饰器，按操作记录耗时和结果。
+// Package storemetrics 是 LinkStore 的指标与追踪装饰器，按操作记录耗时、结果和 store.<op> Span。
 package storemetrics
 
 import (
@@ -7,11 +7,17 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"shortlink/internal/link"
 )
 
 const (
+	storeTracerName = "shortlink/storemetrics"
+
 	operationsMetricName = "shortlink_store_operations_total"
 	durationMetricName   = "shortlink_store_operation_duration_seconds"
 
@@ -115,16 +121,29 @@ func NewReader(next LinkReader, registry *prometheus.Registry) *Reader {
 
 // GetByCode 记录一次查询操作的耗时和结果，返回值原样返回。
 func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error) {
+	ctx, span := startSpan(ctx, operationGet)
 	start := time.Now()
 	l, err := r.next.GetByCode(ctx, code)
-	r.observe(operationGet, err, time.Since(start))
+	r.finish(span, operationGet, err, time.Since(start))
 	return l, err
 }
 
-func (r *Reader) observe(operation string, err error, d time.Duration) {
+func startSpan(ctx context.Context, operation string) (context.Context, trace.Span) {
+	return otel.Tracer(storeTracerName).Start(ctx, "store."+operation,
+		trace.WithAttributes(attribute.String("store.operation", operation)),
+	)
+}
+
+func (r *Reader) finish(span trace.Span, operation string, err error, d time.Duration) {
 	result := classifyResult(err)
 	r.operations.WithLabelValues(operation, result).Inc()
 	r.duration.WithLabelValues(operation, result).Observe(d.Seconds())
+	span.SetAttributes(attribute.String("store.result", result))
+	if result == resultError || result == resultTimeout {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 }
 
 /*
@@ -147,67 +166,76 @@ func New(next LinkStore, registry *prometheus.Registry) *Store {
 
 // Create 记录一次创建操作的耗时和结果，错误原样返回。
 func (s *Store) Create(ctx context.Context, l *link.Link) error {
+	ctx, span := startSpan(ctx, operationCreate)
 	start := time.Now()
 	err := s.next.Create(ctx, l)
-	s.observe(operationCreate, err, time.Since(start))
+	s.finish(span, operationCreate, err, time.Since(start))
 	return err
 }
 
 // List、GetForTenant、Update、Delete、Stats 同理，只观察，不改写结果。
 func (s *Store) List(ctx context.Context, opts link.ListOptions) ([]link.AdminLink, error) {
+	ctx, span := startSpan(ctx, operationList)
 	start := time.Now()
 	got, err := s.next.List(ctx, opts)
-	s.observe(operationList, err, time.Since(start))
+	s.finish(span, operationList, err, time.Since(start))
 	return got, err
 }
 
 func (s *Store) GetForTenant(ctx context.Context, tenantID int64, code string) (*link.AdminLink, error) {
+	ctx, span := startSpan(ctx, operationGetTenant)
 	start := time.Now()
 	got, err := s.next.GetForTenant(ctx, tenantID, code)
-	s.observe(operationGetTenant, err, time.Since(start))
+	s.finish(span, operationGetTenant, err, time.Since(start))
 	return got, err
 }
 
 func (s *Store) Update(ctx context.Context, tenantID int64, code string, u link.Update) (*link.AdminLink, error) {
+	ctx, span := startSpan(ctx, operationUpdate)
 	start := time.Now()
 	got, err := s.next.Update(ctx, tenantID, code, u)
-	s.observe(operationUpdate, err, time.Since(start))
+	s.finish(span, operationUpdate, err, time.Since(start))
 	return got, err
 }
 
 func (s *Store) Delete(ctx context.Context, tenantID int64, code string) error {
+	ctx, span := startSpan(ctx, operationDelete)
 	start := time.Now()
 	err := s.next.Delete(ctx, tenantID, code)
-	s.observe(operationDelete, err, time.Since(start))
+	s.finish(span, operationDelete, err, time.Since(start))
 	return err
 }
 
 func (s *Store) Stats(ctx context.Context, tenantID int64, code string, from, to time.Time) (*link.Stats, error) {
+	ctx, span := startSpan(ctx, operationStats)
 	start := time.Now()
 	got, err := s.next.Stats(ctx, tenantID, code, from, to)
-	s.observe(operationStats, err, time.Since(start))
+	s.finish(span, operationStats, err, time.Since(start))
 	return got, err
 }
 
 // Ban、BanIfURL、Unban 记录平台下架操作的结果；ErrNotFound、ErrBanned 和 ErrURLChanged 沿用 classifyResult。
 func (s *Store) Ban(ctx context.Context, code string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	ctx, span := startSpan(ctx, operationBan)
 	start := time.Now()
 	got, err := s.next.Ban(ctx, code, reason, source)
-	s.observe(operationBan, err, time.Since(start))
+	s.finish(span, operationBan, err, time.Since(start))
 	return got, err
 }
 
 func (s *Store) BanIfURL(ctx context.Context, code, expectedURL string, reason link.BanReason, source link.BanSource) (*link.Link, error) {
+	ctx, span := startSpan(ctx, operationBanIfURL)
 	start := time.Now()
 	got, err := s.next.BanIfURL(ctx, code, expectedURL, reason, source)
-	s.observe(operationBanIfURL, err, time.Since(start))
+	s.finish(span, operationBanIfURL, err, time.Since(start))
 	return got, err
 }
 
 func (s *Store) Unban(ctx context.Context, code string) (*link.Link, error) {
+	ctx, span := startSpan(ctx, operationUnban)
 	start := time.Now()
 	got, err := s.next.Unban(ctx, code)
-	s.observe(operationUnban, err, time.Since(start))
+	s.finish(span, operationUnban, err, time.Since(start))
 	return got, err
 }
 

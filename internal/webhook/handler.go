@@ -15,6 +15,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"shortlink/internal/audit"
 	"shortlink/internal/job"
@@ -22,6 +26,8 @@ import (
 )
 
 const (
+	webhookTracerName = "shortlink/webhook"
+
 	deliveriesMetricName   = "shortlink_webhook_deliveries_total"
 	deliveryDurationName   = "shortlink_webhook_delivery_duration_seconds"
 	autoDisabledMetricName = "shortlink_webhook_auto_disabled_total"
@@ -204,12 +210,29 @@ func NewHandler(opts HandlerOptions) job.Handler {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return ctx.Err()
 		}
+		maxAttempts := j.MaxAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = DefaultMaxAttempts
+		}
+		attempt := max(j.Attempts, 1)
+
+		httpCtx, httpSpan := otel.Tracer(webhookTracerName).Start(ctx, "webhook.http_deliver",
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				attribute.String("webhook.event", string(p.Event)),
+				attribute.Int64("webhook.id", target.ID),
+				attribute.Int("webhook.attempt", attempt),
+			),
+		)
+		req = req.WithContext(httpCtx)
 		start := nowFn()
 		resp, reqErr := client.Do(req)
 		if reqErr != nil && errors.Is(ctx.Err(), context.Canceled) {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
+			httpSpan.SetAttributes(attribute.String("webhook.result", "canceled"))
+			httpSpan.End()
 			// Worker 停机主动取消时由 job.Runner 原样重入队（ConsumeAttempt=false），
 			// 不写失败投递记录、也不累计连续失败触发误熔断。
 			return ctx.Err()
@@ -218,11 +241,6 @@ func NewHandler(opts HandlerOptions) job.Handler {
 		m.duration.WithLabelValues(string(p.Event)).Observe(float64(durationMs) / 1000.0)
 
 		outcome := classifyOutcome(resp, reqErr)
-		maxAttempts := j.MaxAttempts
-		if maxAttempts <= 0 {
-			maxAttempts = DefaultMaxAttempts
-		}
-		attempt := max(j.Attempts, 1)
 		terminalFailure := !outcome.succeeded && (outcome.permanent || attempt >= maxAttempts)
 
 		recStatus := StatusSuccess
@@ -233,6 +251,15 @@ func NewHandler(opts HandlerOptions) job.Handler {
 				recStatus = StatusRetry
 			}
 		}
+		if outcome.httpStatus != nil {
+			httpSpan.SetAttributes(attribute.Int("http.response.status_code", *outcome.httpStatus))
+		}
+		httpSpan.SetAttributes(attribute.String("webhook.result", string(recStatus)))
+		if !outcome.succeeded {
+			httpSpan.RecordError(outcome.err)
+			httpSpan.SetStatus(codes.Error, outcome.err.Error())
+		}
+		httpSpan.End()
 
 		// 如果恰在 worker 关闭取消 context 时收到瞬断，不覆盖正常状态落库超时（用 WithoutCancel 保留 trace 但独立短超时）。
 		recordBaseCtx := audit.WithMeta(context.WithoutCancel(ctx), audit.SystemMeta(fmt.Sprintf("job:%d", j.ID)))

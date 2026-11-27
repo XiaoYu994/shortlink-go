@@ -14,6 +14,13 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"shortlink/internal/logx"
 )
@@ -820,4 +827,164 @@ func TestRunnerRetryAfterOverridesBackoffAndMarksDeadOnExhaustion(t *testing.T) 
 			t.Fatalf("Run error = %v", err)
 		}
 	})
+}
+
+func TestRunnerTracingConsumerSpanLinkAndLogCorrelation(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(t.Context())
+		otel.SetTracerProvider(noop.NewTracerProvider())
+	})
+
+	var buf lockedBuffer
+	logger, _ := logx.New(&buf, logx.Options{Format: logx.FormatJSON, Level: slog.LevelInfo, Service: "console-worker"})
+
+	q := newFakeQueue()
+	tenantID := int64(42)
+	const sourceTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	idDone := q.add(Job{Kind: KindLinkRiskScan, TenantID: &tenantID, Traceparent: sourceTraceparent})
+	idRetry := q.add(Job{Kind: KindWebhookDeliver, TenantID: &tenantID, MaxAttempts: 2, Traceparent: "malformed-traceparent"})
+	idSkip := q.add(Job{Kind: KindLinkPurgeStats, TenantID: &tenantID})
+
+	var handled atomic.Int32
+	allHandled := make(chan struct{})
+	var closeOnce sync.Once
+	markHandled := func() {
+		if handled.Add(1) == 3 {
+			closeOnce.Do(func() { close(allHandled) })
+		}
+	}
+
+	runner := New(q, map[string]Handler{
+		KindLinkRiskScan: func(ctx context.Context, _ Job) error {
+			logger.InfoContext(ctx, "job running")
+			markHandled()
+			return nil
+		},
+		KindWebhookDeliver: func(ctx context.Context, _ Job) error {
+			markHandled()
+			return errors.New("upstream 500")
+		},
+		KindLinkPurgeStats: func(ctx context.Context, _ Job) error {
+			markHandled()
+			return Skip("already purged")
+		},
+	}, logger, prometheus.NewRegistry(), Options{
+		Concurrency:     3,
+		PollInterval:    10 * time.Millisecond,
+		BaseBackoff:     time.Minute,
+		MetricsInterval: time.Hour,
+		ReapInterval:    time.Hour,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx) }()
+
+	<-allHandled
+	// 等待队列状态写回完成再停机。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		j1, _ := q.get(idDone)
+		j2, _ := q.get(idRetry)
+		j3, _ := q.get(idSkip)
+		if j1.Status == StatusDone && j2.Status == StatusPending && j3.Status == StatusDone {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+
+	spans := exp.GetSpans()
+	byName := make(map[string]tracetest.SpanStub, len(spans))
+	for _, sp := range spans {
+		byName[sp.Name] = sp
+	}
+
+	doneSpan, ok := byName["job.process "+KindLinkRiskScan]
+	if !ok {
+		t.Fatalf("missing done span in %+v", spans)
+	}
+	if doneSpan.SpanKind != trace.SpanKindConsumer {
+		t.Errorf("span kind = %v, want consumer", doneSpan.SpanKind)
+	}
+	if doneSpan.Parent.IsValid() {
+		t.Errorf("consumer span should start a new root, got parent %+v", doneSpan.Parent)
+	}
+	if doneSpan.SpanContext.TraceID().String() == "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Error("consumer span reused producer trace_id instead of new root + link")
+	}
+	if len(doneSpan.Links) != 1 ||
+		doneSpan.Links[0].SpanContext.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" ||
+		doneSpan.Links[0].SpanContext.SpanID().String() != "00f067aa0ba902b7" {
+		t.Fatalf("done span links = %+v, want source traceparent link", doneSpan.Links)
+	}
+	if doneSpan.Status.Code != codes.Unset {
+		t.Errorf("done span status = %v, want Unset", doneSpan.Status.Code)
+	}
+	doneAttrs := jobAttrMap(doneSpan.Attributes)
+	if doneAttrs["shortlink.job.result"] != resultDone ||
+		doneAttrs["shortlink.job.source_trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("done span attrs = %+v", doneAttrs)
+	}
+
+	retrySpan, ok := byName["job.process "+KindWebhookDeliver]
+	if !ok {
+		t.Fatalf("missing retry span in %+v", spans)
+	}
+	if len(retrySpan.Links) != 0 {
+		t.Errorf("malformed traceparent should produce 0 links, got %+v", retrySpan.Links)
+	}
+	if retrySpan.Status.Code != codes.Error {
+		t.Errorf("retry span status = %v, want Error", retrySpan.Status.Code)
+	}
+
+	skipSpan, ok := byName["job.process "+KindLinkPurgeStats]
+	if !ok {
+		t.Fatalf("missing skip span in %+v", spans)
+	}
+	if skipSpan.Status.Code != codes.Unset || jobAttrMap(skipSpan.Attributes)["shortlink.job.result"] != resultSkipped {
+		t.Errorf("skip span = (%v, %+v)", skipSpan.Status.Code, skipSpan.Attributes)
+	}
+
+	var sawJobLog, sawRetryLog bool
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("decode log: %v", err)
+		}
+		switch entry["msg"] {
+		case "job running":
+			sawJobLog = true
+			if entry["trace_id"] != doneSpan.SpanContext.TraceID().String() ||
+				entry["span_id"] != doneSpan.SpanContext.SpanID().String() {
+				t.Errorf("handler log trace mismatch: %+v vs %s/%s",
+					entry, doneSpan.SpanContext.TraceID(), doneSpan.SpanContext.SpanID())
+			}
+		case "job scheduled for retry":
+			sawRetryLog = true
+			if entry["trace_id"] != retrySpan.SpanContext.TraceID().String() {
+				t.Errorf("retry log trace_id = %v, want %s", entry["trace_id"], retrySpan.SpanContext.TraceID())
+			}
+		}
+	}
+	if !sawJobLog || !sawRetryLog {
+		t.Fatalf("sawJobLog=%v sawRetryLog=%v", sawJobLog, sawRetryLog)
+	}
+}
+
+func jobAttrMap(attrs []attribute.KeyValue) map[string]any {
+	out := make(map[string]any, len(attrs))
+	for _, a := range attrs {
+		out[string(a.Key)] = a.Value.AsInterface()
+	}
+	return out
 }

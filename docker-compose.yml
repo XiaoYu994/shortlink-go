@@ -203,5 +203,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # 可选的本地链路追踪接收器与查询 UI（ADR 0032）。默认不启动；
+  # 需要时执行 make tracing（或 docker compose --profile tracing up -d jaeger），UI 位于 http://127.0.0.1:16686。
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["tracing"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4318:4318"
+
 volumes:
   pgdata:

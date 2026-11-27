@@ -8,26 +8,29 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"shortlink/internal/job"
 )
 
 const (
-	jobColumns = `j.id, j.kind, j.tenant_id, j.payload, j.dedup_key, j.status, j.attempts, j.max_attempts,
+	jobColumns = `j.id, j.kind, j.tenant_id, j.payload, j.dedup_key, j.traceparent, j.status, j.attempts, j.max_attempts,
           j.run_at, j.locked_at, j.locked_until, j.locked_by, j.lock_version, j.last_error,
           j.created_at, j.updated_at, j.finished_at`
 
-	enqueueJobSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts, run_at)
-VALUES ($1, $2, $3::jsonb, $4, $5, now() + ($6::bigint * interval '1 microsecond'))
+	enqueueJobSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts, run_at, traceparent)
+VALUES ($1, $2, $3::jsonb, $4, $5, now() + ($6::bigint * interval '1 microsecond'), $7)
 RETURNING id`
 
-	enqueueJobDedupSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts, run_at)
-VALUES ($1, $2, $3::jsonb, $4, $5, now() + ($6::bigint * interval '1 microsecond'))
+	enqueueJobDedupSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts, run_at, traceparent)
+VALUES ($1, $2, $3::jsonb, $4, $5, now() + ($6::bigint * interval '1 microsecond'), $7)
 ON CONFLICT (kind, dedup_key) WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running')
 DO NOTHING
 RETURNING id`
 
-	insertJobTxSQL = `INSERT INTO jobs (kind, tenant_id, payload)
-VALUES ($1, NULLIF($2::bigint, 0), $3::jsonb)`
+	insertJobTxSQL = `INSERT INTO jobs (kind, tenant_id, payload, traceparent)
+VALUES ($1, NULLIF($2::bigint, 0), $3::jsonb, $4)`
 
 	/*
 		关闭单租户限并发（MaxPerTenant <= 0）时走极简快路径：直接按 idx_jobs_claimable (run_at, id)
@@ -290,7 +293,7 @@ func (s *Store) EnqueueJob(ctx context.Context, p EnqueueJobParams) (int64, erro
 	}
 
 	var id int64
-	err := s.db.QueryRowContext(ctx, query, p.Kind, p.TenantID, rawPayload, dedup, maxAttempts, p.Delay.Microseconds()).Scan(&id)
+	err := s.db.QueryRowContext(ctx, query, p.Kind, p.TenantID, rawPayload, dedup, maxAttempts, p.Delay.Microseconds(), traceparentFromContext(ctx)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) && p.DedupKey != "" {
 		return 0, nil
 	}
@@ -456,7 +459,7 @@ func scanJob(scanner rowScanner) (job.Job, error) {
 		finishedAt  sql.NullTime
 	)
 	if err := scanner.Scan(
-		&j.ID, &j.Kind, &tenantID, &j.Payload, &dedupKey, &j.Status,
+		&j.ID, &j.Kind, &tenantID, &j.Payload, &dedupKey, &j.Traceparent, &j.Status,
 		&j.Attempts, &j.MaxAttempts, &j.RunAt, &lockedAt, &lockedUntil,
 		&lockedBy, &j.LockVersion, &j.LastError, &j.CreatedAt, &j.UpdatedAt, &finishedAt,
 	); err != nil {
@@ -481,14 +484,23 @@ func scanJob(scanner rowScanner) (job.Job, error) {
 	return j, nil
 }
 
-// insertJobTx 在当前事务内按 Go 结构体载荷入队一条异步任务，供控制面多步写事务复用。
+// insertJobTx 在当前事务内按 Go 结构体载荷入队一条异步任务，并写入可选 W3C traceparent，供控制面多步写事务复用。
 func insertJobTx(ctx context.Context, tx *sql.Tx, kind string, tenantID int64, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("enqueue job %s: marshal payload: %w", kind, err)
 	}
-	if _, err := tx.ExecContext(ctx, insertJobTxSQL, kind, tenantID, string(raw)); err != nil {
+	if _, err := tx.ExecContext(ctx, insertJobTxSQL, kind, tenantID, string(raw), traceparentFromContext(ctx)); err != nil {
 		return fmt.Errorf("enqueue job %s: %w", kind, err)
 	}
 	return nil
+}
+
+func traceparentFromContext(ctx context.Context) string {
+	if ctx == nil || !trace.SpanContextFromContext(ctx).IsValid() {
+		return ""
+	}
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	return carrier.Get("traceparent")
 }

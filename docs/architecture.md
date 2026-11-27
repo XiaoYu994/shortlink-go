@@ -29,8 +29,9 @@ shortlink/
 ├── cmd/migrate/         # 数据库迁移。启动 HTTP 进程时不执行
 ├── Dockerfile           # redirector、console、migrate 共用的镜像
 ├── internal/
-│   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、recoverer、timeout、BusinessHandler/OpsHandler 独立监听、/healthz、/readyz、/debug/pprof/、/debug/log/level、ClientIP（含可信代理 CIDR 右向剥离）、优雅启停与 JSON/错误写出
-│   ├── logx/            # 结构化日志底座：根 slog 构造（text 接入 lmittmann/tint 自动识别 TTY/NO_COLOR、json 保持标准库、service 标签、LevelVar）、WithGroup 顶层 context 字段注入（含 request_id/client_request_id/tenant_id/job_id/job_kind）、RequestEvent 宽事件收集槽与敏感信息脱敏（零业务依赖）
+│   ├── httpx/           # 零业务依赖 HTTP 底座：中间件链、requestid、logging、HTTP 指标、OTel HTTP 入口追踪、recoverer、timeout、BusinessHandler/OpsHandler 独立监听、/healthz、/readyz、/debug/pprof/、/debug/log/level、ClientIP（含可信代理 CIDR 右向剥离）、优雅启停与 JSON/错误写出
+│   ├── logx/            # 结构化日志底座：根 slog 构造（text 接入 lmittmann/tint 自动识别 TTY/NO_COLOR、json 保持标准库、service 标签、LevelVar）、WithGroup 顶层 context 字段注入（含 request_id/client_request_id/tenant_id/job_id/job_kind/trace_id/span_id）、RequestEvent 宽事件收集槽与敏感信息脱敏（零业务依赖）
+│   ├── tracex/          # OpenTelemetry SDK 与 OTLP/HTTP 导出引导包：全仓唯一持有 otel/sdk 与 exporter，仅由三进程组合根调用，未配置端点时零开销 Noop（ADR 0032）
 │   ├── redirector/      # 公开跳转进程 HTTP 层：GET /r/{code}、点击记录与只读 LinkStore、ClickRecorder 接口
 │   ├── console/         # 管理进程 HTTP 层：核心短链 CRUD、/api/v1/capabilities、两层登录插件底座（AuthMethod + OAuthAuthMethod + PhoneOTPAuthMethod + SessionIssuer）、console.Module 业务模块（orgs/members/invitations/api_keys/audit/webhooks/analytics）、webhandler、鉴权前有界按 IP 限流与按租户限流；定义各消费方 Store/OAuthClient/Authorizer 接口（ADR 0029、ADR 0030）
 │   ├── identity/        # 认证主体（Principal）、API Key 与会话令牌格式/哈希、权限表、MemberScope 与成员规则（零 OAuth/PG 外部库依赖）
@@ -49,7 +50,7 @@ shortlink/
 │   ├── mailer/          # 仅依赖 Go 标准库的邮件发送器（SMTP StartTLS/SMTPS/Plain 与 CR/LF 注入防护）及邀请邮件正文构造（make arch-check 强制零内部依赖）
 │   ├── sms/             # 短信验证码发送通道抽象（Sender）：防 SSRF WebhookSender（经 safehttp）与本地开发 LogSender（make arch-check 强制仅依赖 safehttp/logx，ADR 0030）
 │   ├── memorystore/     # 内存存储，仅测试和本地开发；只实现跳转和创建
-│   ├── pgdb/            # PostgreSQL 公共连接池参数、约束错误判断与测试库 advisory lock 底座（零业务依赖）
+│   ├── pgdb/            # PostgreSQL 公共连接池参数、约束错误判断、原生 pgx.QueryTracer 追踪与测试库 advisory lock 底座（零业务依赖）
 │   ├── pgredirect/      # 跳转数据面专属 PostgreSQL 存储：只读 GetByCode 与 ClickRecorder 批量写出（零管理/身份/风控依赖）
 │   ├── postgres/        # PostgreSQL 控制面与存储门面：内嵌 pgredirect.Store，提供带 RLS 事务隔离（tenanttx）的管理查询/CRUD、TxHook 事务内扩展点（风控/Webhook/邀请邮件/统计清理，ADR 0029、ADR 0031）、统计与审计拆分的分区治理、会话、成员邀请、fail-closed 审计写入与 jobs Outbox 队列
 │   ├── storemetrics/    # 存储指标装饰器（透传完整读写 Store 与只读 Reader）
@@ -68,33 +69,34 @@ shortlink/
 ## 依赖方向
 
 ```txt
-cmd/redirector -> redirector, httpx, logx, pgdb, pgredirect, storemetrics(Reader), cache(Reader), click, config（严格零 identity/risk/job/audit/safehttp/webhook/mailer/sms 依赖，make arch-check 校验）
-cmd/console    -> console, httpx, logx, audit, identity(/oauth), job, link, postgres, risk, safehttp, webhook, mailer, sms, storemetrics, cache, config；key/tenant/member 命令只用 postgres，serve/worker 按 feature_*.go 垂直装配各特性
+cmd/redirector -> redirector, httpx, logx, tracex, pgdb, pgredirect, storemetrics(Reader), cache(Reader), click, config（严格零 identity/risk/job/audit/safehttp/webhook/mailer/sms 依赖，make arch-check 校验）
+cmd/console    -> console, httpx, logx, tracex, audit, identity(/oauth), job, link, postgres, risk, safehttp, webhook, mailer, sms, storemetrics, cache, config；key/tenant/member 命令只用 postgres，serve/worker 按 feature_*.go 垂直装配各特性
 cmd/migrate    -> golang-migrate
-config         -> logx, 标准库（零业务包依赖）
+config         -> logx, pgdb, 标准库（零业务包与 OTel 直接引入）
+tracex         -> go.opentelemetry.io/otel/sdk, otlptracehttp（全仓唯一持有 OTel SDK，零 internal/* 依赖）
 redirector     -> httpx, link, click, idgen, Prometheus
 console        -> httpx, logx, audit, link, click, idgen, identity, tenant, ratelimit, safehttp, webhook, sms, Prometheus
-httpx          -> logx, 标准库、Prometheus
-identity       -> tenant, logx
+httpx          -> logx, 标准库、Prometheus、OTel API
+identity       -> tenant, logx（无 OTel 直接引入）
 identity/oauth -> identity, logx, golang.org/x/oauth2, github.com/coreos/go-oidc/v3
 audit          -> 标准库
-job            -> logx, 标准库、Prometheus
-ratelimit      -> 标准库、golang.org/x/time/rate（严格零 internal/* 与业务/HTTP/存储依赖，make arch-check 校验）
-safehttp       -> ratelimit, 标准库（严格零业务/存储/cache/config 依赖）
-risk           -> safehttp, cache, audit, job, link, go-redis, Prometheus
-webhook        -> safehttp, audit, job, 标准库、Prometheus
+job            -> logx, 标准库、Prometheus、OTel API
+ratelimit      -> 标准库、golang.org/x/time/rate（严格零 internal/* 与业务/HTTP/存储/OTel 依赖，make arch-check 校验）
+safehttp       -> ratelimit, 标准库（严格零业务/存储/cache/config/OTel 依赖）
+risk           -> safehttp, cache, audit, job, link, go-redis, Prometheus、OTel API
+webhook        -> safehttp, audit, job, 标准库、Prometheus、OTel API
 mailer         -> 标准库（严格零 internal/* 与第三方依赖，make arch-check 校验）
-sms            -> safehttp, logx（严格零 PG/Redis/OAuth 依赖，make arch-check 校验）
-pgdb           -> 标准库、jackc/pgx
+sms            -> safehttp, logx（严格零 PG/Redis/OAuth 依赖与 OTel 直接引入，make arch-check 校验）
+pgdb           -> 标准库、jackc/pgx、OTel API
 pgredirect     -> pgdb, link, click
-postgres       -> pgdb, pgredirect, audit, link, click, idgen, identity, job, tenant, webhook, mailer
+postgres       -> pgdb, pgredirect, audit, link, click, idgen, identity, job, tenant, webhook, mailer、OTel API
 memorystore    -> link, idgen
-storemetrics   -> link, Prometheus
-cache          -> link, logx, singleflight, go-redis, Prometheus
-click          -> link、标准库、Prometheus
+storemetrics   -> link, Prometheus、OTel API
+cache          -> link, logx, singleflight, go-redis, Prometheus、OTel API
+click          -> link、标准库、Prometheus、OTel API
 link           -> 标准库
 idgen          -> 标准库
-logx           -> 标准库、github.com/lmittmann/tint
+logx           -> 标准库、github.com/lmittmann/tint、OTel trace API
 ```
 
 `redirector.LinkStore` 与 `console.LinkStore` 接口分别定义在各自使用方，内存版、PostgreSQL 版及装饰器隐式实现它们；`httpx` 不依赖任何业务包。`link` 与 `audit` 不依赖存储和 HTTP。`click` 自己定义写点击的接口，`postgres.Store` 隐式实现它。管理 API 的 `APIKeyAuthenticator`、`SessionStore`、`MemberStore`、`OrgStore`、`InvitationStore`、`APIKeyStore`、`AuditLogStore`、`OAuthClient`（由 `OAuthAuthMethod` 适配为 `AuthMethod`）和 `Authorizer` 定义在 `console`，分别由 `postgres.Store`、`oauth.OIDCProvider`、`oauth.GitHubProvider` 和 `identity.MapAuthorizer` 实现；缓存不参与鉴权。模块化可插拔扩展边界（`postgres.TxHook`、`console.AuthMethod`、`console.Module`、`WorkerModule`）见 [ADR 0029](adr/0029-modular-feature-plugins.md)。
@@ -164,7 +166,7 @@ GET /api/v1/links/{code}/stats
   -> 200：日趋势和访客补零，设备和客户端固定类别
 ```
 
-`chain` 里靠前的中间件在外层。`requestID` 确定编号，写入响应头 `X-Request-ID` 和请求 context。`observe` 合并了访问日志（Canonical Log Line）与 HTTP 指标（共用单次 `statusWriter` 与耗时统计）：记录方法、路由模板、路径、状态码、毫秒耗时（`duration_ms`）、响应字节数、客户端 `ip`，并从请求内层的 `RequestEvent` 汇总 `tenant_id`、`actor`、`cache`、`retry_after` 与 `err_msg`；级别按 `>=500 -> Error`、慢请求 / 非放行 `4xx -> Warn`、`2xx/3xx` 与 `redirector` 404 -> `Info`、`/healthz`/`/readyz` 2xx -> `Debug`，且 `redirector` 支持正常 `INFO` 流量采样（`5xx` 与慢请求全保）。指标按路由模式、方法和状态码记录请求数和耗时，方法为 GET、HEAD、POST、PATCH、DELETE，其余记成 `other`。`observe` 放在 `recoverer` 外面，panic 被写成 500 后也能记到状态码和 `err_msg=panic`。各进程根日志器统一通过 `logx` 装配，本地 `text` 模式使用 `lmittmann/tint` 彩色可读格式（非终端或设 `NO_COLOR` 自动去色），生产 `json` 模式输出严格 JSON；带 context 的日志即使经过 `WithGroup` 也会在顶层自动带上 `request_id`、`tenant_id`、`job_id` 和 `job_kind`，并自动脱敏连接串密码与密钥；启用回环 `PPROF_ADDR` 时同时暴露 `GET/PUT /debug/log/level` 支持动态调级。`http.ErrAbortHandler` 会继续抛出，那是 `net/http` 用来中止当前连接的哨兵。
+`chain` 里靠前的中间件在外层。`requestID` 确定编号，写入响应头 `X-Request-ID` 和请求 context。`observe` 合并了访问日志（Canonical Log Line）、HTTP 指标与 OpenTelemetry 入口追踪（共用单次 `routePattern`、`statusWriter` 与耗时统计；提取入站 W3C `traceparent`，跳过 `/metrics` 与探针 `/healthz`/`/readyz`）：记录方法、路由模板、路径、状态码、毫秒耗时（`duration_ms`）、响应字节数、客户端 `ip`，并从请求内层的 `RequestEvent` 汇总 `tenant_id`、`actor`、`cache`、`retry_after` 与 `err_msg`；级别按 `>=500 -> Error`、慢请求 / 非放行 `4xx -> Warn`、`2xx/3xx` 与 `redirector` 404 -> `Info`、`/healthz`/`/readyz` 2xx -> `Debug`，且 `redirector` 支持正常 `INFO` 流量采样（`5xx` 与慢请求全保）。指标按路由模式、方法和状态码记录请求数和耗时，方法为 GET、HEAD、POST、PATCH、DELETE，其余记成 `other`。`observe` 放在 `recoverer` 外面，panic 被写成 500 后也能记到状态码和 `err_msg=panic`。各进程根日志器统一通过 `logx` 装配，本地 `text` 模式使用 `lmittmann/tint` 彩色可读格式（非终端或设 `NO_COLOR` 自动去色），生产 `json` 模式输出严格 JSON；带 context 的日志即使经过 `WithGroup` 也会在顶层自动带上 `request_id`、`tenant_id`、`job_id`、`job_kind`、`trace_id` 和 `span_id`，并自动脱敏连接串密码与密钥；启用回环 `PPROF_ADDR` 时同时暴露 `GET/PUT /debug/log/level` 支持动态调级。`http.ErrAbortHandler` 会继续抛出，那是 `net/http` 用来中止当前连接的哨兵。
 
 `timeout` 在最里层，给请求 context 加处理时限。到点后 handler 里的数据库查询被取消（pgx 会中断正在执行的 SQL），handler 返回 504。`http.Server` 的 `ReadTimeout`、`WriteTimeout` 只管连接的读写，不会取消 handler 的 context，处理时限只能靠这一层。这两个连接超时都是 `REQUEST_TIMEOUT` 加 5 秒：读超时包住请求体，写超时留给 504 的写出。
 
@@ -201,6 +203,7 @@ GET /api/v1/links/{code}/stats
 - `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_CIDRS`：默认 `false`；设为 `true` 时结合可信代理 CIDR 从右往左剥离可信代理跳数读取真实客户端 IP，既防客户端伪造，也防多层代理导致 UV 塌缩（[ADR 0024](adr/0024-process-boundary-and-ops-isolation.md)）
 - `LOG_LEVEL`：`debug`、`info`、`warn`、`error`，默认 `info`
 - `LOG_FORMAT`：`text` 或 `json`，默认 `text`。本地用人读的 text；生产用 `json`，一行一条给采集。两个进程共用这一份构造
+- `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_TRACES_SAMPLE_RATE`：可选，默认留空关闭 OpenTelemetry 追踪导出（零开销 Noop）；配置 http/https 端点后三进程分别上报 OTLP/HTTP Traces（默认采样率 `1`，经 `ParentBased` 传播，[ADR 0032](adr/0032-opentelemetry-tracing-and-log-correlation.md)）
 - `PPROF_ADDR`：默认空。规则见 [ADR 0013](adr/0013-pprof-on-loopback-listener.md)
 - `ACCESS_LOG_SAMPLE_RATE` / `ACCESS_LOG_SLOW_THRESHOLD`：可选，仅 redirector 使用。控制正常 `INFO` 跳转访问日志的采样率（`[0, 1]`，默认 `1`）与慢请求门槛（默认 `200ms`，超门槛及 `5xx` 全量保留）
 - `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL`：可选，仅 console 使用。四个要么全配、要么全空（只配一部分时启动失败）；全空时不挂载 OIDC 登录路由（[ADR 0018](adr/0018-users-orgs-and-rbac.md)）
@@ -222,6 +225,4 @@ redirector 在 `run` 返回后排空点击缓冲，时限和丢数见 [ADR 0007]
 
 两个进程各自暴露 `GET /metrics`：Go 运行时、进程、HTTP、连接池是两边都有；缓存、存储和点击指标只在会用到它们的进程里产生。抓取不进访问日志、公网不转发运维路径，见 [ADR 0005](adr/0005-prometheus-before-tracing.md)。本地 `make prometheus` 按 `OPS_ADDR`/`ADDR`、`CONSOLE_OPS_ADDR`/`CONSOLE_ADDR` 和 `WORKER_ADDR` 的端口抓取 `host.docker.internal` 上的 `/metrics`（默认 `8080`、`8081`、`8082`），生成的配置在 `deploy/prometheus.local.yml`；各 job 指标名相同，查询时用 `job` 区分。Prometheus 和探活直接打运维端口。宿主机入口：`docker compose --profile edge up -d nginx`，地址 `127.0.0.1:8088`。容器栈：`make stack`，入口 `127.0.0.1:28088`，业务端口映射 `127.0.0.1:28080` / `28081`（运维端点留在 compose 内网 `:9090` / `:9091`），`worker` 运维端口映射 `127.0.0.1:28082`。`make up` 不启动这套栈。
 
-## 尚未实现
-
-- OpenTelemetry 追踪（含日志 `trace_id` 串联，日志体系 Phase C），见 [roadmap](roadmap.md) 阶段 16（[ADR 0005](adr/0005-prometheus-before-tracing.md)）
+链路追踪默认关闭；配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 后，三进程通过 `internal/tracex` 以 OTLP/HTTP 上报 Span，同步请求涵盖 `httpx`、`cache`（含 `singleflight` 等待者 Span Link）、`storemetrics` 与 `pgdb`（`pgx.QueryTracer`），异步 `jobs` 持久化 `traceparent` 并由 `worker` 以 `SpanKindConsumer` + Span Link 关联源请求；`logx` 自动将 `trace_id`/`span_id` 注入结构化日志（[ADR 0032](adr/0032-opentelemetry-tracing-and-log-correlation.md)）。本地可用 `make tracing` 按需启动 Jaeger。

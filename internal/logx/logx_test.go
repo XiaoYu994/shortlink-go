@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
@@ -19,7 +21,7 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 	// 无字段的普通 context 不输出空属性。
 	logger.InfoContext(context.Background(), "plain")
 	plain := decodeSingleJSON(t, buf.Bytes())
-	for _, key := range []string{"request_id", "client_request_id", "tenant_id", "job_id", "job_kind"} {
+	for _, key := range []string{"request_id", "client_request_id", "tenant_id", "job_id", "job_kind", "trace_id", "span_id"} {
 		if _, ok := plain[key]; ok {
 			t.Errorf("unexpected %s in plain log: %+v", key, plain)
 		}
@@ -28,8 +30,25 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 		t.Errorf("service = %v, want console", plain["service"])
 	}
 
+	// nil context 也不应 panic 或写入关联字段。
 	buf.Reset()
-	ctx := WithRequestID(context.Background(), "req-42")
+	//nolint:staticcheck // SA1012: 显式测试传入 nil context 时的防崩溃行为
+	logger.InfoContext(nil, "nil-ctx")
+	nilEntry := decodeSingleJSON(t, buf.Bytes())
+	if _, ok := nilEntry["trace_id"]; ok {
+		t.Errorf("unexpected trace_id for nil ctx: %+v", nilEntry)
+	}
+
+	buf.Reset()
+	traceID, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+	ctx = WithRequestID(ctx, "req-42")
 	ctx = WithClientRequestID(ctx, "gw-77")
 	ctx = WithTenantID(ctx, 7)
 	ctx = WithJob(ctx, 99, "link.risk_scan", 7)
@@ -54,6 +73,12 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 	if entry["job_kind"] != "link.risk_scan" {
 		t.Errorf("job_kind = %v, want link.risk_scan", entry["job_kind"])
 	}
+	if entry["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("trace_id = %v, want 4bf92f3577b34da6a3ce929d0e0e4736", entry["trace_id"])
+	}
+	if entry["span_id"] != "00f067aa0ba902b7" {
+		t.Errorf("span_id = %v, want 00f067aa0ba902b7", entry["span_id"])
+	}
 	if entry["component"] != "risk" {
 		t.Errorf("component = %v, want risk", entry["component"])
 	}
@@ -64,6 +89,7 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 	grouped := decodeSingleJSON(t, buf.Bytes())
 	if grouped["request_id"] != "req-42" || grouped["tenant_id"] != float64(7) ||
 		grouped["job_id"] != float64(99) || grouped["job_kind"] != "link.risk_scan" ||
+		grouped["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" || grouped["span_id"] != "00f067aa0ba902b7" ||
 		grouped["service"] != "console" || grouped["component"] != "risk" {
 		t.Errorf("top-level fields missing after WithGroup: %+v", grouped)
 	}
@@ -73,6 +99,9 @@ func TestContextHandlerExtractsAndPreservesFields(t *testing.T) {
 	}
 	if _, leaked := meta["request_id"]; leaked {
 		t.Errorf("request_id should stay at top level, not inside meta: %+v", meta)
+	}
+	if _, leaked := meta["trace_id"]; leaked {
+		t.Errorf("trace_id should stay at top level, not inside meta: %+v", meta)
 	}
 }
 

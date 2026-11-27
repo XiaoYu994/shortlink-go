@@ -2,8 +2,8 @@
 
 - 日期：2026-11-24
 - 来源：架构审查（对照 Stripe Canonical Log Lines、Caddy / Envoy 数据面采样、Prometheus / Kubernetes、Go `log/slog` 与 OpenTelemetry 最佳实践）
-- 状态：Phase A / B 已落地（Phase C 待在路线图 [阶段 16](../roadmap.md#阶段-16租户隔离兜底与可观测性待立-adr) 与 OpenTelemetry 合流）
-- 关联：[ADR 0005](../adr/0005-prometheus-before-tracing.md)、[ADR 0023](../adr/0023-audit-logs.md)、[internal/httpx/logging.go](../../internal/httpx/logging.go)、[internal/httpx/requestid.go](../../internal/httpx/requestid.go)、[internal/config/config.go](../../internal/config/config.go)
+- 状态：Phase A / B / C 已全部落地（Phase C 已于 2026-11-27 随阶段 16 [ADR 0032](../adr/0032-opentelemetry-tracing-and-log-correlation.md) 合流）
+- 关联：[ADR 0005](../adr/0005-prometheus-before-tracing.md)、[ADR 0023](../adr/0023-audit-logs.md)、[ADR 0032](../adr/0032-opentelemetry-tracing-and-log-correlation.md)、[internal/httpx/logging.go](../../internal/httpx/logging.go)、[internal/httpx/requestid.go](../../internal/httpx/requestid.go)、[internal/logx/context.go](../../internal/logx/context.go)、[internal/config/config.go](../../internal/config/config.go)
 
 ## 现状评估
 
@@ -90,8 +90,8 @@
      - 本地 `text` 格式接入 `github.com/lmittmann/tint` 彩色可读终端输出（自动识别 TTY / `NO_COLOR`），`json` 保持严格结构化；
      - 合并 `httpx` 日志与指标中间件，升级为 Canonical Log Line（`logx.RequestEvent`）：复用 `routePattern`、补充 `bytes` / `ip`，收集 `tenant_id`、`actor`、`cache`、`retry_after`、`err_msg`，并按 `>=500 -> Error`、`>=400` / 慢请求 `-> Warn`、`2xx/3xx` 与 `redirector` 404 `-> Info` 分级；
      - 为 `redirector` 增加 `ACCESS_LOG_SAMPLE_RATE` 与 `ACCESS_LOG_SLOW_THRESHOLD` 慢请求/异常全保采样策略。
-   - **Phase C（与阶段 16 OpenTelemetry 合流）**：
-     - 在统一 `ContextHandler` 内接入 `trace.SpanFromContext(ctx)`，自动输出 `trace_id`、`span_id`，配合已有 `request_id`，打通 **审计日志 <-> 进程结构化日志 <-> 分布式链路追踪**。
+   - **Phase C（已落地，[ADR 0032](../adr/0032-opentelemetry-tracing-and-log-correlation.md)）**：
+     - 在统一 `logx.contextHandler` 内接入 `trace.SpanContextFromContext(ctx)`，自动在顶层输出 `trace_id`、`span_id`，配合已有 `request_id`，打通 **审计日志 <-> 进程结构化日志 <-> 分布式链路追踪**。
 
 ## 防再犯护栏
 

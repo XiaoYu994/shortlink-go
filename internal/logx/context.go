@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // fieldsContextKey 用空结构体做 context key，避免与其他包产生键冲突。
@@ -113,8 +115,7 @@ type handlerOp struct {
 }
 
 /*
-contextHandler 在 Handle 阶段从 ctx 提取 request_id、tenant_id、job_id、job_kind 写入记录。
-阶段 16 引入 OpenTelemetry 后，只需在这里追加 trace_id 与 span_id 提取，业务代码零侵入。
+contextHandler 在 Handle 阶段从 ctx 提取 request_id、tenant_id、job_id、job_kind 及 OTel trace_id/span_id 写入记录。
 
 当调用方使用 WithGroup 时，通过 root + ops 回放保证关联 ID 始终落在顶层，不会下沉到子组内；
 未开组时直接走 fast 路径，零额外 handler 构造开销。
@@ -131,8 +132,16 @@ func (h contextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h contextHandler) Handle(ctx context.Context, rec slog.Record) error {
-	var buf [5]slog.Attr
+	var buf [7]slog.Attr
 	ctxAttrs := appendContextAttrs(buf[:0], FieldsFrom(ctx))
+	if ctx != nil {
+		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+			ctxAttrs = append(ctxAttrs,
+				slog.String("trace_id", sc.TraceID().String()),
+				slog.String("span_id", sc.SpanID().String()),
+			)
+		}
+	}
 	if len(ctxAttrs) == 0 {
 		return h.fast.Handle(ctx, rec)
 	}

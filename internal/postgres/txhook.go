@@ -14,8 +14,8 @@ import (
 	"shortlink/internal/webhook"
 )
 
-const enqueueInvitationEmailSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts)
-VALUES ($1, $2, $3::jsonb, $4, $5)
+const enqueueInvitationEmailSQL = `INSERT INTO jobs (kind, tenant_id, payload, dedup_key, max_attempts, traceparent)
+VALUES ($1, $2, $3::jsonb, $4, $5, $6)
 ON CONFLICT (kind, dedup_key) WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running')
 DO NOTHING`
 
@@ -271,6 +271,7 @@ func InvitationEmailHook() TxHook {
 			emailPayload,
 			"invitation:"+strconv.FormatInt(e.Invitation.ID, 10),
 			job.DefaultMaxAttempts,
+			traceparentFromContext(ctx),
 		); err != nil {
 			return fmt.Errorf("enqueue email: %w", err)
 		}

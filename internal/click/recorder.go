@@ -10,9 +10,15 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
+	clickTracerName = "shortlink/click"
+
 	defaultBuffer       = 1024
 	defaultBatchSize    = 100
 	defaultInterval     = time.Second
@@ -262,18 +268,30 @@ func (r *Recorder) flush(batch []Click) {
 	if len(batch) == 0 {
 		return
 	}
-	if ctx := r.draining(); ctx != nil {
-		err := r.write(ctx, batch)
-		r.observeWrite(len(batch), err)
+	baseCtx := r.draining()
+	draining := baseCtx != nil
+	var cancel context.CancelFunc
+	if !draining {
+		baseCtx, cancel = context.WithTimeout(context.Background(), r.writeTimeout)
+		defer cancel()
+	}
+	ctx, span := otel.Tracer(clickTracerName).Start(baseCtx, "click.flush",
+		trace.WithAttributes(attribute.Int("click.batch_size", len(batch))),
+	)
+	err := r.write(ctx, batch)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
+
+	r.observeWrite(len(batch), err)
+	if draining {
 		r.noteCloseErr(err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.writeTimeout)
-	defer cancel()
-	err := r.write(ctx, batch)
-	r.observeWrite(len(batch), err)
 	if err != nil {
-		r.logger.Error("flush clicks", "err", err, "clicks", len(batch))
+		r.logger.ErrorContext(ctx, "flush clicks", "err", err, "clicks", len(batch))
 	}
 }
 

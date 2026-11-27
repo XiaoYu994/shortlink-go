@@ -14,11 +14,18 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"shortlink/internal/logx"
 )
 
 const (
+	jobTracerName = "shortlink/job"
+
 	DefaultConcurrency     = 8
 	DefaultMaxPerTenant    = 4
 	DefaultPollInterval    = 200 * time.Millisecond
@@ -342,27 +349,32 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 	r.inFlight.WithLabelValues(j.Kind).Inc()
 	defer r.inFlight.WithLabelValues(j.Kind).Dec()
 
+	execCtx, span := startJobSpan(logx.WithJob(parentCtx, j.ID, j.Kind, jobTenantID(j)), j)
+	defer span.End()
+
 	start := time.Now()
-	err := r.invokeHandler(parentCtx, j)
+	err := r.invokeHandler(execCtx, j)
 	r.duration.WithLabelValues(j.Kind).Observe(time.Since(start).Seconds())
 
-	// 回写结果脱离 inFlightCtx 的普通取消，给数据库短超时收尾，同时保留任务关联字段进日志。
-	commitCtx, cancel := context.WithTimeout(logx.WithJob(context.Background(), j.ID, j.Kind, jobTenantID(j)), CommitTimeout)
+	// 回写结果脱离 inFlightCtx 的普通取消，给数据库短超时收尾，同时保留任务关联字段与 trace span。
+	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(execCtx), CommitTimeout)
 	defer cancel()
 
 	switch {
 	case err == nil:
 		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion); cerr != nil {
-			r.logCommitError(commitCtx, "complete job", j, cerr)
+			r.logCommitError(commitCtx, span, "complete job", j, cerr)
 			return
 		}
+		span.SetAttributes(attribute.String("shortlink.job.result", resultDone))
 		r.processed.WithLabelValues(j.Kind, resultDone).Inc()
 
 	case IsSkipped(err):
 		if cerr := r.queue.Complete(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion); cerr != nil {
-			r.logCommitError(commitCtx, "complete skipped job", j, cerr)
+			r.logCommitError(commitCtx, span, "complete skipped job", j, cerr)
 			return
 		}
+		span.SetAttributes(attribute.String("shortlink.job.result", resultSkipped))
 		r.processed.WithLabelValues(j.Kind, resultSkipped).Inc()
 
 	case isDeferred(err):
@@ -375,9 +387,10 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 			LastError:      err.Error(),
 			ConsumeAttempt: false,
 		}); rerr != nil {
-			r.logCommitError(commitCtx, "defer job", j, rerr)
+			r.logCommitError(commitCtx, span, "defer job", j, rerr)
 			return
 		}
+		span.SetAttributes(attribute.String("shortlink.job.result", resultRetry))
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 
 	case parentCtx.Err() != nil && !IsPermanent(err):
@@ -389,17 +402,21 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 			LastError:      "worker shutdown canceled in-flight job",
 			ConsumeAttempt: false,
 		}); rerr != nil {
-			r.logCommitError(commitCtx, "requeue job on shutdown", j, rerr)
+			r.logCommitError(commitCtx, span, "requeue job on shutdown", j, rerr)
 			return
 		}
+		span.SetAttributes(attribute.String("shortlink.job.result", resultRetry))
 		r.logger.WarnContext(commitCtx, "job requeued on worker shutdown", "attempts", j.Attempts)
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 
 	case IsPermanent(err) || j.Attempts >= j.MaxAttempts:
 		if derr := r.queue.Dead(commitCtx, j.ID, r.opts.WorkerID, j.LockVersion, err.Error()); derr != nil {
-			r.logCommitError(commitCtx, "mark job dead", j, derr)
+			r.logCommitError(commitCtx, span, "mark job dead", j, derr)
 			return
 		}
+		span.SetAttributes(attribute.String("shortlink.job.result", resultDead))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		r.logger.WarnContext(commitCtx, "job moved to dead", "attempts", j.Attempts, "err", err)
 		r.processed.WithLabelValues(j.Kind, resultDead).Inc()
 
@@ -416,16 +433,49 @@ func (r *Runner) executeJob(parentCtx context.Context, j Job) {
 			LastError:      err.Error(),
 			ConsumeAttempt: true,
 		}); rerr != nil {
-			r.logCommitError(commitCtx, "retry job", j, rerr)
+			r.logCommitError(commitCtx, span, "retry job", j, rerr)
 			return
 		}
+		span.SetAttributes(attribute.String("shortlink.job.result", resultRetry))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		r.logger.WarnContext(commitCtx, "job scheduled for retry",
 			"attempts", j.Attempts, "delay", delay, "err", err)
 		r.processed.WithLabelValues(j.Kind, resultRetry).Inc()
 	}
 }
 
-func (r *Runner) logCommitError(ctx context.Context, op string, j Job, err error) {
+func startJobSpan(ctx context.Context, j Job) (context.Context, trace.Span) {
+	attrs := make([]attribute.KeyValue, 0, 5)
+	attrs = append(attrs,
+		attribute.Int64("shortlink.job.id", j.ID),
+		attribute.String("shortlink.job.kind", j.Kind),
+		attribute.Int("shortlink.job.attempt", j.Attempts),
+	)
+	if tid := jobTenantID(j); tid > 0 {
+		attrs = append(attrs, attribute.Int64("shortlink.tenant_id", tid))
+	}
+
+	spanOpts := []trace.SpanStartOption{
+		trace.WithNewRoot(),
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(attrs...),
+	}
+	if j.Traceparent != "" {
+		extracted := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": j.Traceparent})
+		if producerSC := trace.SpanContextFromContext(extracted); producerSC.IsValid() {
+			spanOpts = append(spanOpts,
+				trace.WithLinks(trace.Link{SpanContext: producerSC}),
+				trace.WithAttributes(attribute.String("shortlink.job.source_trace_id", producerSC.TraceID().String())),
+			)
+		}
+	}
+	return otel.Tracer(jobTracerName).Start(ctx, "job.process "+j.Kind, spanOpts...)
+}
+
+func (r *Runner) logCommitError(ctx context.Context, span trace.Span, op string, j Job, err error) {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 	if errors.Is(err, ErrLeaseLost) {
 		r.logger.WarnContext(ctx, "job lease lost before commit",
 			"op", op, "lock_version", j.LockVersion)
@@ -450,13 +500,13 @@ func isDeferred(err error) bool {
 invokeHandler 在独立超时和 recover 保护下执行任务处理器。
 handler panic 不会拖垮整个 worker 进程，而是转换成普通错误按重试/死信处理。
 */
-func (r *Runner) invokeHandler(parentCtx context.Context, j Job) (err error) {
+func (r *Runner) invokeHandler(execCtx context.Context, j Job) (err error) {
 	handler, ok := r.handlers[j.Kind]
 	if !ok {
 		return Permanent(fmt.Errorf("unknown job kind %q", j.Kind))
 	}
 
-	jobCtx, cancel := context.WithTimeout(logx.WithJob(parentCtx, j.ID, j.Kind, jobTenantID(j)), r.opts.JobTimeout)
+	jobCtx, cancel := context.WithTimeout(execCtx, r.opts.JobTimeout)
 	defer cancel()
 
 	defer func() {

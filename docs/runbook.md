@@ -168,6 +168,35 @@ make prometheus
 
 Prometheus UI：http://localhost:9090。抓取目标是宿主机上两个进程的 `/metrics`，端口来自 `ADDR` 和 `CONSOLE_ADDR`（默认 `8080` 和 `8081`，job 分别是 `redirector` 和 `console`）。两个进程要用 `make run-redirector` / `make run-console` 跑在宿主机。改了端口要重新执行 `make prometheus`，容器才会换上新的抓取配置。两个 job 的指标名相同，PromQL 里用 `job` 区分。如果本机已经有 PostgreSQL 占用 5432，不要用 `make up` 或 `make deps-up` 启动 compose 的 PostgreSQL；用 `make prometheus` 只启动 Prometheus。
 
+## 分布式追踪（OpenTelemetry + Jaeger）
+
+默认情况下三个进程不开启追踪（`OTEL_EXPORTER_OTLP_ENDPOINT` 留空即为零开销 Noop）。需要排查请求内部耗时或跨进程异步任务链路时：
+
+```bash
+# 1. 按需启动本地 Jaeger（UI :16686，OTLP HTTP 接收 :4318）
+make tracing
+
+# 2. 在 .env 或进程环境配置导出端点与采样率（建议生产同时开启 LOG_FORMAT=json）
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_TRACES_SAMPLE_RATE=1
+export LOG_FORMAT=json
+```
+
+重启 `make run-redirector`、`make run-console`、`make run-worker` 后，可显式携带 W3C `traceparent` 发起创建与跳转请求：
+
+```bash
+curl -i -X POST localhost:8081/api/v1/links \
+  -H 'Authorization: Bearer slk_...' \
+  -H 'Content-Type: application/json' \
+  -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
+  -d '{"url":"https://example.com/traced"}'
+```
+
+排障联查方式：
+
+- **Jaeger UI（http://localhost:16686）**：按 `service=console` / `redirector` / `console-worker` 或直接搜索 `trace_id=4bf92f3577b34da6a3ce929d0e0e4736` 查看 `http -> cache -> singleflight -> store -> pg` 耗时分解；异步 `job.process *` 根 Span 的 `References/Links` 栏会指向入队源请求。
+- **日志与审计联查**：JSON 日志顶层自动附带 `trace_id`、`span_id` 与服务端 `request_id`，可与 `audit_logs.request_id` 互相跳转。详情见 [ADR 0032](adr/0032-opentelemetry-tracing-and-log-correlation.md)。
+
 告警规则在 `deploy/alerts.yml`，`make prometheus` 生成的配置会加载它，每 15 秒评估一次，当前共配置 11 条告警规则：`ShortlinkClicksLost`、`ShortlinkClickRecorderStopped`（写入协程 panic 停摆）、`ShortlinkHigh5xxRate`（>1%）、`ShortlinkRedirectHighLatency`（P99 > 200ms）、`ShortlinkCacheFallback`、`ShortlinkCacheShedding`、`ShortlinkJobsBacklog`、`ShortlinkJobsDead`、`ShortlinkWebhookHighFailureRate`、`ShortlinkWebhookAutoDisabled` 与 `ShortlinkWorkerDown`。没有接 Alertmanager，不会主动通知，到 http://localhost:9090/alerts 看。
 
 ## 基线压测（无缓存）

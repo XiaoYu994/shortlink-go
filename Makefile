@@ -16,7 +16,7 @@ console_ops_port := $(if $(CONSOLE_OPS_ADDR),$(lastword $(subst :, ,$(CONSOLE_OP
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 .PHONY: help run-redirector run-console run-worker build console migrate test test-unit cover vet lint fmt fmt-check check arch-check verify selfcheck \
-	test-db test-integration smoke deps-up up stack prometheus prometheus-config down psql redis-cli \
+	test-db test-integration smoke deps-up up stack tracing prometheus prometheus-config down psql redis-cli \
 	web-install web-dev web-build web-fmt web-fmt-check web-lint web-test web-check
 
 help: ## 列出所有命令
@@ -80,6 +80,16 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 		for forbid in "$$@"; do \
 			if printf '%s\n' "$$deps" | grep -Eq "$$forbid"; then \
 				echo "arch-check 失败: $$pkg 不应依赖 $$forbid" >&2; \
+				exit 1; \
+			fi; \
+		done; \
+	}; \
+	check_direct_absent() { \
+		pkg=$$1; shift; \
+		imports=$$(go list -f '{{join .Imports "\n"}}' "$$pkg"); \
+		for forbid in "$$@"; do \
+			if printf '%s\n' "$$imports" | grep -Eq "$$forbid"; then \
+				echo "arch-check 失败: $$pkg 不应直接引入 $$forbid" >&2; \
 				exit 1; \
 			fi; \
 		done; \
@@ -154,6 +164,16 @@ arch-check: ## 校验公开面与底座包的静态依赖边界（ADR 0024）
 		'^github\.com/redis/go-redis' \
 		'^github\.com/coreos/go-oidc' \
 		'^golang\.org/x/oauth2'; \
+	check_internal_allow ./internal/tracex; \
+	for p in $$(go list ./internal/... | grep -Fxv 'shortlink/internal/tracex'); do \
+		check_absent "$$p" '^go\.opentelemetry\.io/otel/(sdk|exporters)(/|$$)'; \
+	done; \
+	for p in ./internal/ratelimit ./internal/safehttp ./internal/mailer ./internal/link ./internal/tenant ./internal/idgen ./internal/audit; do \
+		check_absent "$$p" '^go\.opentelemetry\.io/'; \
+	done; \
+	for p in ./internal/config ./internal/identity ./internal/sms; do \
+		check_direct_absent "$$p" '^go\.opentelemetry\.io/'; \
+	done; \
 	check_internal_allow ./internal/sms \
 		shortlink/internal/safehttp \
 		shortlink/internal/ratelimit \
@@ -218,6 +238,9 @@ prometheus-config: ## 按两个监听地址生成 Prometheus 抓取配置
 
 prometheus: prometheus-config ## 启动本地 Prometheus，抓取端口跟随 ADDR / CONSOLE_ADDR
 	docker compose up -d --force-recreate --no-deps prometheus
+
+tracing: ## 启动可选本地 Jaeger（UI :16686，OTLP HTTP :4318）
+	docker compose --profile tracing up -d jaeger
 
 down: ## 停止依赖（数据保留；加 -v 才会清空）
 	docker compose down

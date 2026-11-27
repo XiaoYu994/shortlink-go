@@ -16,6 +16,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"shortlink/internal/audit"
 	"shortlink/internal/cache"
@@ -259,4 +266,70 @@ func TestRiskHandlerOutcomes(t *testing.T) {
 			t.Errorf("handler err = %v, want Defer(delay>0)", err)
 		}
 	})
+}
+
+func TestRiskTracingScanSpanDoesNotLeakTraceparent(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		_ = tp.Shutdown(t.Context())
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+	})
+
+	var gotTraceparent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hello clean page"))
+	}))
+	defer srv.Close()
+
+	client := NewSafeHTTPClient(safehttp.ClientOptions{
+		Timeout:          time.Second,
+		AllowedHostPorts: []string{srv.Listener.Addr().String()},
+	})
+	h := NewHandler(HandlerOptions{
+		Scanner: NewRuleScanner(RuleScannerOptions{HTTPClient: client}),
+		Banner:  &fakeBanner{},
+	})
+
+	b, _ := json.Marshal(ScanPayload{Code: "AbC12345", URL: srv.URL})
+	ctx, root := otel.Tracer("test").Start(context.Background(), "job.process link.risk_scan")
+	if err := h(ctx, job.Job{ID: 1, Kind: job.KindLinkRiskScan, Payload: b}); err != nil {
+		t.Fatalf("handler err = %v", err)
+	}
+	root.End()
+
+	if gotTraceparent != "" {
+		t.Errorf("risk scan outbound request leaked traceparent header %q", gotTraceparent)
+	}
+
+	var foundScan bool
+	for _, sp := range exp.GetSpans() {
+		if sp.Name != "risk.scan" {
+			continue
+		}
+		foundScan = true
+		if sp.SpanKind != trace.SpanKindClient {
+			t.Errorf("span kind = %v, want client", sp.SpanKind)
+		}
+		var sawCacheMiss, sawSafe bool
+		for _, a := range sp.Attributes {
+			if a.Key == attribute.Key("risk.cache.hit") && !a.Value.AsBool() {
+				sawCacheMiss = true
+			}
+			if a.Key == attribute.Key("risk.verdict.unsafe") && !a.Value.AsBool() {
+				sawSafe = true
+			}
+		}
+		if !sawCacheMiss || !sawSafe {
+			t.Errorf("unexpected risk.scan attrs: %+v", sp.Attributes)
+		}
+	}
+	if !foundScan {
+		t.Error("expected risk.scan span")
+	}
 }

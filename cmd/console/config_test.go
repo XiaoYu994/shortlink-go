@@ -93,6 +93,8 @@ func baseConsoleTestEnv() map[string]string {
 		"SMTP_TIMEOUT":                      "",
 		"FEATURE_ANALYTICS":                 "",
 		"FEATURE_RISK_SCAN":                 "",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":       "",
+		"OTEL_TRACES_SAMPLE_RATE":           "",
 	}
 }
 
@@ -108,6 +110,7 @@ func defaultBaseConfig(addr string) config.BaseConfig {
 		LogLevel:          slog.LevelInfo,
 		LogFormat:         config.LogFormatText,
 		CacheFetchTimeout: cache.DefaultFetchTimeout,
+		Tracing:           config.DefaultTracingConfig(),
 	}
 }
 

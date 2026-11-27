@@ -1,7 +1,7 @@
 /*
 Package httpx 提供零业务依赖的通用 HTTP 底座（ADR 0019 第 3 步）。
 
-包含中间件链、请求编号（及 slog 注入）、访问日志、HTTP 指标、panic 兜底、请求超时、
+包含中间件链、请求编号（及 slog 注入）、访问日志、HTTP 指标、OpenTelemetry HTTP 入口追踪、panic 兜底、请求超时、
 /healthz /readyz /metrics /debug/pprof/ 运维端点、客户端 IP 提取与通用 JSON/错误响应。
 本包不 import 任何业务领域包，由 redirector 和 console 的 HTTP 包复用。
 */
@@ -17,6 +17,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
 
 	"shortlink/internal/logx"
 )
@@ -179,14 +180,24 @@ func (s *Server) observe(mux *http.ServeMux) middleware {
 				ctx = withClientIP(ctx, ip)
 			}
 			r = r.WithContext(ctx)
+
+			route := routePattern(mux, r)
+			var span trace.Span
+			if !isProbeRequest(r) {
+				r, span = startRequestSpan(r, route)
+			}
+
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
 			defer func() {
 				dur := time.Since(start)
 				status := responseStatus(sw, r)
-				route := routePattern(mux, r)
+				snap := ev.Snapshot()
 				s.metrics.observe(route, r.Method, status, dur)
-				s.accessLog.log(r.Context(), r, route, ip, status, sw.bytes, dur, ev.Snapshot())
+				s.accessLog.log(r.Context(), r, route, ip, status, sw.bytes, dur, snap)
+				if span != nil {
+					finishRequestSpan(span, status, sw.bytes, snap)
+				}
 			}()
 			next.ServeHTTP(sw, r)
 		})

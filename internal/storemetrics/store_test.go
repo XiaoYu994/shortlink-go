@@ -9,6 +9,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"shortlink/internal/link"
 )
@@ -299,4 +304,48 @@ func TestNewReaderRecordsGetMetrics(t *testing.T) {
 		t.Errorf("operations{get,success} = %v, want 1", v)
 	}
 	assertDurationResult(t, reg, operationGet, resultSuccess)
+}
+
+func TestStoreMetricsTracingSpansAndErrors(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(t.Context())
+		otel.SetTracerProvider(noop.NewTracerProvider())
+	})
+
+	wantLink := &link.Link{Code: "r01", URL: "https://example.com"}
+	s := New(stubStore{link: wantLink}, prometheus.NewRegistry())
+	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
+	if _, err := s.GetByCode(ctx, "r01"); err != nil {
+		t.Fatalf("GetByCode: %v", err)
+	}
+
+	sNotFound := New(stubStore{err: link.ErrNotFound}, prometheus.NewRegistry())
+	_, _ = sNotFound.GetByCode(ctx, "missing")
+
+	sErr := New(stubStore{err: errors.New("db down")}, prometheus.NewRegistry())
+	_ = sErr.Create(ctx, &link.Link{})
+
+	sTimeout := New(stubStore{err: context.DeadlineExceeded}, prometheus.NewRegistry())
+	_, _ = sTimeout.GetByCode(ctx, "slow")
+	root.End()
+
+	spans := exp.GetSpans()
+	if len(spans) != 5 {
+		t.Fatalf("spans = %d, want 5", len(spans))
+	}
+	if spans[0].Name != "store.get" || spans[0].Status.Code != codes.Unset {
+		t.Errorf("success span = (%q, %v)", spans[0].Name, spans[0].Status.Code)
+	}
+	if spans[1].Name != "store.get" || spans[1].Status.Code != codes.Unset {
+		t.Errorf("not_found span should stay Unset, got %v", spans[1].Status.Code)
+	}
+	if spans[2].Name != "store.create" || spans[2].Status.Code != codes.Error {
+		t.Errorf("db error span = (%q, %v), want Error", spans[2].Name, spans[2].Status.Code)
+	}
+	if spans[3].Name != "store.get" || spans[3].Status.Code != codes.Error {
+		t.Errorf("timeout span = (%q, %v), want Error", spans[3].Name, spans[3].Status.Code)
+	}
 }

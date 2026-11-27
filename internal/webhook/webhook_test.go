@@ -12,6 +12,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"shortlink/internal/job"
 	"shortlink/internal/safehttp"
@@ -350,4 +357,70 @@ func TestHandlerBehaviorMatrix(t *testing.T) {
 			t.Fatalf("500 with recordErr = (%v, delay=%v, ok=%v), want RetryAfter in [8s,10s]", err500, delay, ok)
 		}
 	})
+}
+
+func TestWebhookTracingDoesNotLeakTraceparentHeader(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		_ = tp.Shutdown(t.Context())
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+	})
+
+	key, _ := ParseMasterKeyHex(strings.Repeat("cd", 32))
+	secretCipher, _ := NewSecretCipher(key)
+	secretPlain, _, _ := GenerateSecret()
+	ct, _ := secretCipher.Encrypt(9, secretPlain)
+
+	var gotTraceparent string
+	var statusToReturn int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		w.WriteHeader(statusToReturn)
+	}))
+	defer srv.Close()
+
+	store := &fakeDeliveryStore{target: DeliveryTarget{ID: 5, TenantID: 9, URL: srv.URL, Enabled: true, SecretCiphertext: ct}}
+	h := NewHandler(HandlerOptions{
+		Store:      store,
+		HTTPClient: safehttp.NewClient(safehttp.ClientOptions{Timeout: time.Second, DisableRedirects: true, AllowedHostPorts: []string{srv.Listener.Addr().String()}}),
+		Cipher:     secretCipher,
+	})
+	payload, _ := json.Marshal(DeliverPayload{WebhookID: 5, EventID: "evt_trace", Event: EventLinkCreated, OccurredAt: time.Now().UTC(), Data: json.RawMessage(`{"code":"abc"}`)})
+
+	ctx, root := otel.Tracer("test").Start(context.Background(), "job.process webhook.deliver")
+	statusToReturn = http.StatusOK
+	if err := h(ctx, job.Job{ID: 21, Attempts: 1, MaxAttempts: 6, Payload: payload}); err != nil {
+		t.Fatalf("200 handler err = %v", err)
+	}
+	if gotTraceparent != "" {
+		t.Errorf("outbound webhook request leaked traceparent header %q", gotTraceparent)
+	}
+
+	statusToReturn = http.StatusInternalServerError
+	_ = h(ctx, job.Job{ID: 22, Attempts: 1, MaxAttempts: 6, Payload: payload})
+	root.End()
+
+	spans := exp.GetSpans()
+	var sawOK, sawErr bool
+	for _, sp := range spans {
+		if sp.Name != "webhook.http_deliver" {
+			continue
+		}
+		if sp.SpanKind != trace.SpanKindClient {
+			t.Errorf("span kind = %v, want client", sp.SpanKind)
+		}
+		switch sp.Status.Code {
+		case codes.Unset:
+			sawOK = true
+		case codes.Error:
+			sawErr = true
+		}
+	}
+	if !sawOK || !sawErr {
+		t.Errorf("expected both Unset and Error webhook.http_deliver spans: ok=%v err=%v", sawOK, sawErr)
+	}
 }

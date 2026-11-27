@@ -29,6 +29,7 @@ import (
 	"shortlink/internal/pgredirect"
 	"shortlink/internal/redirector"
 	"shortlink/internal/storemetrics"
+	"shortlink/internal/tracex"
 )
 
 func main() {
@@ -45,6 +46,30 @@ func run() error {
 		return err
 	}
 	logger, levelVar := cfg.NewLoggerWithService(os.Stdout, "redirector")
+
+	initCtx, initCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownTracing, tracingEnabled, err := tracex.Init(initCtx, tracex.Options{
+		ServiceName: "redirector",
+		Endpoint:    cfg.Tracing.Endpoint,
+		SampleRate:  cfg.Tracing.SampleRate,
+		Logger:      logger,
+	})
+	initCancel()
+	if err != nil {
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	defer func() {
+		traceCtx, traceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer traceCancel()
+		if err := shutdownTracing(traceCtx); err != nil {
+			logger.Error("shutdown tracing", "err", err)
+		}
+	}()
+	if tracingEnabled {
+		logger.Info("tracing enabled", "endpoint", logx.RedactURL(cfg.Tracing.Endpoint), "sample_rate", cfg.Tracing.SampleRate)
+	} else {
+		logger.Info("tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT is not set")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	db, err := pgdb.Open(ctx, cfg.DatabaseURL, cfg.Pool)

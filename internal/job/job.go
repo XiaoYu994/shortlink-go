@@ -43,6 +43,7 @@ type Job struct {
 	TenantID    *int64
 	Payload     []byte
 	DedupKey    string
+	Traceparent string
 	Status      string
 	Attempts    int
 	MaxAttempts int

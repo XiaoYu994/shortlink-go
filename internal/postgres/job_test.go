@@ -8,9 +8,16 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"shortlink/internal/identity"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
+	"shortlink/internal/webhook"
 )
 
 type riskScanPayload struct {
@@ -611,5 +618,84 @@ func TestCleanupDeadJobsAndInvitations(t *testing.T) {
 	var keptInvID int64
 	if err := store.db.QueryRowContext(ctx, `SELECT id FROM invitations`).Scan(&keptInvID); err != nil || keptInvID != activeInv.ID {
 		t.Errorf("remaining invitation = (%d, %v), want %d", keptInvID, err, activeInv.ID)
+	}
+}
+
+func TestJobTraceparentPropagationAndConstraint(t *testing.T) {
+	store, tenantID := newTestStore(t)
+	ctx := testAuditCtx(context.Background())
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(t.Context())
+		otel.SetTracerProvider(noop.NewTracerProvider())
+	})
+
+	// 1. 无 span 时 traceparent 落库为空串。
+	if _, err := store.EnqueueJob(ctx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID}); err != nil {
+		t.Fatalf("EnqueueJob without span: %v", err)
+	}
+	claimedNoSpan, err := store.Claim(ctx, job.ClaimParams{Limit: 10, Lease: time.Minute, LockedBy: "tp-worker"})
+	if err != nil || len(claimedNoSpan) != 1 {
+		t.Fatalf("Claim without span = (%d, %v)", len(claimedNoSpan), err)
+	}
+	if claimedNoSpan[0].Traceparent != "" {
+		t.Errorf("Traceparent without span = %q, want empty", claimedNoSpan[0].Traceparent)
+	}
+	if err := store.Complete(ctx, claimedNoSpan[0].ID, "tp-worker", claimedNoSpan[0].LockVersion); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// 2. 带有效 span 时，所有入队路径均持久化合法 W3C traceparent。
+	tracedCtx, span := otel.Tracer("test").Start(ctx, "enqueue-parent")
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(tracedCtx, carrier)
+	wantTP := carrier.Get("traceparent")
+	if wantTP == "" {
+		t.Fatal("expected non-empty injected traceparent")
+	}
+
+	if _, err := store.EnqueueJob(tracedCtx, EnqueueJobParams{Kind: job.KindLinkRiskScan, TenantID: &tenantID}); err != nil {
+		t.Fatalf("EnqueueJob traced: %v", err)
+	}
+	sub := seedTestWebhook(t, store, tenantID, "https://example.com/wh", webhook.EventLinkCreated)
+	if _, err := store.EnqueueWebhookTest(tracedCtx, tenantID, sub.ID); err != nil {
+		t.Fatalf("EnqueueWebhookTest: %v", err)
+	}
+	l := mustLink(t, "https://example.com/traced", tenantID)
+	if err := store.Create(tracedCtx, l); err != nil {
+		t.Fatalf("Create link: %v", err)
+	}
+	if err := store.Delete(tracedCtx, tenantID, l.Code); err != nil {
+		t.Fatalf("Delete link: %v", err)
+	}
+	if _, err := store.CreateInvitation(tracedCtx, CreateInvitationParams{
+		TenantID: tenantID,
+		Email:    "traced-invite@example.com",
+		Role:     identity.RoleMember,
+	}); err != nil {
+		t.Fatalf("CreateInvitation: %v", err)
+	}
+	span.End()
+
+	claimed, err := store.Claim(ctx, job.ClaimParams{Limit: 20, Lease: time.Minute, LockedBy: "tp-worker"})
+	if err != nil {
+		t.Fatalf("Claim traced jobs: %v", err)
+	}
+	if len(claimed) != 6 {
+		t.Fatalf("claimed = %d, want 6 (direct + webhook test + risk_scan + webhook fanout + purge_stats + invitation.email)", len(claimed))
+	}
+	for _, j := range claimed {
+		if j.Traceparent != wantTP {
+			t.Errorf("job %d (%s) traceparent = %q, want %q", j.ID, j.Kind, j.Traceparent, wantTP)
+		}
+	}
+
+	// 3. 超长 traceparent 应触发数据库长度检查约束。
+	_, err = store.db.ExecContext(ctx, `INSERT INTO jobs (kind, traceparent) VALUES ('link.risk_scan', repeat('a', 129))`)
+	if !isConstraintViolation(err, "23514", "ck_jobs_traceparent_length") {
+		t.Errorf("oversized traceparent err = %v, want ck_jobs_traceparent_length", err)
 	}
 }

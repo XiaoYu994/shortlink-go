@@ -23,6 +23,8 @@ func (cfg BaseConfig) LogValue() slog.Value {
 		slog.String("log_level", cfg.LogLevel.String()),
 		slog.String("log_format", cfg.LogFormat),
 		slog.Duration("cache_fetch_timeout", cfg.CacheFetchTimeout),
+		slog.String("otel_endpoint", logx.RedactURL(cfg.Tracing.Endpoint)),
+		slog.Float64("otel_sample_rate", cfg.Tracing.SampleRate),
 	)
 }
 

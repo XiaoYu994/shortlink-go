@@ -12,6 +12,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
 	"shortlink/internal/link"
@@ -19,6 +23,8 @@ import (
 )
 
 const (
+	cacheTracerName = "shortlink/cache"
+
 	// keyPrefix 把缓存 key 和 Redis 里其他应用的 key 隔开。
 	keyPrefix = "shortlink:link:"
 	/*
@@ -283,11 +289,19 @@ GetByCode 未命中或 Redis 故障时回源。负缓存的 value 是 JSON null�
 每个请求按自己的读取结果计数，包括等在 singleflight 里的；计数和耗时都在 readCache 里记。
 被限流的请求按请求计一次 shed，等待者也会收到同一个错误，见 ADR 0008。
 */
+type singleflightResult struct {
+	link       *link.Link
+	originSpan trace.SpanContext
+}
+
 func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	key := keyPrefix + code
+
+	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.get")
+	defer span.End()
 
 	cached, result := r.readCache(ctx, key, code)
 	if result == resultHit {
@@ -298,27 +312,45 @@ func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error)
 		*/
 		if cached == nil || !cached.Servable(time.Now()) {
 			logx.SetCacheResult(ctx, "neg_hit")
+			span.SetAttributes(attribute.String("cache.result", "neg_hit"))
 			if cached != nil {
 				_ = r.rdb.Del(ctx, key).Err()
 			}
 			return nil, link.ErrNotFound
 		}
 		logx.SetCacheResult(ctx, resultHit)
+		span.SetAttributes(attribute.String("cache.result", resultHit))
 		return cached, nil
 	}
 	if err := ctx.Err(); err != nil {
+		span.SetAttributes(attribute.String("cache.result", "canceled"))
 		return nil, err
 	}
 	logx.SetCacheResult(ctx, result)
 
-	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数。
-	l, err, _ := doTyped[*link.Link](&r.group, key, func() (*link.Link, error) {
+	// shared 丢掉：每个请求在进 singleflight 之前已经按自己的读取结果记过数；等待者通过 Span Link 关联领头回源 span。
+	leader := false
+	res, err, shared := doTyped[singleflightResult](&r.group, key, func() (singleflightResult, error) {
+		leader = true
 		fetchCtx, cancel := fetchContext(ctx, r.fetchTimeout)
 		defer cancel()
 
+		fetchCtx, fetchSpan := otel.Tracer(cacheTracerName).Start(fetchCtx, "cache.origin_fetch",
+			trace.WithAttributes(attribute.String("cache.path", result)),
+		)
+		defer fetchSpan.End()
+
 		found, err := r.readStore(fetchCtx, code, result)
 		if err != nil && !errors.Is(err, link.ErrNotFound) {
-			return nil, err // 真正的错误不写缓存，下次请求应该重试
+			if shedErr, ok := errors.AsType[fetchShedError](err); ok {
+				fetchSpan.SetAttributes(
+					attribute.Bool("cache.shed", true),
+					attribute.String("cache.shed.path", shedErr.path),
+				)
+			}
+			fetchSpan.RecordError(err)
+			fetchSpan.SetStatus(codes.Error, err.Error())
+			return singleflightResult{originSpan: fetchSpan.SpanContext()}, err // 真正的错误不写缓存，下次请求应该重试
 		}
 		/*
 			Redis 读失败走降级通道时不再回写同一个不可达的 Redis，
@@ -331,14 +363,34 @@ func (r *Reader) GetByCode(ctx context.Context, code string) (*link.Link, error)
 			*/
 			r.writeCacheBestEffort(fetchCtx, key, found, writeNX)
 		}
-		return found, err
+		return singleflightResult{link: found, originSpan: fetchSpan.SpanContext()}, err
 	})
+
+	span.SetAttributes(
+		attribute.String("cache.result", result),
+		attribute.Bool("cache.singleflight.shared", shared),
+		attribute.Bool("cache.singleflight.leader", leader),
+	)
+	if !leader && res.originSpan.IsValid() {
+		span.AddLink(trace.Link{
+			SpanContext: res.originSpan,
+			Attributes:  []attribute.KeyValue{attribute.String("cache.link_reason", "singleflight_waiter")},
+		})
+	}
 	if ctx.Err() == nil {
 		if shedErr, ok := errors.AsType[fetchShedError](err); ok {
 			r.shed.WithLabelValues(shedErr.path).Inc()
+			span.SetAttributes(
+				attribute.Bool("cache.shed", true),
+				attribute.String("cache.shed.path", shedErr.path),
+			)
 		}
 	}
-	return l, err
+	if err != nil && !errors.Is(err, link.ErrNotFound) && !errors.Is(err, context.Canceled) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return res.link, err
 }
 
 /*
@@ -468,20 +520,30 @@ readCache 在调用方 ctx 已结束时返回 resultSkipped，不计数也不记
 字段名也不区分大小写，所以 URL 为空或 Code 对不上也算坏数据。
 */
 func (r *Reader) readCache(ctx context.Context, key, code string) (cached *link.Link, result string) {
+	readCtx, span := otel.Tracer(cacheTracerName).Start(ctx, "redis.get",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system.name", "redis"),
+			attribute.String("db.operation.name", "GET"),
+		),
+	)
 	start := time.Now()
 	defer func() {
-		if result == resultSkipped {
-			return
+		if result != resultSkipped {
+			r.gets.WithLabelValues(result).Inc()
+			r.duration.WithLabelValues(operationGet, result).Observe(time.Since(start).Seconds())
+			span.SetAttributes(attribute.String("cache.result", result))
+		} else {
+			span.SetAttributes(attribute.String("cache.result", "canceled"))
 		}
-		r.gets.WithLabelValues(result).Inc()
-		r.duration.WithLabelValues(operationGet, result).Observe(time.Since(start).Seconds())
+		span.End()
 	}()
 
-	data, err := r.rdb.Get(ctx, key).Bytes()
+	data, err := r.rdb.Get(readCtx, key).Bytes()
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &cached); err != nil || !usableCachedLink(cached, code) {
-			_ = r.rdb.Del(ctx, key).Err()
+			_ = r.rdb.Del(readCtx, key).Err()
 			return nil, resultMiss
 		}
 		return cached, resultHit
@@ -490,6 +552,8 @@ func (r *Reader) readCache(ctx context.Context, key, code string) (cached *link.
 	case ctx.Err() != nil:
 		return nil, resultSkipped
 	default:
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, resultFallback
 	}
 }
@@ -575,15 +639,31 @@ func (r *Reader) writeCache(ctx context.Context, key string, l *link.Link, mode 
 		return fmt.Errorf("marshal cache value: %w", marshalErr)
 	}
 
+	opName := "SET"
+	spanName := "redis.set"
+	if mode == writeNX {
+		opName = "SETNX"
+		spanName = "redis.setnx"
+	}
+	writeCtx, span := otel.Tracer(cacheTracerName).Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system.name", "redis"),
+			attribute.String("db.operation.name", opName),
+			attribute.Bool("cache.negative", l == nil),
+		),
+	)
+	defer span.End()
+
 	start := time.Now()
 	var (
 		written bool
 		setErr  error
 	)
 	if mode == writeNX {
-		written, setErr = r.rdb.SetNX(ctx, key, data, jitteredTTL(ttl)).Result()
+		written, setErr = r.rdb.SetNX(writeCtx, key, data, jitteredTTL(ttl)).Result()
 	} else {
-		setErr = r.rdb.Set(ctx, key, data, jitteredTTL(ttl)).Err()
+		setErr = r.rdb.Set(writeCtx, key, data, jitteredTTL(ttl)).Err()
 		written = setErr == nil
 	}
 	/*
@@ -591,6 +671,7 @@ func (r *Reader) writeCache(ctx context.Context, key string, l *link.Link, mode 
 		管理写的 ctx 是独立超时；这段超时也算没写上缓存，要记下来。
 	*/
 	if setErr != nil && ctx.Err() != nil && mode == writeNX {
+		span.SetAttributes(attribute.String("cache.write_result", "canceled"))
 		return nil
 	}
 	result := writeSuccess
@@ -602,7 +683,10 @@ func (r *Reader) writeCache(ctx context.Context, key string, l *link.Link, mode 
 	}
 	r.writes.WithLabelValues(result).Inc()
 	r.duration.WithLabelValues(operationSet, result).Observe(time.Since(start).Seconds())
+	span.SetAttributes(attribute.String("cache.write_result", result))
 	if setErr != nil {
+		span.RecordError(setErr)
+		span.SetStatus(codes.Error, setErr.Error())
 		return fmt.Errorf("set cache: %w", setErr)
 	}
 	return nil

@@ -9,12 +9,19 @@ import (
 	"log/slog"
 	"net/url"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"shortlink/internal/audit"
 	"shortlink/internal/cache"
 	"shortlink/internal/job"
 	"shortlink/internal/link"
 	"shortlink/internal/safehttp"
 )
+
+const riskTracerName = "shortlink/risk"
 
 // LinkBanner 是风控处理器需要的最小封禁能力，由 cache.Store 实现。
 type LinkBanner interface {
@@ -63,7 +70,9 @@ func NewHandler(opts HandlerOptions) job.Handler {
 		}
 
 		verdict, hit := opts.Cache.Get(ctx, p.URL)
-		if !hit {
+		if hit {
+			trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("risk.cache.hit", true))
+		} else {
 			u, err := url.Parse(p.URL)
 			if err != nil || u.Hostname() == "" {
 				return job.Permanent(fmt.Errorf("parse target url: %w", safehttp.ErrInvalidScheme))
@@ -72,13 +81,25 @@ func NewHandler(opts HandlerOptions) job.Handler {
 				return job.Defer(delay, "host rate limited: "+u.Hostname())
 			}
 
-			verdict, err = opts.Scanner.Scan(ctx, p.URL)
+			scanCtx, span := otel.Tracer(riskTracerName).Start(ctx, "risk.scan",
+				trace.WithSpanKind(trace.SpanKindClient),
+				trace.WithAttributes(attribute.Bool("risk.cache.hit", false)),
+			)
+			verdict, err = opts.Scanner.Scan(scanCtx, p.URL)
 			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				span.End()
 				if errors.Is(err, safehttp.ErrBlockedAddress) || errors.Is(err, safehttp.ErrBlockedPort) || errors.Is(err, safehttp.ErrInvalidScheme) || errors.Is(err, safehttp.ErrTooManyRedirects) {
 					return job.Permanent(err)
 				}
 				return err
 			}
+			span.SetAttributes(attribute.Bool("risk.verdict.unsafe", verdict.Unsafe))
+			if verdict.Reason != "" {
+				span.SetAttributes(attribute.String("risk.verdict.reason", string(verdict.Reason)))
+			}
+			span.End()
 			if !verdict.Uncacheable {
 				opts.Cache.Set(ctx, p.URL, verdict)
 			}

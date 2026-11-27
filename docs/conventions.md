@@ -31,7 +31,7 @@ AI 助手每次对话必读的协作边界、验证命令与反模式红线见�
 
 ## 结构化日志与宽访问日志（`internal/logx`）
 
-- **统一根日志装配**：各进程统一通过 `logx.New`（配置加载失败或纯 CLI 兜底路径用 `logx.NewFallback`）构建 `*slog.Logger`，不裸用 `slog.Default()`，确保全局脱敏、`LevelVar` 动态调级与 `context` 顶层字段自动注入（`request_id`、`tenant_id`、`job_id`、`job_kind`）一致生效。
+- **统一根日志装配**：各进程统一通过 `logx.New`（配置加载失败或纯 CLI 兜底路径用 `logx.NewFallback`）构建 `*slog.Logger`，不裸用 `slog.Default()`，确保全局脱敏、`LevelVar` 动态调级与 `context` 顶层字段自动注入（`request_id`、`tenant_id`、`job_id`、`job_kind`、`trace_id`、`span_id`）一致生效。
 - **宽访问日志（Canonical Log Line）**：HTTP 请求期上下文维度通过 `logx.SetActor`、`logx.SetCacheResult`、`logx.SetError`、`logx.SetRateLimited` 汇总进挂载在 `context` 上的 `RequestEvent`（类比 Java MDC 的请求级摘要），请求结束时由外层 `observe` 中间件统一写出唯一一条访问日志；业务 handler 不重复打印请求日志。
 
 ## 数据库、SQL 与 PostgreSQL 实践
@@ -49,7 +49,7 @@ AI 助手每次对话必读的协作边界、验证命令与反模式红线见�
 - **自动化护栏分工**：能用工具拦住的约束尽量下沉到检查脚本，而不是堆在文档里：
   - `make fmt-check`：`gofmt` 格式检查。
   - `make vet` & `make lint`：`go vet` 与 `.golangci.yml`（启用 `standard` 及 `errorlint`、`nilerr`、`bodyclose`、`sqlclosecheck`、`rowserrcheck`、`copyloopvar`、`misspell`、`durationcheck`、`nolintlint`）。
-  - `make arch-check`：校验 `cmd/redirector` 与核心底座包（`logx`、`httpx`、`config`、`safehttp`、`pgdb`、`pgredirect`、`identity`、`ratelimit`、`mailer`）的单向静态依赖边界。
+  - `make arch-check`：校验 `cmd/redirector` 与核心底座包（`logx`、`httpx`、`tracex`、`config`、`safehttp`、`pgdb`、`pgredirect`、`identity`、`ratelimit`、`mailer`）的单向静态依赖边界，以及全仓 `otel/sdk` 与导出器的隔离边界。
 
 ## Git 提交规范
 

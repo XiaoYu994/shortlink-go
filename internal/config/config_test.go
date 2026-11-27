@@ -18,18 +18,20 @@ import (
 
 func baseTestEnv() map[string]string {
 	return map[string]string{
-		"DATABASE_URL":          "postgres://localhost/shortlink",
-		"REDIS_URL":             "redis://localhost:6379/0",
-		"DB_MAX_OPEN_CONNS":     "",
-		"DB_MAX_IDLE_CONNS":     "",
-		"DB_CONN_MAX_LIFETIME":  "",
-		"DB_CONN_MAX_IDLE_TIME": "",
-		"REQUEST_TIMEOUT":       "",
-		"SHUTDOWN_TIMEOUT":      "",
-		"DRAIN_DELAY":           "",
-		"CACHE_FETCH_TIMEOUT":   "",
-		"LOG_LEVEL":             "",
-		"LOG_FORMAT":            "",
+		"DATABASE_URL":                "postgres://localhost/shortlink",
+		"REDIS_URL":                   "redis://localhost:6379/0",
+		"DB_MAX_OPEN_CONNS":           "",
+		"DB_MAX_IDLE_CONNS":           "",
+		"DB_CONN_MAX_LIFETIME":        "",
+		"DB_CONN_MAX_IDLE_TIME":       "",
+		"REQUEST_TIMEOUT":             "",
+		"SHUTDOWN_TIMEOUT":            "",
+		"DRAIN_DELAY":                 "",
+		"CACHE_FETCH_TIMEOUT":         "",
+		"LOG_LEVEL":                   "",
+		"LOG_FORMAT":                  "",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
+		"OTEL_TRACES_SAMPLE_RATE":     "",
 	}
 }
 
@@ -46,6 +48,7 @@ func TestLoadBaseConfig(t *testing.T) {
 		LogLevel:          slog.LevelInfo,
 		LogFormat:         LogFormatText,
 		CacheFetchTimeout: DefaultCacheFetchTimeout,
+		Tracing:           DefaultTracingConfig(),
 	}
 
 	tests := []struct {
@@ -58,18 +61,20 @@ func TestLoadBaseConfig(t *testing.T) {
 		{
 			name: "explicit values",
 			env: map[string]string{
-				"DATABASE_URL":          "postgres://user:pass@db:5432/shortlink?sslmode=disable",
-				"DB_MAX_OPEN_CONNS":     "20",
-				"DB_MAX_IDLE_CONNS":     "4",
-				"DB_CONN_MAX_LIFETIME":  "1h30m",
-				"DB_CONN_MAX_IDLE_TIME": "5m",
-				"REQUEST_TIMEOUT":       "2s",
-				"SHUTDOWN_TIMEOUT":      "15s",
-				"DRAIN_DELAY":           "3s",
-				"CACHE_FETCH_TIMEOUT":   "500ms",
-				"REDIS_URL":             "rediss://user:pass@redis:6380/1",
-				"LOG_FORMAT":            "json",
-				"LOG_LEVEL":             "debug",
+				"DATABASE_URL":                "postgres://user:pass@db:5432/shortlink?sslmode=disable",
+				"DB_MAX_OPEN_CONNS":           "20",
+				"DB_MAX_IDLE_CONNS":           "4",
+				"DB_CONN_MAX_LIFETIME":        "1h30m",
+				"DB_CONN_MAX_IDLE_TIME":       "5m",
+				"REQUEST_TIMEOUT":             "2s",
+				"SHUTDOWN_TIMEOUT":            "15s",
+				"DRAIN_DELAY":                 "3s",
+				"CACHE_FETCH_TIMEOUT":         "500ms",
+				"REDIS_URL":                   "rediss://user:pass@redis:6380/1",
+				"LOG_FORMAT":                  "json",
+				"LOG_LEVEL":                   "debug",
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+				"OTEL_TRACES_SAMPLE_RATE":     "0.25",
 			},
 			want: BaseConfig{
 				Addr:        ":8080",
@@ -87,6 +92,10 @@ func TestLoadBaseConfig(t *testing.T) {
 				LogLevel:          slog.LevelDebug,
 				LogFormat:         LogFormatJSON,
 				CacheFetchTimeout: 500 * time.Millisecond,
+				Tracing: TracingConfig{
+					Endpoint:   "http://127.0.0.1:4318",
+					SampleRate: 0.25,
+				},
 			},
 		},
 		{name: "missing database url", env: map[string]string{"DATABASE_URL": ""}, wantErr: "DATABASE_URL is required"},
@@ -105,6 +114,12 @@ func TestLoadBaseConfig(t *testing.T) {
 		{name: "zero request timeout", env: map[string]string{"REQUEST_TIMEOUT": "0s"}, wantErr: "REQUEST_TIMEOUT must be positive"},
 		{name: "zero shutdown timeout", env: map[string]string{"SHUTDOWN_TIMEOUT": "0s"}, wantErr: "SHUTDOWN_TIMEOUT must be positive"},
 		{name: "cache fetch timeout exceeds request timeout", env: map[string]string{"REQUEST_TIMEOUT": "1s", "CACHE_FETCH_TIMEOUT": "2s"}, wantErr: "CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT"},
+		{name: "invalid otel endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "grpc://127.0.0.1:4317"}, wantErr: "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		{name: "otel endpoint with query", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318?foo=1"}, wantErr: "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		{name: "invalid otel sample rate", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "abc"}, wantErr: "OTEL_TRACES_SAMPLE_RATE"},
+		{name: "negative otel sample rate", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "-0.1"}, wantErr: "OTEL_TRACES_SAMPLE_RATE must be between 0 and 1"},
+		{name: "otel sample rate above 1", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "1.5"}, wantErr: "OTEL_TRACES_SAMPLE_RATE must be between 0 and 1"},
+		{name: "nan otel sample rate", env: map[string]string{"OTEL_TRACES_SAMPLE_RATE": "NaN"}, wantErr: "OTEL_TRACES_SAMPLE_RATE must be between 0 and 1"},
 	}
 
 	for _, tt := range tests {
@@ -202,13 +217,17 @@ func TestBaseConfigRedaction(t *testing.T) {
 		DatabaseURL: "postgres://shortlink:pg-secret-pass@db:5432/shortlink?sslmode=disable",
 		RedisURL:    "rediss://:redis-secret-pass@redis:6380/0",
 		LogFormat:   LogFormatJSON,
+		Tracing: TracingConfig{
+			Endpoint:   "https://user:otel-secret-pass@otel.example.com:4318",
+			SampleRate: 0.5,
+		},
 	}
 	var buf bytes.Buffer
 	logger, _ := base.NewLoggerWithService(&buf, "config-test")
 	logger.Info("dump", "base", base)
 
 	combined := buf.String() + "\n" + fmt.Sprintf("%+v", base)
-	for _, secret := range []string{"pg-secret-pass", "redis-secret-pass"} {
+	for _, secret := range []string{"pg-secret-pass", "redis-secret-pass", "otel-secret-pass"} {
 		if strings.Contains(combined, secret) {
 			t.Errorf("secret %q leaked in config output: %s", secret, combined)
 		}

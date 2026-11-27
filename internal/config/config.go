@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -36,10 +37,32 @@ const (
 	// DefaultCacheFetchTimeout 为进程未显式覆写时的默认缓存回源/复查超时。
 	DefaultCacheFetchTimeout = time.Second
 
+	// DefaultTraceSampleRate 为开启 OTLP 导出时的默认采样率（1.0 全采，经 ParentBased 传播）。
+	DefaultTraceSampleRate = 1.0
+
 	// LogFormatText / LogFormatJSON 区分本地可读日志与生产结构化采集日志。
 	LogFormatText = "text"
 	LogFormatJSON = "json"
 )
+
+/*
+TracingConfig 控制进程级 OpenTelemetry 追踪导出（ADR 0032）。
+Endpoint 为空时追踪保持默认 Noop（零网络与协程开销）。
+*/
+type TracingConfig struct {
+	Endpoint   string  // OTEL_EXPORTER_OTLP_ENDPOINT，为空时关闭追踪
+	SampleRate float64 // OTEL_TRACES_SAMPLE_RATE，[0, 1]，默认 1.0
+}
+
+// Enabled 报告是否配置了 OTLP 追踪导出端点。
+func (c TracingConfig) Enabled() bool {
+	return c.Endpoint != ""
+}
+
+// DefaultTracingConfig 返回追踪配置的默认值（关闭导出，默认采样率 1.0）。
+func DefaultTracingConfig() TracingConfig {
+	return TracingConfig{SampleRate: DefaultTraceSampleRate}
+}
 
 /*
 BaseConfigDefaults 指定进程级别的默认监听与缓存参数。
@@ -74,6 +97,8 @@ type BaseConfig struct {
 
 	// CacheFetchTimeout 是单次回源或写后复查的超时，独立于请求时限，不能超过 REQUEST_TIMEOUT。
 	CacheFetchTimeout time.Duration
+	// Tracing 是 OpenTelemetry OTLP/HTTP 追踪导出配置；Endpoint 为空时保持 Noop。
+	Tracing TracingConfig
 }
 
 // LoadBaseConfig 加载并校验各进程共用的基础环境变量。
@@ -92,6 +117,7 @@ func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
 		LogLevel:          slog.LevelInfo,
 		LogFormat:         LogFormatText,
 		CacheFetchTimeout: defaults.CacheFetchTimeout,
+		Tracing:           DefaultTracingConfig(),
 	}
 
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
@@ -132,6 +158,10 @@ func LoadBaseConfig(defaults BaseConfigDefaults) (BaseConfig, error) {
 		return BaseConfig{}, err
 	}
 	if cfg.CacheFetchTimeout, err = EnvDuration("CACHE_FETCH_TIMEOUT", cfg.CacheFetchTimeout); err != nil {
+		return BaseConfig{}, err
+	}
+	cfg.Tracing.Endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	if cfg.Tracing.SampleRate, err = EnvFloat("OTEL_TRACES_SAMPLE_RATE", cfg.Tracing.SampleRate); err != nil {
 		return BaseConfig{}, err
 	}
 
@@ -195,6 +225,14 @@ func validateBase(cfg BaseConfig) error {
 	}
 	if cfg.CacheFetchTimeout > cfg.RequestTimeout {
 		return errors.New("CACHE_FETCH_TIMEOUT must not exceed REQUEST_TIMEOUT")
+	}
+	if cfg.Tracing.Endpoint != "" {
+		if err := ValidateIssuerURL("OTEL_EXPORTER_OTLP_ENDPOINT", cfg.Tracing.Endpoint); err != nil {
+			return err
+		}
+	}
+	if math.IsNaN(cfg.Tracing.SampleRate) || cfg.Tracing.SampleRate < 0 || cfg.Tracing.SampleRate > 1 {
+		return errors.New("OTEL_TRACES_SAMPLE_RATE must be between 0 and 1")
 	}
 	return nil
 }

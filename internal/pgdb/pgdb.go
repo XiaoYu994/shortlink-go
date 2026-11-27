@@ -1,5 +1,5 @@
 /*
-Package pgdb 提供无业务依赖的 PostgreSQL 连接池打开与驱动约束错误判定（ADR 0024）。
+Package pgdb 提供无业务依赖的 PostgreSQL 连接池打开、原生 pgx.QueryTracer 追踪与驱动约束错误判定（ADR 0024、ADR 0032）。
 供 pgredirect、postgres 和 migrate 共用，确保 cmd/redirector 不拖入任何管理域或鉴权包。
 */
 package pgdb
@@ -11,8 +11,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // PoolConfig 是数据库连接池参数。启动时由配置加载填好，再传给 Open。
@@ -38,10 +39,12 @@ Open 打开 PostgreSQL 连接池并确认能连上。
 DSN 形如 postgres://user:pass@host:5432/db?sslmode=disable。
 */
 func Open(ctx context.Context, dsn string, cfg PoolConfig) (*sql.DB, error) {
-	db, err := sql.Open("pgx", dsn)
+	connCfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
+	connCfg.Tracer = queryTracer{}
+	db := stdlib.OpenDB(*connCfg)
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)

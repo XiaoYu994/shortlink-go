@@ -60,11 +60,11 @@ RETURNING ` + webhookColumns
 
 	webhookExistsForTenantSQL = `SELECT EXISTS (SELECT 1 FROM webhooks WHERE id = $1 AND tenant_id = $2)`
 
-	insertWebhookTestJobSQL = `INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
-VALUES ($1, $2, $3::jsonb, 1)
+	insertWebhookTestJobSQL = `INSERT INTO jobs (kind, tenant_id, payload, max_attempts, traceparent)
+VALUES ($1, $2, $3::jsonb, 1, $4)
 RETURNING id`
 
-	enqueueWebhookEventSQL = `INSERT INTO jobs (kind, tenant_id, payload, max_attempts)
+	enqueueWebhookEventSQL = `INSERT INTO jobs (kind, tenant_id, payload, max_attempts, traceparent)
 SELECT $1,
        w.tenant_id,
        jsonb_build_object(
@@ -74,9 +74,10 @@ SELECT $1,
            'occurred_at', $4::timestamptz,
            'data', $5::jsonb
        ),
-       $6
+       $6,
+       $7
 FROM webhooks w
-WHERE w.tenant_id = $7
+WHERE w.tenant_id = $8
   AND w.enabled = TRUE
   AND $3::text = ANY(w.events)`
 
@@ -446,7 +447,7 @@ func (s *Store) EnqueueWebhookTest(ctx context.Context, tenantID, webhookID int6
 
 		var jobID int64
 		if err := tx.QueryRowContext(ctx, insertWebhookTestJobSQL,
-			job.KindWebhookDeliver, tenantID, string(payloadJSON),
+			job.KindWebhookDeliver, tenantID, string(payloadJSON), traceparentFromContext(ctx),
 		).Scan(&jobID); err != nil {
 			return fmt.Errorf("enqueue webhook test: insert job: %w", err)
 		}
@@ -501,7 +502,7 @@ func enqueueWebhookEventTx(
 	}
 	if _, err := tx.ExecContext(ctx, enqueueWebhookEventSQL,
 		job.KindWebhookDeliver, eventID, string(event), occurredAt.UTC(), string(dataJSON),
-		webhook.DefaultMaxAttempts, tenantID,
+		webhook.DefaultMaxAttempts, traceparentFromContext(ctx), tenantID,
 	); err != nil {
 		return fmt.Errorf("enqueue webhook %s: %w", event, err)
 	}

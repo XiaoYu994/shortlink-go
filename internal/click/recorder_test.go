@@ -7,12 +7,18 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 func discardLogger() *slog.Logger {
@@ -632,4 +638,45 @@ func labelsMatch(got []*dto.LabelPair, want map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func TestRecorderTracingFlushSpan(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(t.Context())
+		otel.SetTracerProvider(noop.NewTracerProvider())
+	})
+
+	var gotSpanInStore atomic.Bool
+	store := &tracingStore{onRecord: func(ctx context.Context) {
+		gotSpanInStore.Store(trace.SpanContextFromContext(ctx).IsValid())
+	}}
+	r := New(store, discardLogger(), prometheus.NewRegistry(), Options{Buffer: 8, BatchSize: 10, Interval: time.Hour})
+	r.Record(Click{LinkID: 7})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := r.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !gotSpanInStore.Load() {
+		t.Error("expected active trace span inside RecordClicks ctx")
+	}
+	spans := exp.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "click.flush" {
+		t.Fatalf("spans = %+v, want single click.flush", spans)
+	}
+}
+
+type tracingStore struct {
+	onRecord func(context.Context)
+}
+
+func (s *tracingStore) RecordClicks(ctx context.Context, _ []Click) error {
+	if s.onRecord != nil {
+		s.onRecord(ctx)
+	}
+	return nil
 }

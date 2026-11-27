@@ -39,6 +39,7 @@ STUB_PID=
 WEBHOOK_STUB_PID=
 SMTP_STUB_PID=
 SMS_STUB_PID=
+OTLP_STUB_PID=
 WATCHDOG_PID=
 
 cleanup() {
@@ -47,7 +48,7 @@ cleanup() {
 		kill "$WATCHDOG_PID" 2>/dev/null || true
 		wait "$WATCHDOG_PID" 2>/dev/null || true
 	fi
-	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}" "${WEBHOOK_STUB_PID:-}" "${SMTP_STUB_PID:-}" "${SMS_STUB_PID:-}"; do
+	for pid in "${REDIRECTOR_PID:-}" "${CONSOLE_PID:-}" "${WORKER_PID:-}" "${STUB_PID:-}" "${WEBHOOK_STUB_PID:-}" "${SMTP_STUB_PID:-}" "${SMS_STUB_PID:-}" "${OTLP_STUB_PID:-}"; do
 		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 			kill -TERM "$pid" 2>/dev/null || true
 			i=0
@@ -203,6 +204,7 @@ risk_stub_port=${SMOKE_RISK_STUB_PORT:-18089}
 webhook_stub_port=${SMOKE_WEBHOOK_STUB_PORT:-18090}
 smtp_stub_port=${SMOKE_SMTP_STUB_PORT:-18091}
 sms_stub_port=${SMOKE_SMS_STUB_PORT:-18092}
+otlp_stub_port=${SMOKE_OTLP_STUB_PORT:-18093}
 REDIRECTOR_BASE=http://$redirector_addr
 REDIRECTOR_OPS_BASE=http://$redirector_ops_addr
 CONSOLE_BASE=http://$console_addr
@@ -211,6 +213,9 @@ WORKER_BASE=http://$worker_addr
 RISK_STUB_HOST=127.0.0.1:$risk_stub_port
 WEBHOOK_STUB_HOST=127.0.0.1:$webhook_stub_port
 SMS_STUB_HOST=127.0.0.1:$sms_stub_port
+SMOKE_OTLP_ENDPOINT=http://127.0.0.1:$otlp_stub_port
+SMOKE_TRACE_ID=4bf92f3577b34da6a3ce929d0e0e4736
+SMOKE_TRACEPARENT="00-${SMOKE_TRACE_ID}-00f067aa0ba902b7-01"
 SMOKE_SMS_TOKEN=smoke-sms-token
 SMOKE_WEBHOOK_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 export LOG_LEVEL=error
@@ -306,9 +311,79 @@ while ! curl -fsS --max-time 1 "http://$SMS_STUB_HOST/health" >/dev/null 2>&1; d
 	sleep 0.1
 done
 
+# 本地 OTLP/HTTP 接收桩：记录三进程导出的路径、载荷长度及识别到的 service.name，供停机后校验。
+cat >"$TMP/otlp_stub.py" <<'EOF'
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+out_path = sys.argv[2]
+
+
+class OTLPHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        services = []
+        if b"redirector" in body:
+            services.append("redirector")
+        if b"console-worker" in body:
+            services.append("console-worker")
+        if b"console" in body.replace(b"console-worker", b""):
+            services.append("console")
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"path": self.path, "bytes": len(body), "services": services}) + "\n")
+            f.flush()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+
+class Server(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
+Server(("127.0.0.1", port), OTLPHandler).serve_forever()
+EOF
+
+: >"$TMP/otlp_requests.jsonl"
+python3 "$TMP/otlp_stub.py" "$otlp_stub_port" "$TMP/otlp_requests.jsonl" >"$TMP/otlp_stub.log" 2>&1 &
+OTLP_STUB_PID=$!
+i=0
+while ! curl -fsS --max-time 1 "http://127.0.0.1:$otlp_stub_port/health" >/dev/null 2>&1; do
+	kill -0 "$OTLP_STUB_PID" 2>/dev/null || fail '本地 OTLP 接收桩启动失败'
+	i=$((i + 1))
+	[ "$i" -ge 50 ] && fail '本地 OTLP 接收桩 5 秒内未就绪'
+	sleep 0.1
+done
+
 # 前缀赋值只影响这一条命令，盖过 .env 里的监听地址和回调地址。
-ADDR=$redirector_addr OPS_ADDR=$redirector_ops_addr ./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
+LOG_LEVEL=info \
+LOG_FORMAT=json \
+OTEL_EXPORTER_OTLP_ENDPOINT=$SMOKE_OTLP_ENDPOINT \
+OTEL_TRACES_SAMPLE_RATE=1 \
+ADDR=$redirector_addr \
+OPS_ADDR=$redirector_ops_addr \
+	./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
+LOG_LEVEL=info \
+LOG_FORMAT=json \
+OTEL_EXPORTER_OTLP_ENDPOINT=$SMOKE_OTLP_ENDPOINT \
+OTEL_TRACES_SAMPLE_RATE=1 \
 CONSOLE_ADDR=$console_addr \
 CONSOLE_OPS_ADDR=$console_ops_addr \
 OIDC_ISSUER=$SMOKE_OIDC_ISSUER \
@@ -1107,6 +1182,10 @@ while ! python3 -c "import socket; socket.create_connection(('127.0.0.1', int('$
 	sleep 0.1
 done
 
+LOG_LEVEL=info \
+LOG_FORMAT=json \
+OTEL_EXPORTER_OTLP_ENDPOINT=$SMOKE_OTLP_ENDPOINT \
+OTEL_TRACES_SAMPLE_RATE=1 \
 WORKER_ADDR=$worker_addr \
 WORKER_POLL_INTERVAL=50ms \
 RISK_HOST_RATE_LIMIT=100 \
@@ -1129,7 +1208,11 @@ assert_eq "$status" 200 'worker GET /readyz 状态码'
 assert_eq "$(cat "$TMP/body")" 'ok' 'worker GET /readyz 响应体'
 
 phish_url="http://$RISK_STUB_HOST/phish.html"
-status=$(request "$CONSOLE_BASE" POST /api/v1/links "{\"url\":\"$phish_url\"}")
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-X POST -H 'Content-Type: application/json' \
+	-H "Authorization: Bearer $SMOKE_API_KEY" \
+	-H "traceparent: $SMOKE_TRACEPARENT" \
+	-d "{\"url\":\"$phish_url\"}" "$CONSOLE_BASE/api/v1/links")
 assert_eq "$status" 201 '创建待风控短链状态码'
 risk_location=$(header Location)
 risk_code=${risk_location#/r/}
@@ -1147,8 +1230,34 @@ while :; do
 done
 grep -q '"ban_reason":"phishing"' "$TMP/body" || fail "风控自动封禁缺少 ban_reason=phishing: $(cat "$TMP/body")"
 
-status=$(request "$REDIRECTOR_BASE" GET "/r/$risk_code")
+status=$(curl -sS --max-time 10 -o "$TMP/body" -D "$TMP/headers" -w '%{http_code}' \
+	-H "traceparent: $SMOKE_TRACEPARENT" "$REDIRECTOR_BASE/r/$risk_code")
 assert_eq "$status" 404 '异步风控封禁后跳转应返回 404'
+
+echo 'smoke: tracing correlation (logs + jobs.traceparent)'
+job_tp=$(psql_cmd "$TEST_DATABASE_URL" -Atc "SELECT traceparent FROM jobs WHERE kind = 'link.risk_scan' AND payload->>'code' = '$risk_code' ORDER BY id DESC LIMIT 1")
+case "$job_tp" in
+	00-"$SMOKE_TRACE_ID"-*-01) ;;
+	*) fail "jobs.traceparent 未持久化入队 trace_id=$SMOKE_TRACE_ID: got '$job_tp'" ;;
+esac
+python3 -c "
+import json, sys
+
+def read_entries(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+console_ok = any(e.get('trace_id') == '$SMOKE_TRACE_ID' and e.get('span_id') for e in read_entries('$CONSOLE_LOG'))
+redir_ok = any(e.get('trace_id') == '$SMOKE_TRACE_ID' and e.get('span_id') for e in read_entries('$REDIRECTOR_LOG'))
+worker_ok = any(
+    e.get('msg') == 'risk scan banned link' and e.get('code') == '$risk_code'
+    and len(e.get('trace_id', '')) == 32 and len(e.get('span_id', '')) == 16
+    for e in read_entries('$WORKER_LOG')
+)
+if not (console_ok and redir_ok and worker_ok):
+    print(f'console_ok={console_ok} redir_ok={redir_ok} worker_ok={worker_ok}', file=sys.stderr)
+    sys.exit(1)
+" || fail '日志 Phase C trace_id/span_id 跨进程关联校验失败'
 
 status=$(request "$CONSOLE_BASE" GET '/api/v1/links?status=banned')
 assert_eq "$status" 200 'GET /api/v1/links?status=banned 状态码'
@@ -1338,10 +1447,25 @@ assert_eq "$redirector_status" 0 'redirector SIGTERM 后的退出码'
 assert_eq "$console_status" 0 'console SIGTERM 后的退出码'
 assert_eq "$worker_status" 0 'worker SIGTERM 后的退出码'
 
+python3 -c "
+import json, sys
+with open('$TMP/otlp_requests.jsonl', 'r', encoding='utf-8') as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+seen = set()
+for r in rows:
+    if r.get('path') == '/v1/traces' and r.get('bytes', 0) > 0:
+        seen.update(r.get('services', []))
+want = {'redirector', 'console', 'console-worker'}
+if not want.issubset(seen):
+    print(f'seen={seen}, want={want}', file=sys.stderr)
+    sys.exit(1)
+" || fail "停机后 OTLP 接收桩未收到全部三个服务的 traces: $(cat "$TMP/otlp_requests.jsonl")"
+
 echo 'smoke: minimal single-pg mode (no redis, no analytics, no risk scan)'
 psql_cmd "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DELETE FROM jobs" \
 	|| fail '清理极简模式前置 jobs 失败'
 
+OTEL_EXPORTER_OTLP_ENDPOINT= \
 REDIS_URL= \
 VISITOR_SALT= \
 FEATURE_ANALYTICS=false \
@@ -1351,6 +1475,7 @@ OPS_ADDR=$redirector_ops_addr \
 	./bin/redirector >"$REDIRECTOR_LOG" 2>&1 &
 REDIRECTOR_PID=$!
 
+OTEL_EXPORTER_OTLP_ENDPOINT= \
 REDIS_URL= \
 FEATURE_ANALYTICS=false \
 FEATURE_RISK_SCAN=false \
